@@ -128,6 +128,14 @@ static HANDLE WINAPI Hooked_CreateFileA(
                                 lpFileName, (double)size.QuadPart / (1024.0 * 1024.0),
                                 (double)g_currentMmapTotalBytes / (1024.0 * 1024.0));
                             OutputDebugStringA(buf);
+
+                            FILE* fLog = fopen("G3O_Streaming.log", "a");
+                            if (fLog) {
+                                fprintf(fLog, "Memory-mapped: %s (%.2f MB, total RAM: %.2f MB)\n",
+                                    lpFileName, (double)size.QuadPart / (1024.0 * 1024.0),
+                                    (double)g_currentMmapTotalBytes / (1024.0 * 1024.0));
+                                fclose(fLog);
+                            }
                         } else {
                             CloseHandle(hMapping);
                         }
@@ -176,6 +184,15 @@ static BOOL WINAPI Hooked_ReadFile(
 
                 g_mmapReadOperations++;
                 g_mmapBytesRead += toCopy;
+
+                if (g_mmapReadOperations % 2000 == 1) {
+                    FILE* fLog = fopen("G3O_Streaming.log", "a");
+                    if (fLog) {
+                        fprintf(fLog, "Streaming stats: %u RAM reads, %.2f MB read directly from RAM\n",
+                            g_mmapReadOperations, (double)g_mmapBytesRead / (1024.0 * 1024.0));
+                        fclose(fLog);
+                    }
+                }
 
                 LeaveCriticalSection(&g_archiveLock);
                 return TRUE;
