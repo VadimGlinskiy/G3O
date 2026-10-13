@@ -12,4 +12,5 @@ downloads/
 *.zip
 .vs/
 .idea/
-PLAN* - НЕ ТРОГАЙ PLAN.md!
+# Engineering plan (local only)
+PLAN*
