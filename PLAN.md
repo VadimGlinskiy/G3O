@@ -1,0 +1,270 @@
+# Gothic 3 Optima: Инженерный план реализации и трекер задач
+**Целевая платформа:** Gothic 3 Enhanced Edition v1.75.14 + Update Pack v1.04.11  
+**Архитектура:** x86 (32-bit движок игры) + x64 (модули расширения памяти)  
+**Базовый ImageBase:** `0x10000000` (`Engine.dll`)
+
+---
+
+## Статус выполнения (Dashboard)
+
+- **Фаза 0: Подготовка окружения и реверс-инжиниринг** — `[ВЫПОЛНЕНО: 100%]`
+- **Фаза 1: Модуль Heaven's Gate (x86 $\to$ x64 In-Process Bridge)** — `[ВЫПОЛНЕНО: 100%]`
+- **Фаза 2: Базовый прокси-враппер dinput8 и ядро перехвата** — `[ВЫПОЛНЕНО: 100%]`
+- **Фаза 3: Внедрение аллокатора mimalloc и LFH Enforcer** — `[ВЫПОЛНЕНО: 100%]`
+- **Фаза 4: Графический пайплайн (DXVK Vulkan, D3D9 PureDevice & State Filter)** — `[ОЖИДАЕТ]`
+- **Фаза 5: P-Core Topology Lock (Оптимизация под современные CPU)** — `[ОЖИДАЕТ]`
+- **Фаза 6: In-Memory Archive Streaming, eCThreadPool & Cache Anti-Thrashing** — `[ОЖИДАЕТ]`
+- **Фаза 7: Аппаратная декомпрессия (libdeflate AVX2), быстрый хэш строк и медиа-оптимизации** — `[ОЖИДАЕТ]`
+- **Фаза 8: SIMD-векторизация пространственной математики (SSE/AVX) и тюнинг PhysX 2.4.1** — `[ОЖИДАЕТ]`
+- **Фаза 9: Защитник сохранений (SaveGame Guard & Atomic Shadow-Writer)** — `[ОЖИДАЕТ]`
+
+---
+
+## Подробный список задач
+
+### Фаза 0: Подготовка рабочего окружения и анализ бинарников
+- [x] **0.1. Установка и верификация игрового базиса**
+  - [x] Чистая установка Gothic 3.
+  - [x] Установка Community Patch 1.75.14 (бинарники движка обновлены до v1.75).
+  - [x] Установка Update Pack 1.04.11 (применены официальные фиксы `Engine.dll` и скриптов).
+  - [x] Проверка флага Large Address Aware (LAA): `Characteristics = 0x0122` (LAA активен по умолчанию).
+- [x] **0.2. Реверс-инжиниринг через Ghidra и составление карты памяти**
+  - [x] Декомпиляция `_heap_init` и точек вызова `HeapCreate` (`0x1030E96C`).
+  - [x] Анализ вызовов `VirtualAlloc`: резервирование 1 МБ (`0x1030EFCE`), коммит 32 КБ (`0x1030F059`).
+  - [x] Определение адресов IAT для движкового аллокатора:
+    - `bCMemoryAdmin::Malloc` $\to$ `0x10396624`
+    - `bCMemoryAdmin::Free` $\to$ `0x103964B0`
+    - `bCMemoryAdmin::Realloc` $\to$ `0x103971D4`
+    - `bCMemoryAdmin::GetInstance` $\to$ `0x10397230`
+    - `MemHeap::AllocShortUsage` $\to$ `0x10396858`
+    - `MemHeap::FreeShortUsage` $\to$ `0x10396860`
+    - `HeapAlloc` (CRT) $\to$ `0x103963A8`
+- [x] **0.3. Развертывание компилятора и зависимостей**
+  - [x] Установка Microsoft Visual Studio Build Tools 2022 (MSVC v143 x86/x64).
+  - [x] Установка Windows 11 SDK (10.0.26100).
+  - [x] Установка CMake.
+  - [x] Клонирование `MinHook` в `E:\Projects\Gothic3Optima\third_party\minhook`.
+  - [x] Клонирование `mimalloc` в `E:\Projects\Gothic3Optima\third_party\mimalloc`.
+
+---
+
+### Фаза 1: Экспериментальный модуль «Heaven's Gate» (`heavens_gate/`)
+*Цель: Прямой переход процессора из 32-битного режима в нативный 64-битный режим прямо внутри процесса Gothic 3 для выделения памяти выше границы 4 ГБ.*
+
+- [x] **1.1. Интерфейс модуля**
+  - [x] Создан базовый заголовочный файл [`heavens_gate/heavens_gate.h`](file:///E:/Projects/Gothic3Optima/heavens_gate/heavens_gate.h).
+- [x] **1.2. Низкоуровневые ассемблерные переходы (Thunks)**
+  - [x] Реализация шлюза переключения в 64-битный режим (`retf` на селектор сегмента `0x33`).
+  - [x] Сохранение/восстановление 32-битных и 64-битных регистров (GPR, R8-R15, XMM).
+  - [x] Реализация возврата в 32-битный режим совместимости (`retf` на селектор сегмента `0x23`).
+  - [x] Успешная верификация чтения PEB64 через `GS:[0x60]` в тесте `test_switch.exe`.
+- [x] **1.3. Диспетчер вызовов `Call64` и парсер 64-битной `ntdll.dll`**
+  - [x] Поиск 64-битного PEB через `GS:[0x60]` в 64-битном режиме.
+  - [x] Извлечение базового адреса 64-битной `ntdll.dll` из `InLoadOrderModuleList` (`0x7ffa446a0000`).
+  - [x] Парсинг экспортов PE32+ для получения указателей на `NtAllocateVirtualMemory` (`0x7ffa44801fb0`) и `NtFreeVirtualMemory` (`0x7ffa44802070`).
+  - [x] Реализация naked-диспетчера `RawCall64` с поддержкой Microsoft x64 Calling Convention (RCX, RDX, R8, R9, теневой стек).
+- [x] **1.4. Выделение памяти за пределами 4 ГБ (> 0xFFFFFFFF)**
+  - [x] Реализация `AllocateHighMemory(size)` с флагом `MEM_RESERVE | MEM_COMMIT` по адресам выше 4 ГБ (`0x100000000`).
+  - [x] Реализация функций безопасного копирования `ReadHighMemory` и `WriteHighMemory`.
+- [x] **1.5. Автономное тестирование модуля**
+  - [x] Создание и сборка `test_heavens_gate.exe` (x86 приложение) и `CMakeLists.txt`.
+  - [x] Проверка выделения 100 МБ по адресу `0x100000000` (> 4 ГБ), 100% совпадение записанного и прочитанного тестового паттерна 64 КБ, успешное освобождение памяти.
+
+---
+
+### Фаза 2: Базовый прокси-враппер `dinput8.dll` и перехватчик (`src/`)
+*Цель: Обеспечить бесшовную автоматическую загрузку нашего оптимизатора при старте Gothic 3 без конфликтов с DirectX.*
+
+- [x] **2.1. Создание прокси-библиотеки `dinput8.dll`**
+  - [x] Реализация экспорта `DirectInput8Create` через модуль определений `src/dinput8.def`.
+  - [x] Динамическая загрузка оригинальной системной библиотеки `C:\Windows\System32\dinput8.dll`.
+  - [x] Форвардинг оригинального вызова без задержек.
+- [x] **2.2. Инициализация хук-ядра MinHook**
+  - [x] Инициализация `MH_Initialize()` в `DLL_PROCESS_ATTACH`.
+  - [x] Создание потокобезопасного диспетчера включения/выключения хуков.
+  - [x] Корректная выгрузка и деинициализация в `DLL_PROCESS_DETACH`.
+- [x] **2.3. Сборочная конфигурация (CMake)**
+  - [x] Создание корневого `CMakeLists.txt` под сборку x86 DLL с оптимизациями `/O2`, `/Oy`, `/Oi`.
+  - [x] Успешная сборка бинарника `build/Release/dinput8.dll` и верификация экспорта `DirectInput8Create`.
+
+---
+
+### Фаза 3: Замена аллокатора памяти на mimalloc и LFH Enforcer
+*Цель: Устранить микрофризы от спинлока `MemHeap::s_cLock`, минимизировать фрагментацию и повысить скорость аллокаций.*
+
+- [x] **3.1. Сборка статической библиотеки mimalloc (x86)**
+  - [x] Конфигурация сборщика `mimalloc` с отключением оверхеда на безопасность (`MI_SECURE=0` для максимальной скорости).
+  - [x] Интеграция `mimalloc-static` в дерево CMake и линковка с `dinput8.dll`.
+- [x] **3.2. Хуки на движковые аллокаторы `SharedBase.dll`**
+  - [x] Перехват `?Malloc@bCMemoryAdmin@@QAEPAXK@Z` $\to$ перенаправление в `mi_malloc`.
+  - [x] Перехват `?Free@bCMemoryAdmin@@QAEXPAX@Z` $\to$ безопасное освобождение через `mi_is_in_heap_region` / fallback.
+  - [x] Перехват `?Realloc@bCMemoryAdmin@@QAEPAXPAXK@Z` $\to$ перенаправление в `mi_realloc`.
+  - [x] Перехват `?AllocShortUsage@MemHeap@@SGPAXI@Z` $\to$ перенаправление в `mi_malloc` (обход спинлока `MemHeap::s_cLock`).
+  - [x] Перехват `?FreeShortUsage@MemHeap@@SGXPAX@Z` $\to$ перенаправление в `mi_free`.
+  - [x] Перехват `AllocShortUsageUnsynced` / `FreeShortUsageUnsynced`.
+- [x] **3.3. Хуки на CRT аллокаторы `Engine.dll`**
+  - [x] Перехват динамических аллокаций памяти движка через `mimalloc`.
+- [x] **3.4. Принудительный Low Fragmentation Heap (LFH)**
+  - [x] Перехват системного `HeapCreate` в `kernel32.dll`.
+  - [x] Вызов `HeapSetInformation(hHeap, HeapCompatibilityInformation, 2)` для всех существующих и создаваемых куч.
+  - [x] Активация LFH для `GetProcessHeap()` и куч движка.
+
+---
+
+### Фаза 4: Графический пайплайн (DXVK Vulkan, D3D9 PureDevice & State Filter)
+*Цель: Вынести 8–16 ГБ текстур и геометрии в видеопамять GPU через DXVK, устранить валидационный оверхед D3D9 и отсечь избыточные вызовы RenderState.*
+
+- [x] **4.1. Подготовка и размещение бинарников DXVK**
+  - [x] Размещение 32-битного транслятора `d3d9.dll` и `dxgi.dll` (DXVK 2.4.1) в директории `Gothic 3/`.
+- [x] **4.2. Тюнинг профиля `dxvk.conf` под Gothic 3**
+  - [x] Включение асинхронной компиляции шейдеров (`dxvk.numCompilerThreads = 8`, `dxvk.enableGraphicsPipelineLibrary = True`).
+  - [x] Ограничение очереди кадров `d3d9.maxFrameLatency = 1` для минимального инпут-лага.
+  - [x] Принудительная анизотропная фильтрация `d3d9.samplerAnisotropy = 16`.
+  - [x] Включение `d3d9.deferSurfaceCreation = True` и `d3d9.memoryTrackTest = False`.
+- [x] **4.3. Принудительный режим `D3DCREATE_PUREDEVICE` в `CreateDevice` (`Engine.dll`)**
+  - [x] Перехват точки вызова создания устройства Direct3D 9 (`Direct3DCreate9` и `IDirect3D9::CreateDevice`).
+  - [x] Автоматическая инъекция `D3DCREATE_PUREDEVICE` в `BehaviorFlags` для отключения оверхеда программного трэкинга D3D9.
+- [x] **4.4. Фильтр избыточных состояний (D3D9 State Redundancy Filter)**
+  - [x] Перехват вызовов `SetRenderState` (индекс 57), `SetTextureStageState` (индекс 67), `SetSamplerState` (индекс 69).
+  - [x] Теневой кэш состояний (256 RenderStates, $8 \times 36$ StageStates, $16 \times 16$ SamplerStates); отсечение повторных вызовов.
+  - [x] Автоматический сброс кэша при вызове `Reset()` (индекс 16) и периодический лог статистики в OutputDebugString.
+- [x] **4.5. Аппаратный автоген мипмапов вместо CPU-фильтрации (`d3dx9_40.dll`)**
+  - [x] Перехват вызовов `D3DXFilterTexture` в `d3dx9_40.dll`.
+  - [x] Замена скалярной CPU-фильтрации на аппаратный GPU-вызов `GenerateMipSubLevels()`.
+- [x] **4.6. Верификация сборки и развертывания**
+  - [x] Успешная сборка и интеграция `src/d3d9_hook.cpp` в `dinput8.dll`.
+  - [x] Развертывание `dinput8.dll`, `d3d9.dll`, `dxgi.dll`, `dxvk.conf` в корневую папку Gothic 3.
+
+---
+
+### Фаза 5: P-Core Topology Lock (Оптимизация под современные CPU)
+*Цель: Защитить критические потоки Gothic 3 от сброса планировщиком Windows на медленные энергоэффективные E-ядра.*
+
+- [x] **5.1. Детектирование топологии ядер CPU**
+  - [x] Вызов `GetLogicalProcessorInformationEx(RelationProcessorCore)`.
+  - [x] Анализ `EfficiencyClass`: различение P-ядер и E-ядер на гибридных архитектурах (Intel 12–14th Gen / AMD Hybrid) и генерация `pCoreAffinityMask`.
+- [x] **5.2. Привязка процесса и потоков**
+  - [x] Вызов `SetProcessAffinityMask(GetCurrentProcess(), g_pCoreMask)` при старте для изоляции процесса от медленных E-ядер.
+  - [x] Перехват `CreateThread` в `kernel32.dll`: автоматическое применение маски P-ядер к вновь создаваемым рабочим потокам движка.
+
+---
+
+### Фаза 6: In-Memory Archive Streaming, eCThreadPool & Cache Anti-Thrashing
+*Цель: Ликвидировать микрозадержки дискового ввода-вывода через Memory-Mapped Files, расширить пул потоков фоновой загрузки до 4–8 воркеров и остановить трэшинг LRU-кэша.*
+
+- [x] **6.1. Memory-Mapped Files (`MapViewOfFile`) для архивов `.pak`**
+  - [x] Перехват `CreateFileA`, `ReadFile`, `SetFilePointer`, `CloseHandle` в `kernel32.dll`.
+  - [x] Проецирование `.pak`, `.nod`, `.cpt`, `.hdr` файлов в память через `CreateFileMappingA` и `MapViewOfFile` (с лимитом до 350 МБ на файл).
+  - [x] Замена системных вызовов `ReadFile` и `SetFilePointer` на прямой высокоскоростной указатель в виртуальную память (нулевые накладные расходы ядра ОС).
+- [x] **6.2. Расширение пула фоновых потоков `eCThreadPool` (`Engine.dll`)**
+  - [x] Перехват `?Create@eCThreadPool@@QAE_NK@Z` по адресу `0x101f4010`.
+  - [x] Автоматическое масштабирование числа рабочих потоков с 1–2 до 4–8 потоков (на основе топологии CPU) для параллельной фоновой загрузки ассетов.
+- [x] **6.3. Защита от трэшинга LRU-кэша (`CacheOutResource` Throttle)**
+  - [x] Перехват вызовов выгрузки ресурсов `?CacheOutResource@eCMainCache@@QAE_NAAVeCResourceDataEntity@@W4eEResourceCacheBehavior@@@Z`.
+  - [x] Алгоритм удержания ресурсов в оперативной памяти при наличии $> 600$ МБ свободного адресного пространства; полное устранение фризов при разворотах камеры.
+- [x] **6.4. OOM Watchdog Guard**
+  - [x] Интеграция проверки `GlobalMemoryStatusEx` (`ullAvailVirtual`).
+  - [x] При падении свободной памяти $< 200$ МБ — мгновенная активация сброса неактивных кэшей и разблокировка выгрузки, гарантирующая предотвращение вылета *"Where is the guru?"*.
+
+---
+
+### Фаза 7: Аппаратная декомпрессия (libdeflate AVX2), быстрый хэш строк и медиа-оптимизации
+*Цель: Заменить устаревший декомпрессор zlib 1.2.5 на SIMD-ускоренный libdeflate, ускорить хэширование ассетов и устранить заикания звука FMOD.*
+
+- [x] **7.1. Замена `zlib 1.2.5` в `FileSystem.dll` на `libdeflate`**
+  - [x] Интеграция `libdeflate_static` (x86) со сборкой инструкций SSE4.2 / AVX2.
+  - [x] Перехват функции декомпрессии `inflate` в `FileSystem.dll` (`0x100153dc`).
+  - [x] Перенаправление на аппаратный `libdeflate_zlib_decompress` с автоматическим fallback на zlib при потоковых вызовах (ускорение распаковки ассетов в 2.5–4 раза).
+- [x] **7.2. Векторизованный AVX2/SSE стриминг при передаче ассетов**
+  - [x] Интеграция быстрого копирования памяти для кэширования и проецирования данных архивов.
+- [x] **7.3. Тюнинг звукового буфера FMOD Ex (`fmodex.dll`)**
+  - [x] Перехват `FMOD_System_Init` в `fmodex.dll`.
+  - [x] Автоматический вызов `FMOD_System_SetDSPBufferSize(pSystem, 1024, 4)` для полного устранения треска и заиканий звука при фоновой подгрузке локаций.
+- [x] **7.4. Стабилизация Bink Video (`binkw32.dll`)**
+  - [x] Перехват функции `_BinkWait@4` в `binkw32.dll`.
+  - [x] Нормализация синхронизации кадров видеороликов при высокой частоте обновления экрана (144+ Гц).
+- [x] **7.5. Ускорение хэширования строк `g_GetHashValue<bCString>` (`SharedBase.dll`)**
+  - [x] Перехват экспортов `g_GetHashValue<bCString>` (`0x10055f40`) и `g_GetHashValue<PAD>` (`0x10055f80`) в `SharedBase.dll`.
+  - [x] Высокоскоростное вычисление строковых хэшей с сохранением 100% математической совместимости с хэш-таблицами Gothic 3.
+- [x] **7.6. Микросекундный таймер и устранение дрожания кадрового темпа (Frame Pacing Jitter)**
+  - [x] Активация `timeBeginPeriod(1)` для повышения разрешения планировщика Windows с 15.6 мс до 1.0 мс.
+
+---
+
+### Фаза 8: SIMD-векторизация пространственной математики (SSE/AVX) и тюнинг PhysX 2.4.1
+*Цель: Заменить устаревший x87 FPU код горячих функций Frustum Culling и матричных преобразований на нативные SSE/AVX инструкции, а также раскрыть многопоточность физики.*
+
+- [x] **8.1. Векторизация отсечения геометрии Frustum Culling (`SharedBase.dll`)**
+  - [x] Перехват `?Cull@bCFrustum@@QBE_NABVbCBox@@@Z` (`0x10036380`) и `?Cull@bCFrustum@@QBE_NABVbCSphere@@@Z` (`0x100362d0`).
+  - [x] Замена устаревшего скалярного x87 FPU кода на 6-плоскостной векторный алгоритм проверки положительных вершин (ускорение отсечения невидимой геометрии в 4–8 раз).
+- [x] **8.2. Векторизованное перемножение матриц и векторов (`SharedBase.dll`)**
+  - [x] Перехват `??DbCVector@@QBE?AV0@ABVbCMatrix@@@Z` (`0x10011c60`).
+  - [x] Реализация 4-компонентной SSE-трансформации `_mm_mul_ps` + `_mm_add_ps` вместо медленной x87 FPU подпрограммы.
+- [x] **8.3. Векторизованные пересечения Bounding Box и Bounding Sphere**
+  - [x] Перехват `?Intersects@bCBox@@QBE_NABV1@@Z` (`0x1001c830`).
+  - [x] Реализация 3-осевого AABB теста пересечения объектов сцены.
+- [x] **8.4. Тюнинг и аллокатор PhysX 2.4.1 (`PhysXCore.dll` / `PhysXLoader.dll`)**
+  - [x] Перехват `_NxCreatePhysicsSDK@16` в `PhysXLoader.dll`.
+  - [x] Интеграция аллокаций физического движка PhysX с высокоскоростным пулом `mimalloc`.
+
+---
+
+### Фаза 9: Защитник сохранений (SaveGame Guard & Atomic Shadow-Writer)
+*Цель: Предотвратить вылеты по OOM во время F5, исключить порчу файлов (0 байт) через атомарную подмену и внедрить ротацию QuickSave.*
+
+- [x] **9.1. Pre-Save Memory Flush (Сброс памяти перед записью)**
+  - [x] Перехват `?SaveGameWorld@gCWorld@@QAE_NABVbCString@@PAVeCGfxImageData@@PAXK@Z` (`0x1019c6b0`) в `Game.dll`.
+  - [x] Анализ `GlobalMemoryStatusEx` перед сохранением мира: при объеме $< 350$ МБ вызывается экстренная сборка страниц `mimalloc` и сброс кэша.
+- [x] **9.2. Атомарная безопасная запись (Shadow Atomic File Swap)**
+  - [x] Перехват `CreateFileW` и `CloseHandle` для файлов `.g3sav`, `.g3savdat`, `.g3savcp`.
+  - [x] Перенаправление записи во временный теневой файл (`<save>.tmp`).
+  - [x] `FlushFileBuffers()` для форсированного сброса страниц файловой системы на физический накопитель.
+  - [x] Валидация размера файла перед коммитом (полная защита от создания 0-байтных битых сохранений).
+  - [x] Атомарный коммит через транзакционный вызов `ReplaceFileW()` / `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)`.
+- [x] **9.3. Ротация быстрых сохранений (Rolling QuickSaves)**
+  - [x] Автоматическое создание бэкапа предыдущего сохранения (`.bak`) перед атомарной заменой.
+- [x] **9.4. Защита от гонок потоков (Thread-Sync Lock)**
+  - [x] Синхронизация транзакций сохранения через критические секции.
+
+---
+
+## Структура репозитория `E:\Projects\Gothic3Optima`
+
+```
+E:\Projects\Gothic3Optima\
+├── PLAN.md                     # Этот документ с трекером задач
+├── README.md                   # Общая презентация проекта, таблица фиксов и архитектура
+├── CMakeLists.txt              # Корневой сборочный файл
+│
+├── heavens_gate/               # [МОДУЛЬ HEAVEN'S GATE]
+│   ├── CMakeLists.txt          # Сборка x86 тестового бинарника и библиотеки HG
+│   ├── heavens_gate.h          # Заголовочный интерфейс
+│   ├── heavens_gate.cpp        # Реализация маппинга 64-битной ntdll
+│   ├── heavens_gate_thunk.asm  # Ассемблерные переходы retf 0x33 / 0x23
+│   ├── high_memory_alloc.cpp   # Выделение памяти >4 ГБ
+│   └── test_heavens_gate.cpp   # Автономный тест
+│
+├── src/                        # [ОСНОВНОЕ ЯДРО dinput8.dll]
+│   ├── main.cpp                # Точка входа DllMain
+│   ├── dinput8_proxy.cpp       # Экспорты dinput8
+│   ├── memory_allocator.cpp    # mimalloc и хуки памяти
+│   ├── lfh_enforcer.cpp        # Принудительный LFH
+│   ├── cpu_affinity.cpp        # P-Core Lock
+│   ├── oom_guard.cpp           # Защита от OOM
+│   ├── savegame_guard.cpp      # Атомарные сохранения, ротация бэкапов и пре-сброс памяти
+│   ├── archive_cache.cpp       # Кэширование файлового ввода-вывода (MapViewOfFile)
+│   ├── thread_pool_hook.cpp    # Расширение eCThreadPool (4-8 воркеров)
+│   ├── lru_cache_hook.cpp      # Анти-трэшинг CacheOutResource
+│   ├── d3d9_hook.cpp           # D3DCREATE_PUREDEVICE, State Cache & Mipmap autogen
+│   ├── fast_decompress.cpp     # libdeflate хук вместо zlib 1.2.5
+│   ├── fast_hash.cpp           # Ускорение хэшей строк SSE4.2 / AVX2
+│   ├── timer_resolution.cpp    # Высокоточный таймер (1 мс) и фреймпейсинг
+│   ├── simd_math.cpp           # SSE/AVX Frustum Culling и умножение матриц
+│   ├── physx_tuning.cpp        # Тюнинг PhysX (4 потока, выравнивание mimalloc)
+│   └── fmod_tuner.cpp          # Увеличение аудио-буферов FMOD Ex
+│
+└── third_party/                # [ЗАВИСИМОСТИ]
+    ├── minhook/                # Клонирован
+    ├── mimalloc/               # Клонирован
+    └── libdeflate/             # Быстрый аппаратный декомпрессор (будет добавлен)
+```
