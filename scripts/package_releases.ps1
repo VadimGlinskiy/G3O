@@ -15,10 +15,9 @@ if (-not (Test-Path $bin)) {
     exit 1
 }
 
-if (Test-Path $packagesDir) {
-    Remove-Item $packagesDir -Recurse -Force
+if (-not (Test-Path $packagesDir)) {
+    New-Item -ItemType Directory -Path $packagesDir -Force | Out-Null
 }
-New-Item -ItemType Directory -Path $packagesDir -Force | Out-Null
 
 # ------------------------------------------------------------------------------
 # 1. Package Gothic3Optima-v1.0.0-Core.zip
