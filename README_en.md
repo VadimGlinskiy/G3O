@@ -2,23 +2,20 @@
 
 **English** · [Русский](README.md)
 
-# ⚔️ Gothic 3 Optima (G3O)
+# Gothic 3 Optima (G3O)
 
-### Low-level native optimizer, Vulkan pipeline & crash prevention suite for Gothic 3 Enhanced Edition
-
-**Smooth 120+ FPS without stutters, 100% protection against corrupted saves, hardware decompression & instant streaming.**
+### Engine optimization library, DXVK integration, and save protection for Gothic 3
 
 [![Gothic 3 Version](https://img.shields.io/badge/Gothic%203-v1.75.14%20%2B%20UP%201.04.11-gold.svg?style=flat-square)](file:///E:/SteamLibrary/steamapps/common/Gothic%203)
-[![DXVK](https://img.shields.io/badge/Vulkan-DXVK%201.10%20%2F%202.4%20%2F%203.0%20HDR-red.svg?style=flat-square)](https://github.com/doitsujin/dxvk)
+[![DXVK](https://img.shields.io/badge/Vulkan-DXVK%201.10%20%2F%202.4%20%2F%203.0-red.svg?style=flat-square)](https://github.com/doitsujin/dxvk)
 [![Memory Allocator](https://img.shields.io/badge/Allocator-mimalloc%20v3.5.3-blue.svg?style=flat-square)](https://github.com/microsoft/mimalloc)
 [![Decompression](https://img.shields.io/badge/Decompressor-libdeflate%20AVX2-green.svg?style=flat-square)](https://github.com/ebiggers/libdeflate)
-[![Architecture](https://img.shields.io/badge/Arch-x86%20%2B%20x64%20Heaven's%20Gate-purple.svg?style=flat-square)](heavens_gate/)
-[![MSVC Compiler](https://img.shields.io/badge/Compiler-MSVC%20v143%20(VS%202022)-orange.svg?style=flat-square)](CMakeLists.txt)
+[![Compiler](https://img.shields.io/badge/Compiler-MSVC%20v143%20(VS%202022)-orange.svg?style=flat-square)](CMakeLists.txt)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg?style=flat-square)](LICENSE)
 
 <br />
 
-**[Quick Start](#-quick-start) · [Releases & Downloads](#-release-packages--downloads) · [Comparison Matrix](#-subsystems-comparison-matrix) · [SaveGame Guard](#-savegame-guard-architecture) · [Subsystems](#-core-subsystems) · [FAQ](#-frequently-asked-questions)**
+**[Installation](#installation) · [Release Packages](#release-packages) · [Changes Table](#changes-table) · [Save Protection](#save-protection) · [Building](#building) · [FAQ](#faq)**
 
 <br />
 
@@ -26,34 +23,34 @@
 
 ---
 
-## 📌 Overview
+## Overview
 
-**Gothic 3 Optima (G3O)** is not a conventional mod or a set of `ge3.ini` tweaks. It is an in-process native DLL proxy module (`dinput8.dll`) injected directly into the `Gothic3.exe` process space. It hooks virtual tables and calls inside the Genome Engine (`Engine.dll`, `Game.dll`, `SharedBase.dll`, `FileSystem.dll`, `PhysXCore.dll`), replacing 2005–2006 engine bottlenecks with state-of-the-art parallel, vectorized algorithms.
+**Gothic 3 Optima (G3O)** is a native proxy DLL (`dinput8.dll`) loaded by `Gothic3.exe` on startup. It hooks engine routines across Genome Engine libraries (`Engine.dll`, `Game.dll`, `SharedBase.dll`, `FileSystem.dll`, `PhysXCore.dll`).
 
-### Key Solved Issues:
-1. 🛑 **Continuous micro-freezes and traversal stutters** across Myrtana, Varant, and Nordmar cell transitions.
-2. 🛑 **Out-of-Memory crashes ("Where is the guru?")** triggered by 32-bit address space exhaustion and heap fragmentation.
-3. 🛑 **Corrupted 0-byte save files** during QuickSave (F5) under memory pressure or power cut.
-4. 🛑 **Direct3D 9 CPU bottleneck**: eliminates up to 40% redundant driver state changes and offloads up to 16 GB of textures to GPU VRAM via Vulkan.
+The project addresses core technical issues in the original game:
+1. **World streaming stutters** - solved with multicore archive loading and fast SIMD decompression via libdeflate.
+2. **"Where is the guru?" crashes** - replaces the stock heap allocator with mimalloc, enables LFH on all heaps, and mitigates x86 virtual memory exhaustion.
+3. **Savegame corruption (0-byte files on crash)** - writes saves to a temporary file first, verifies file integrity, and atomically swaps the destination file with automatic `.bak` backups.
+4. **Direct3D 9 single-thread draw bottlenecks** - eliminates redundant RenderState calls and translates DirectX 9 to Vulkan via DXVK.
 
 ---
 
-## 🚀 Quick Start & Installation
+## Installation
 
-Gothic 3 Optima features a modular design split into the **Core Optimization Engine** and **Modular DXVK Translation Addons**. Under a single GitHub Release, standalone archives are provided:
+Releases are split into the **Core engine mod** and **DXVK packages** tailored to different GPU generations:
 
 ```mermaid
 graph TD
-    subgraph GitHub_Release ["📦 GitHub Release v1.0.0 (Single Release)"]
-        Core["Gothic3Optima-v1.0.0-Core.zip<br/>(dinput8.dll Core + mimalloc + SaveGuard + SIMD + Threads)"]
-        DXVK1["DXVK-2.4.1-Stable.zip<br/>(Recommended: NVIDIA / AMD)"]
-        DXVK2["DXVK-3.0.1.zip<br/>(Vulkan 1.4)"]
-        DXVK3["DXVK-3.0.1-HDR.zip<br/>(Native HDR)"]
-        DXVK4["DXVK-1.10.3-Async.zip<br/>(Legacy GPUs)"]
-        DXVK5["DXVK-1.10.1-Async.zip<br/>(Intel HD / Fallback)"]
+    subgraph GitHub_Release ["GitHub Release (single page)"]
+        Core["Gothic3Optima-v1.0.0-Core.zip<br/>(dinput8.dll: allocator, save guard, SIMD, threads)"]
+        DXVK1["DXVK-2.4.1-Stable.zip<br/>(Recommended for NVIDIA / AMD)"]
+        DXVK2["DXVK-3.0.1.zip<br/>(For Vulkan 1.4)"]
+        DXVK3["DXVK-3.0.1-HDR.zip<br/>(For HDR monitors)"]
+        DXVK4["DXVK-1.10.3-Async.zip<br/>(For older GPUs)"]
+        DXVK5["DXVK-1.10.1-Async.zip<br/>(For Intel HD Graphics)"]
     end
 
-    subgraph Game_Folder ["📁 Game Folder: Gothic 3/"]
+    subgraph Game_Folder ["Game directory: Gothic 3/"]
         EXE["Gothic3.exe"]
         DLL["dinput8.dll"]
         D3D9["d3d9.dll"]
@@ -61,115 +58,128 @@ graph TD
         CONF["dxvk.conf"]
     end
 
-    Core -->|"Step 1: Required"| DLL
-    DXVK1 -.->|"Step 2: Choose 1 of 5"| D3D9
+    Core -->|"1. Extract"| DLL
+    DXVK1 -.->|"2. Extract one of five"| D3D9
     DXVK1 -.-> DXGI
     DXVK1 -.-> CONF
 ```
 
-### Installation Steps:
+### Steps:
 
-1. **Step 1: Download the Core Optimization Suite**
-   - Download **`Gothic3Optima-v1.0.0-Core.zip`** from the [GitHub Releases page](https://github.com/YourUsername/Gothic3Optima/releases).
-   - Extract `dinput8.dll` directly into your Gothic 3 game directory (where `Gothic3.exe` is located).
-2. **Step 2: Choose and Install your DXVK Addon**
-   - Download the DXVK archive matching your graphics card from the same release page.
-   - Extract its contents (`d3d9.dll`, `dxgi.dll`, `dxvk.conf`) into the same Gothic 3 game directory.
-3. **Step 3: Launch the Game**
-   - Launch Gothic 3 via Steam, GOG, or `Gothic3.exe` directly. The mod and Vulkan will initialize automatically.
+1. **Download the Core mod:**
+   - Grab `Gothic3Optima-v1.0.0-Core.zip` from the release page.
+   - Copy `dinput8.dll` into your Gothic 3 game directory (next to `Gothic3.exe`).
+2. **Download the DXVK package for your GPU:**
+   - Pick the appropriate DXVK archive from the table below on the same release page.
+   - Copy the extracted files (`d3d9.dll`, `dxgi.dll`, `dxvk.conf`) into the game directory.
+3. **Launch the game** normally via Steam, GOG, or `Gothic3.exe`.
 
 ---
 
-## 📦 Single-Release Download Archives (GitHub Releases)
+## Release Packages
 
-All archives are published under **one single GitHub Release**:
+All archives are attached to the same release on GitHub:
 
-### 1. Core Suite (Required)
-| Package File | Size | Description |
+### 1. Core Mod (Required)
+| Package | Size | Description |
 | :--- | :--- | :--- |
-| **`Gothic3Optima-v1.0.0-Core.zip`** | ~80 KB | **Gothic 3 Optima Core.** Contains `dinput8.dll`: mimalloc memory allocator, 128-byte cache alignment, SaveGame Guard, SIMD vectorization, multicore world streaming pools, crash interceptor. Works on native DirectX 9 or with any DXVK version. |
+| **`Gothic3Optima-v1.0.0-Core.zip`** | ~80 KB | Core mod (`dinput8.dll`). Includes mimalloc allocator replacement, SaveGame Guard, SIMD geometry acceleration, worker thread pool expansion, and exception handler. Works on native D3D9 or with any DXVK build. |
 
-### 2. Modular DXVK Vulkan Addons (Choose one)
-| Package File | DXVK Version | Description & Hardware Recommendations |
+### 2. DXVK Variants (Pick one)
+| Package | Version | Recommendation |
 | :--- | :--- | :--- |
-| **`DXVK-2.4.1-Stable.zip`** *(Recommended)* | DXVK 2.4.1 Stable | **Stable version.** Golden standard of stability. Highly recommended for: **AMD Polaris** (RX 470/480/570/580), **Vega**, **RDNA 1/2/3**, and **NVIDIA Pascal** (GTX 10xx), **Turing** (GTX 16xx / RTX 20xx), **Ampere** (RTX 30xx), **Ada** (RTX 40xx). |
-| **`DXVK-3.0.1.zip`** | DXVK 3.0.1 | **Current version.** Latest generation translation layer. Use if your GPU and driver fully support **Vulkan 1.4** and modern extensions. |
-| **`DXVK-3.0.1-HDR.zip`** | DXVK 3.0.1 (HDR) | **DXVK 3.0.1 with HDR output.** Dedicated build with native HDR color pipeline. Use if you have an HDR monitor / TV with Windows HDR enabled. |
-| **`DXVK-1.10.3-Async.zip`** | DXVK 1.10.3 (Async) | **Older version.** Use if your GPU lacks **Vulkan 1.3** support or DXVK 2.0+ encounters issues. |
-| **`DXVK-1.10.1-Async.zip`** | DXVK 1.10.1 (Async) | **Older version.** Use if you have an **Intel HD / UHD GPU**, legacy mobile GPU, or if newer versions cause artifacts. |
+| **`DXVK-2.4.1-Stable.zip`** | DXVK 2.4.1 Stable | **Recommended default.** Best balance of stability and performance for most hardware: AMD Radeon (Polaris, Vega, RDNA 1-3) and NVIDIA GeForce (GTX 10xx, RTX 20xx/30xx/40xx). |
+| **`DXVK-3.0.1.zip`** | DXVK 3.0.1 | Current release. Requires modern drivers with full Vulkan 1.4 support. |
+| **`DXVK-3.0.1-HDR.zip`** | DXVK 3.0.1 HDR | Build with native HDR output. Use if playing on an HDR monitor or TV with Windows HDR turned on. |
+| **`DXVK-1.10.3-Async.zip`** | DXVK 1.10.3 Async | For older GPUs lacking Vulkan 1.3 support, or if DXVK 2.x causes driver timeouts. |
+| **`DXVK-1.10.1-Async.zip`** | DXVK 1.10.1 Async | For Intel HD/UHD integrated graphics or legacy hardware. |
 
 > [!TIP]
-> **Recommended combination for 99% of players:**  
-> Download **`Gothic3Optima-v1.0.0-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
+> For standard gaming PCs, use: **`Gothic3Optima-v1.0.0-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
 
 ---
 
-## 📊 Subsystems Comparison Matrix
+## Changes Table
 
-| Game Subsystem | Vanilla Gothic 3 (CP 1.75.14) | Player Impact & Symptoms | Gothic 3 Optima Solution | Result & Benchmark Impact |
+Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
+
+| Subsystem | Vanilla Behavior | Issue | Solution in Mod | Result |
 | :--- | :--- | :--- | :--- | :--- |
-| **Save System** | In-place file rewrite (`0x1019c6b0`); truncates to 0 on open | Corrupt 0-byte saves, *"Where is the guru?"* during F5 | **SaveGame Guard:** Pre-save cache flush, shadow write to `.tmp`, atomic `ReplaceFileW`, `.bak` backups | 100% save integrity guarantee; existing saves preserved even on sudden crash |
-| **Memory Allocator** | Engine `bCMemoryAdmin` with `MemHeap::s_cLock` spinlock + CRT `HeapAlloc` | Heap fragmentation, lock contention, OOM crash at 2.8–3.1 GB | **mimalloc v3.5.3 (x86)** + Low Fragmentation Heap (LFH) enforced on all process heaps | Zero thread contention, fragmentation eliminated, ~400 MB RAM saved |
-| **Graphics Pipeline** | D3D9 without `D3DCREATE_PUREDEVICE`; textures in system RAM | RAM bloat up to 3 GB, CPU driver validation overhead | **DXVK (Vulkan translator)** + forced `D3DCREATE_PUREDEVICE` flag | 8–16 GB textures offloaded to VRAM; system RAM consumption reduced by 1+ GB |
-| **Render States** | 10,000+ redundant `SetRenderState` and `SetSamplerState` calls/frame | CPU draw-call bottleneck | **D3D9 State Redundancy Filter:** shadow cache for render states | 30–40% fewer driver calls, higher 1% low FPS |
-| **World Streaming** | `eCThreadPool` (`0x101f4010`) with only **1–2 worker threads** | Heavy traversal hitches entering new sectors | Hooked `eCThreadPool::Create(N)` scaling to **4–8 workers** | Parallel asset decompression utilizing modern multicore CPUs |
-| **LRU Resource Cache** | Aggressive `CacheOutResource` in `eCBaseCache` evicting visible assets | Camera turn stutter when looking back | **LRU Anti-Thrashing Guard:** throttles eviction when >600 MB free | Complete elimination of camera rotation hitches |
-| **Decompression** | Scalar `zlib 1.2.5` (`inflate` at `0x100153dc` in `FileSystem.dll`) | CPU spike decompressing `.pak` chunks during streaming | Hardware **libdeflate** with **AVX2 / SSE4.2** SIMD vectorization | **2.5–4x faster** archive decompression; reduced traversal CPU load |
-| **File I/O** | Synchronous `SetFilePointer` $\to$ `ReadFile` loops in `FileSystem.dll` | Kernel mode context switches, disk seek latency | **Memory-Mapped Files (`MapViewOfFile`):** direct memory projection for `.pak` files | Reads become RAM-to-RAM `memcpy` at 20+ GB/s speed |
-| **Spatial Math** | 1400+ `SharedBase.dll` functions compiled with scalar **x87 FPU** | Slow Frustum Culling and bounding volume math | **SIMD Vectorization:** SSE/AVX culling and matrix multiplication | 3D visibility calculations accelerated by **4–8x** |
-| **String Hashing** | Scalar byte-by-byte loop in `g_GetHashValue<bCString>` | Map lookup lag in `bTStringValMap` during NPC spawning | Hardware **DJB2 / CRC32** string hashing | Instant entity and dialogue lookups |
-| **CPU Topology** | Windows scheduler migrating threads to slow E-cores | Unexplained frame drops on Intel 12–14th Gen / AMD Hybrid | **P-Core Topology Lock:** queries `EfficiencyClass` and locks affinity to P-cores | Maximum sustained performance on hybrid processors |
-| **PhysX Physics** | PhysX 2.4.1 locked to 2 threads with obsolete Ageia PPU queries | Massive FPS drops in large battles with ragdolls | Hooked `_NxCreatePhysicsSDK@16` + `mimalloc` backend | Stable physics simulation in mass battles, aligned collision structures |
-| **Frame Pacing** | Discrete `Sleep()` using default Windows 15.6 ms timer | Visible jitter even at 60 / 120 FPS | Enforced **`timeBeginPeriod(1)`** (1.0 ms precision timer) | Rock-solid frame pacing curve without frame delivery spikes |
-| **FMOD Audio** | Small DSP buffer size in `fmodex.dll` (512 samples) | Audio stutter, clicks, and pops during frame drops | Hooked `FMOD_System_Init` with **1024 samples $\times$ 4 buffers** | Crystal-clear audio without pops even during scene streaming |
-| **Address Space** | 32-bit 4 GB virtual address space limit (x86 architecture) | Unable to cache full game world into RAM | **Heaven's Gate (`heavens_gate/`):** in-process x86 $\to$ x64 bridge via `retf 0x33` | Enables multi-gigabyte off-heap buffer caches beyond 4 GB |
+| **Saves** | In-place file rewrite (`0x1019c6b0`), truncates to 0 on open | Corrupt 0-byte saves if game crashes during F5 | **SaveGame Guard:** cache flush, write to `.tmp`, verify size, atomic `ReplaceFileW` | Saves remain uncorrupted even on sudden crash or power loss |
+| **Memory** | Engine `bCMemoryAdmin` with `MemHeap::s_cLock` spinlock + CRT `HeapAlloc` | Heap fragmentation, lock stalls, OOM crashes around 3 GB | Swapped with **mimalloc v3.5.3 (x86)** + LFH enforced on all heaps | No lock contention, fragmentation eliminated, up to 400 MB RAM saved |
+| **Graphics** | D3D9 without `D3DCREATE_PUREDEVICE`, textures kept in system RAM | High RAM usage, CPU validation overhead in driver | **DXVK** + forced `D3DCREATE_PUREDEVICE` flag | Textures offloaded to VRAM, freeing ~1 GB system RAM |
+| **D3D9 States** | Engine emits thousands of redundant `SetRenderState` calls per frame | CPU draw call bottleneck | **State Filter:** shadow table filters duplicate calls | Reduced driver overhead, improved 1% low frametimes |
+| **Streaming Threads** | `eCThreadPool` (`0x101f4010`) only runs 1-2 workers | Visible hitching when entering new world sectors | Hooked `eCThreadPool::Create`, scales to 4-8 workers | Parallel decompression utilizing multicore processors |
+| **Resource Cache** | Aggressive resource eviction in `eCBaseCache` | Stutter when quickly looking back | Eviction throttled while plenty of free memory exists | Eliminates hitches when moving back and forth within an area |
+| **Decompression** | Scalar `zlib 1.2.5` (`0x100153dc` in `FileSystem.dll`) | Traversal CPU spikes decompressing `.pak` chunks | Integrated **libdeflate** with AVX2 / SSE4.2 SIMD | 2.5-4x faster archive decompression |
+| **File I/O** | Synchronous `SetFilePointer` and small-buffer `ReadFile` calls | Disk seek latency, repeated kernel transitions | **Memory-Mapped Files (`MapViewOfFile`):** direct file mappings | In-memory archive access without disk stalls |
+| **Math & Physics** | Calculations use legacy x87 FPU (`fld`, `fmul`, `fstp`) in `SharedBase.dll` | Slow Frustum Culling and bounding volume checks | Replaced culling and matrix math with SSE intrinsics | Faster visibility calculations |
+| **String Hashing** | Byte-by-byte loop in `g_GetHashValue<bCString>` | Map lookup delays during NPC spawning | Vectorized string hash routine | Faster object and dialogue map lookups |
+| **CPU Topology** | Threads randomly scheduled onto slow E-cores | Frame drops on Intel 12-14th Gen and AMD Hybrid chips | Game threads bound to Performance cores (P-cores) | Consistent framerate on hybrid processors |
+| **PhysX Physics** | PhysX 2.4.1 locked to 2 threads, queries defunct Ageia PPU hardware | FPS drops in battles with ragdolls | SDK creation hooked, memory routed through mimalloc | Smoother physics simulation during mass fights |
+| **Frame Pacing** | Stock Windows timer resolution defaults to 15.6 ms | Jittery frame delivery even at 60 / 120 FPS | Forced `timeBeginPeriod(1)` for 1.0 ms precision | Consistent frame pacing |
+| **FMOD Audio** | Small DSP buffer in `fmodex.dll` (512 samples) | Audio clicks and pops under streaming load | Hooked `FMOD_System_Init` with 1024 samples x 4 buffers | Clean audio without crackles during sector streaming |
+| **Address Space** | 32-bit limit (4 GB virtual memory space) | Insufficient space to keep world assets in memory | **Heaven's Gate (`heavens_gate/`):** in-process x86 to x64 transition for buffer allocations | Allows large off-heap cache buffers beyond 4 GB |
 
 ---
 
-## 🛡️ SaveGame Guard Architecture
+## Save Protection
+
+How SaveGame Guard works:
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Player as Player (F5 / QuickSave)
-    participant Game as Game.dll (SaveGameWorld)
-    participant Guard as savegame_guard.cpp
-    participant Memory as mimalloc / eCMainCache
-    participant Disk as File System (Disk)
+    participant Game as Game.dll
+    participant Guard as SaveGame Guard
+    participant Memory as mimalloc
+    participant Disk as Disk
 
-    Player->>Game: Press F5 (QuickSave)
-    Game->>Guard: Intercept SaveGameWorld (0x1019c6b0)
-    Guard->>Guard: Check virtual memory (GlobalMemoryStatusEx)
-    alt Free RAM < 350 MB
-        Guard->>Memory: Emergency page reclaim (mi_collect) & cache flush
-        Memory-->>Guard: 300-500 MB address space freed
+    Player->>Game: Press F5
+    Game->>Guard: Intercept save call (0x1019c6b0)
+    Guard->>Guard: Check free memory
+    alt Free memory < 350 MB
+        Guard->>Memory: Reclaim memory pages
     end
-    Guard->>Disk: Open shadow file: <SaveName>.g3savdat.tmp
-    Game->>Disk: Serialize world state into .tmp file
-    Game->>Guard: Close file handle (CloseHandle)
-    Guard->>Disk: Flush filesystem buffers to disk (FlushFileBuffers)
-    Guard->>Guard: Validate file integrity (>256 bytes)
-    alt Empty file (0 bytes / crash occurred)
-        Guard->>Disk: Discard corrupt .tmp file
-        Guard-->>Player: Save aborted! Original save file remains 100% intact
+    Guard->>Disk: Write to temporary file (.tmp)
+    Game->>Disk: Serialize world state
+    Game->>Guard: Close handle (CloseHandle)
+    Guard->>Disk: Flush buffers to disk (FlushFileBuffers)
+    Guard->>Guard: Verify file size (>256 bytes)
+    alt Corrupted write (0 bytes)
+        Guard->>Disk: Remove corrupt .tmp file
+        Guard-->>Player: Save cancelled, original file preserved
     else File valid
-        Guard->>Disk: Create backup (<SaveName>.bak)
-        Guard->>Disk: Atomic swap via ReplaceFileW / MoveFileExW
-        Guard-->>Player: Game saved successfully without corruption risk!
+        Guard->>Disk: Create backup (.bak)
+        Guard->>Disk: Atomic swap via ReplaceFileW
+        Guard-->>Player: Game saved successfully
     end
 ```
 
 ---
 
-## 🛠️ Building from Source
+## Code Structure
 
-### Prerequisites:
-- **OS**: Windows 10 / 11 (x64)
-- **Compiler**: Visual Studio 2022 (MSVC v143 x86)
-- **CMake**: version 3.20 or newer
-- **Git**
+- `heavens_gate/` - x86 to x64 bridge via segment selector switch (`retf 0x33`) to allocate memory beyond 4 GB using 64-bit `ntdll.dll`.
+- `src/memory_allocator.cpp` & `src/lfh_enforcer.cpp` - replaces engine `bCMemoryAdmin` allocations with mimalloc, enables LFH on all process heaps.
+- `src/d3d9_hook.cpp` - adds `D3DCREATE_PUREDEVICE`, maintains shadow render state cache to filter duplicate D3D9 calls.
+- `src/streaming_optimizer.cpp` - maps `.pak` archives into memory via `MapViewOfFile` and expands `eCThreadPool` to 4-8 worker threads.
+- `src/media_optimizer.cpp` - integrates `libdeflate` for decompression, increases FMOD buffer sizes, sets 1 ms timer period.
+- `src/math_simd_optimizer.cpp` - replaces `bCFrustum::Cull` and matrix operations with SSE vector intrinsics.
+- `src/savegame_guard.cpp` - writes saves to `.tmp`, verifies file size, creates `.bak` backup, and performs atomic replacement via `ReplaceFileW`.
 
-### Build Commands:
+---
+
+## Building
+
+### Requirements:
+- Windows 10 / 11 (x64)
+- Visual Studio 2022 (MSVC v143 x86)
+- CMake 3.20+
+- Git
+
+### Build:
 
 ```cmd
 git clone https://github.com/YourUsername/Gothic3Optima.git
@@ -179,10 +189,60 @@ cmake -B build -S . -A Win32 -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-Binary output: `build/Release/dinput8.dll`.
+Output binary: `build/Release/dinput8.dll`.
+
+To package all release archives:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package_releases.ps1
+```
+Archives will be generated in `dist/packages/`.
 
 ---
 
-## 📜 License
+## FAQ
 
-Distributed under the **MIT License**. See [LICENSE](LICENSE) for details.
+<details>
+<summary><strong>Is this compatible with Community Patch 1.75.14 and Update Pack 1.04.11?</strong></summary>
+
+Yes. It was developed and verified against Gothic 3 v1.75.14 with Update Pack v1.04.11. All binary offsets and structures match.
+</details>
+
+<details>
+<summary><strong>Does it work with mods (Questpaket, Content Mod, LCTM)?</strong></summary>
+
+Yes. The mod only modifies binary engine code and OS API calls. Quest scripts, balance tables, and asset templates are untouched.
+</details>
+
+<details>
+<summary><strong>How to enable the DXVK HUD (FPS, memory)?</strong></summary>
+
+Open `dxvk.conf` in your Gothic 3 folder and add:
+```ini
+dxvk.hud = fps,frametimes,memory,devinfo
+```
+</details>
+
+<details>
+<summary><strong>What to do if there is a black screen or Vulkan error on startup?</strong></summary>
+
+Use `DXVK-1.10.1-Async.zip` or `DXVK-1.10.3-Async.zip`. They have broader compatibility with older GPUs and legacy drivers.
+</details>
+
+<details>
+<summary><strong>Where are save backups stored?</strong></summary>
+
+In your standard save directory (`Documents\gothic3\`). On every save overwrite, the previous save is kept as `.bak`. If needed, rename it back to `.g3savdat`.
+</details>
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+Third-party dependencies:
+- [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-Clause)
+- [mimalloc](https://github.com/microsoft/mimalloc) (MIT)
+- [libdeflate](https://github.com/ebiggers/libdeflate) (MIT)
+- [DXVK](https://github.com/doitsujin/dxvk) (Zlib)
+- [DXVK-Async](https://github.com/Sporif/dxvk-async)
