@@ -115,6 +115,7 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | **File I/O** | Synchronous `SetFilePointer` and small-buffer `ReadFile` calls | Disk seek latency, repeated kernel transitions | **Memory-Mapped Files (`MapViewOfFile`):** direct file mappings (750 MB budget) | In-memory archive access without disk stalls |
 | **Sector Streaming** | Static radial sphere around hero in `eCPVSPrefetcher3` | Micro-stutters (50-200 ms) when crossing sector boundaries | **Motion Vector Prefetch:** sphere projected 10-30m ahead along motion vector | Seamless streaming: sector cells loaded before hero arrives |
 | **Math & Physics** | Calculations use legacy x87 FPU (`fld`, `fmul`, `fstp`) in `SharedBase.dll` | Slow Frustum Culling and bounding volume checks | Replaced culling and matrix math with SSE intrinsics | Faster visibility calculations |
+| **Fall-Through Guard** | Raycast misses on polygonal seams and cliff meshes | Hero clipping through terrain into the void, lethal fall damage | **Ground Recovery Fall Guard:** detects unphysical vertical drops ($>6$m in 1 frame), restores safe ground | Hero never falls through geometry or dies from collision bugs |
 | **String Hashing** | Byte-by-byte loop in `g_GetHashValue<bCString>` | Map lookup delays during NPC spawning | Vectorized string hash routine | Faster object and dialogue map lookups |
 | **CPU Topology** | Threads randomly scheduled onto slow E-cores | Frame drops on Intel 12-14th Gen and AMD Hybrid chips | Game threads bound to Performance cores (P-cores) | Consistent framerate on hybrid processors |
 | **PhysX Physics** | PhysX 2.4.1 locked to 2 threads, queries defunct Ageia PPU hardware | FPS drops in battles with ragdolls | SDK creation hooked, memory routed through mimalloc | Smoother physics simulation during mass fights |
@@ -168,6 +169,7 @@ sequenceDiagram
 - `src/streaming_optimizer.cpp` - maps `.pak` archives into RAM via `MapViewOfFile`, predictive cell prefetching by motion vector (`eCPVSPrefetcher3`), and expands `eCThreadPool` to 4-8 worker threads.
 - `src/media_optimizer.cpp` - integrates `libdeflate` (AVX2/SSE4.2) for fast archive decompression, expands FMOD Ex DSP buffer (2048x4), and sets 1.0 ms high-resolution timer.
 - `src/math_simd_optimizer.cpp` - replaces `bCFrustum::Cull` and matrix operations with SSE vector intrinsics.
+- `src/fall_guard.cpp` - protects player from falling through world geometry meshes and negates fall damage on collision glitches.
 - `src/savegame_guard.cpp` - writes saves to `.tmp`, verifies file size, creates `.bak` backup, and performs atomic replacement via `ReplaceFileW`.
 - `src/version_watermark.cpp` - displays Gothic 3 Optima version and status in the game's main menu.
 

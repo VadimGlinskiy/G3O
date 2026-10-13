@@ -10,15 +10,16 @@
 #include "math_simd_optimizer.h"
 #include "savegame_guard.h"
 #include "version_watermark.h"
+#include "fall_guard.h"
 #include <minhook.h>
 
 static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 1. Lock CPU affinity to P-cores early
     InitializeCPUTopology();
 
-    // 2. Wait until game engine libraries (SharedBase.dll, Engine.dll, FileSystem.dll) are mapped into memory
+    // 2. Wait until game engine libraries (SharedBase.dll, Engine.dll, FileSystem.dll, Game.dll) are mapped into memory
     int maxWaitMs = 5000;
-    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("Engine.dll") || !GetModuleHandleA("FileSystem.dll")) && maxWaitMs > 0) {
+    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("Engine.dll") || !GetModuleHandleA("FileSystem.dll") || !GetModuleHandleA("Game.dll")) && maxWaitMs > 0) {
         Sleep(2);
         maxWaitMs -= 2;
     }
@@ -47,6 +48,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 10. Hook Main Menu version watermark (displays "G3O v1.0.0" in main menu)
     InitializeVersionHook();
 
+    // 11. Initialize Ground Recovery Fall Guard (Phase 12.2)
+    InitializeFallGuard();
+
     OutputDebugStringA("[Gothic3Optima] All core engine subsystems initialized successfully!\n");
     return 0;
 }
@@ -72,6 +76,7 @@ static void InitializeOptima() {
 
 static void ShutdownOptima() {
     OutputDebugStringA("[Gothic3Optima] Shutting down...\n");
+    ShutdownFallGuard();
     ShutdownSaveGameGuard();
     ShutdownMediaOptimizer();
     ShutdownStreamingOptimizer();

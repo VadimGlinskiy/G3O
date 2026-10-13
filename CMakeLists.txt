@@ -52,6 +52,8 @@ add_library(dinput8 SHARED
     src/savegame_guard.h
     src/version_watermark.cpp
     src/version_watermark.h
+    src/fall_guard.cpp
+    src/fall_guard.h
 )
 
 target_include_directories(dinput8 PRIVATE
