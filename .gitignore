@@ -1,11 +1,14 @@
 build/
+dist/
 dxvk-2.4.1/
 dxvk-2.4.1.tar.gz
+downloads/
 *.obj
 *.lib
 *.exp
 *.exe
 *.pdb
 *.tmp
+*.zip
 .vs/
 .idea/
