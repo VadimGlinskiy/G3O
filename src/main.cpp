@@ -27,8 +27,8 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 3. Initialize Low Fragmentation Heap (LFH) Enforcer
     LFHEnforcer::Initialize();
 
-    // 4. Initialize mimalloc hooks on bCMemoryAdmin & MemHeap (testing)
-    // MemoryOptimizer::Initialize();
+    // 4. Initialize mimalloc hooks on bCMemoryAdmin, operator new & MemHeap
+    MemoryOptimizer::Initialize();
 
     // 5. Initialize D3D9 hooks (PureDevice enforcer, State Redundancy Filter, D3DX mipmaps)
     InstallD3D9Hooks();
