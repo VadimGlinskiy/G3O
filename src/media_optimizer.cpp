@@ -101,22 +101,76 @@ static unsigned long __stdcall Hooked_GetHashValue_PAD(const char* const* ppStr)
 }
 
 // ---------------------------------------------------------------------------
-// 3. FMOD Ex DSP Buffer Tuning (fmodex.dll)
+// 3. FMOD Ex DSP Buffer & Stream Tuning (fmodex.dll) - Phase 16
 // ---------------------------------------------------------------------------
 
 typedef int (__stdcall* FMOD_System_Init_t)(void* pSystem, int maxchannels, unsigned int flags, void* extradriverdata);
 static FMOD_System_Init_t Real_FMOD_System_Init = NULL;
+static FMOD_System_Init_t Real_FMOD_System_CppInit = NULL;
 
 typedef int (__stdcall* FMOD_System_SetDSPBufferSize_t)(void* pSystem, unsigned int bufferlength, int numbuffers);
 static FMOD_System_SetDSPBufferSize_t Real_FMOD_System_SetDSPBufferSize = NULL;
+static FMOD_System_SetDSPBufferSize_t Real_FMOD_System_CppSetDSPBufferSize = NULL;
+
+typedef int (__stdcall* FMOD_System_SetSoftwareChannels_t)(void* pSystem, int numsoftwarechannels);
+static FMOD_System_SetSoftwareChannels_t Real_FMOD_System_SetSoftwareChannels = NULL;
+static FMOD_System_SetSoftwareChannels_t Real_FMOD_System_CppSetSoftwareChannels = NULL;
+
+typedef int (__stdcall* FMOD_System_SetStreamBufferSize_t)(void* pSystem, unsigned int filebuffersize, unsigned int filebuffersizetype);
+static FMOD_System_SetStreamBufferSize_t Real_FMOD_System_SetStreamBufferSize = NULL;
+static FMOD_System_SetStreamBufferSize_t Real_FMOD_System_CppSetStreamBufferSize = NULL;
+
+static void ApplyFMODAudioTuning(void* pSystem) {
+    if (!pSystem) return;
+
+    // 1. DSP Buffer: expand from 512 (2 slices) to 2048 samples (4 slices)
+    // 2048 samples @ 48kHz = 42.6 ms * 4 = 170.6 ms jitter buffer (prevents audio underruns during sector loading)
+    if (Real_FMOD_System_SetDSPBufferSize) {
+        Real_FMOD_System_SetDSPBufferSize(pSystem, 2048, 4);
+    } else if (Real_FMOD_System_CppSetDSPBufferSize) {
+        Real_FMOD_System_CppSetDSPBufferSize(pSystem, 2048, 4);
+    }
+
+    // 2. Software Channels: expand mixer pool to 64 software voices
+    if (Real_FMOD_System_SetSoftwareChannels) {
+        Real_FMOD_System_SetSoftwareChannels(pSystem, 64);
+    } else if (Real_FMOD_System_CppSetSoftwareChannels) {
+        Real_FMOD_System_CppSetSoftwareChannels(pSystem, 64);
+    }
+
+    // 3. Stream Buffer: expand to 64 KB (0x10 = FMOD_TIMEUNIT_RAWBYTES) to eliminate music cutoffs
+    if (Real_FMOD_System_SetStreamBufferSize) {
+        Real_FMOD_System_SetStreamBufferSize(pSystem, 64 * 1024, 0x10);
+    } else if (Real_FMOD_System_CppSetStreamBufferSize) {
+        Real_FMOD_System_CppSetStreamBufferSize(pSystem, 64 * 1024, 0x10);
+    }
+
+    OutputDebugStringA("[Gothic3Optima] FMOD audio tuning applied: DSP 2048x4 (170ms), 64 SW channels, 64KB stream buffer.\n");
+}
 
 static int __stdcall Hooked_FMOD_System_Init(void* pSystem, int maxchannels, unsigned int flags, void* extradriverdata) {
-    if (Real_FMOD_System_SetDSPBufferSize && pSystem) {
-        // Increase DSP buffer from 512 to 1024 samples (4 buffers) to eliminate clicks and pops
-        Real_FMOD_System_SetDSPBufferSize(pSystem, 1024, 4);
-        OutputDebugStringA("[Gothic3Optima] FMOD DSP Buffer tuned to 1024 samples x 4 buffers.\n");
-    }
+    ApplyFMODAudioTuning(pSystem);
+    if (maxchannels < 64) maxchannels = 64;
     return Real_FMOD_System_Init(pSystem, maxchannels, flags, extradriverdata);
+}
+
+static int __stdcall Hooked_FMOD_System_CppInit(void* pSystem, int maxchannels, unsigned int flags, void* extradriverdata) {
+    ApplyFMODAudioTuning(pSystem);
+    if (maxchannels < 64) maxchannels = 64;
+    return Real_FMOD_System_CppInit(pSystem, maxchannels, flags, extradriverdata);
+}
+
+static int __stdcall Hooked_FMOD_System_SetDSPBufferSize(void* pSystem, unsigned int bufferlength, int numbuffers) {
+    // Preserve our expanded 2048x4 buffer if engine attempts to downsize
+    if (bufferlength < 1024) bufferlength = 2048;
+    if (numbuffers < 4) numbuffers = 4;
+    return Real_FMOD_System_SetDSPBufferSize(pSystem, bufferlength, numbuffers);
+}
+
+static int __stdcall Hooked_FMOD_System_CppSetDSPBufferSize(void* pSystem, unsigned int bufferlength, int numbuffers) {
+    if (bufferlength < 1024) bufferlength = 2048;
+    if (numbuffers < 4) numbuffers = 4;
+    return Real_FMOD_System_CppSetDSPBufferSize(pSystem, bufferlength, numbuffers);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,17 +230,47 @@ void InitializeMediaOptimizer() {
     }
     */
 
-    // 4. Hook FMOD Ex
+    // 4. Hook FMOD Ex (Phase 16)
     HMODULE hFmod = GetModuleHandleA("fmodex.dll");
     if (hFmod) {
         Real_FMOD_System_SetDSPBufferSize = (FMOD_System_SetDSPBufferSize_t)GetProcAddress(hFmod, "FMOD_System_SetDSPBufferSize");
+        Real_FMOD_System_CppSetDSPBufferSize = (FMOD_System_SetDSPBufferSize_t)GetProcAddress(hFmod, "?setDSPBufferSize@System@FMOD@@QAG?AW4FMOD_RESULT@@IH@Z");
+        Real_FMOD_System_SetSoftwareChannels = (FMOD_System_SetSoftwareChannels_t)GetProcAddress(hFmod, "FMOD_System_SetSoftwareChannels");
+        Real_FMOD_System_CppSetSoftwareChannels = (FMOD_System_SetSoftwareChannels_t)GetProcAddress(hFmod, "?setSoftwareChannels@System@FMOD@@QAG?AW4FMOD_RESULT@@H@Z");
+        Real_FMOD_System_SetStreamBufferSize = (FMOD_System_SetStreamBufferSize_t)GetProcAddress(hFmod, "FMOD_System_SetStreamBufferSize");
+        Real_FMOD_System_CppSetStreamBufferSize = (FMOD_System_SetStreamBufferSize_t)GetProcAddress(hFmod, "?setStreamBufferSize@System@FMOD@@QAG?AW4FMOD_RESULT@@II@Z");
+
+        // Hook C API FMOD_System_Init
         void* pInit = (void*)GetProcAddress(hFmod, "FMOD_System_Init");
         if (pInit) {
             if (MH_CreateHook(pInit, (LPVOID)Hooked_FMOD_System_Init, (LPVOID*)&Real_FMOD_System_Init) == MH_OK) {
                 MH_EnableHook(pInit);
-                OutputDebugStringA("[Gothic3Optima] Hooked FMOD_System_Init for audio stability.\n");
+                OutputDebugStringA("[Gothic3Optima] Hooked FMOD_System_Init.\n");
             }
         }
+
+        // Hook C++ member API FMOD::System::init (?init@System@FMOD@@QAG?AW4FMOD_RESULT@@HIPAX@Z)
+        void* pCppInit = (void*)GetProcAddress(hFmod, "?init@System@FMOD@@QAG?AW4FMOD_RESULT@@HIPAX@Z");
+        if (pCppInit) {
+            if (MH_CreateHook(pCppInit, (LPVOID)Hooked_FMOD_System_CppInit, (LPVOID*)&Real_FMOD_System_CppInit) == MH_OK) {
+                MH_EnableHook(pCppInit);
+                OutputDebugStringA("[Gothic3Optima] Hooked FMOD::System::init (C++).\n");
+            }
+        }
+
+        // Hook buffer size setters to prevent engine from downsizing below 2048x4
+        if (Real_FMOD_System_SetDSPBufferSize) {
+            void* pSetDSP = (void*)Real_FMOD_System_SetDSPBufferSize;
+            MH_CreateHook(pSetDSP, (LPVOID)Hooked_FMOD_System_SetDSPBufferSize, (LPVOID*)&Real_FMOD_System_SetDSPBufferSize);
+            MH_EnableHook(pSetDSP);
+        }
+        if (Real_FMOD_System_CppSetDSPBufferSize) {
+            void* pCppSetDSP = (void*)Real_FMOD_System_CppSetDSPBufferSize;
+            MH_CreateHook(pCppSetDSP, (LPVOID)Hooked_FMOD_System_CppSetDSPBufferSize, (LPVOID*)&Real_FMOD_System_CppSetDSPBufferSize);
+            MH_EnableHook(pCppSetDSP);
+        }
+
+        OutputDebugStringA("[Gothic3Optima] Phase 16: FMOD Ex audio stability hooks active.\n");
     }
 
     // 5. Hook Bink Video
