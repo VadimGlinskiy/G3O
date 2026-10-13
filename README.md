@@ -182,8 +182,8 @@ sequenceDiagram
 ### Команды:
 
 ```cmd
-git clone https://github.com/YourUsername/Gothic3Optima.git
-cd Gothic3Optima
+git clone https://github.com/VadimGlinskiy/G3O.git
+cd G3O
 
 cmake -B build -S . -A Win32 -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
@@ -236,13 +236,25 @@ dxvk.hud = fps,frametimes,memory,devinfo
 
 ---
 
+## Благодарности и сторонние компоненты
+
+Проект Gothic 3 Optima использует и опирается на наработки следующих открытых библиотек, авторов и исследовательских проектов:
+
+| Компонент / Проект | Автор / Организация | Лицензия | Назначение в Gothic 3 Optima |
+| :--- | :--- | :--- | :--- |
+| **[DXVK](https://github.com/doitsujin/dxvk)** | Philip Rebohle ([doitsujin](https://github.com/doitsujin)) и участники проекта | Zlib License | Трансляция вызовов Direct3D 9 в нативный Vulkan, перенос создания текстур и компиляции шейдеров в фоновые Vulkan Transfer Queues, поддержка 32-битного плавающего буфера глубины. |
+| **[DXVK-Async](https://github.com/Sporif/dxvk-async)** | [Sporif](https://github.com/Sporif) | Zlib License | Патч асинхронной компиляции графических конвейеров для классических версий DXVK 1.10.x. |
+| **[mimalloc](https://github.com/microsoft/mimalloc)** | Daan Leijen ([Microsoft Research](https://github.com/microsoft)) | MIT License | Компактный высокоскоростной распределитель памяти, исключающий внешнюю фрагментацию и заменяющий медленный менеджер кучи `bCMemoryAdmin`. |
+| **[libdeflate](https://github.com/ebiggers/libdeflate)** | Eric Biggers ([ebiggers](https://github.com/ebiggers)) | MIT License | Высокоскоростной декомпрессор zlib/deflate с аппаратной SIMD-векторизацией SSE4.2 / AVX2 для быстрой распаковки мешей и текстур из `.pak` архивов. |
+| **[MinHook](https://github.com/TsudaKageyu/minhook)** | Tsuda Kageyu ([TsudaKageyu](https://github.com/TsudaKageyu)) | BSD 2-Clause | Минималистичная и потокобезопасная библиотека низкоуровневых API-перехватов (detours/trampolines) для x86. |
+| **[Heaven's Gate](https://github.com/Gothic3Optima)** | Roy M. ([ReWolf](https://github.com/mwrl)), mixcode, antivm | Public Domain | Архитектурная концепция переключения процессора x86 $\to$ x64 через селектор сегмента `0x33` для доступа к памяти за пределами 4 ГБ в Windows x64. |
+| **Community Patch Team (CPT)** | CPT Team | - | За титанический труд над Community Patch 1.75.14, декомпиляцию бинарников Genome Engine и спасение игры. |
+| **Update Pack Team** | zandr, Dimus и сообщество World of Players | - | За разработку Update Pack 1.04.11, исправление сотен скриптов и стабилизацию библиотек `Engine.dll` / `Game.dll`. |
+| **Piranha Bytes** | Piranha Bytes | - | Создатели бессмертной вселенной Gothic и оригинального движка Genome Engine. |
+
+---
+
 ## Лицензия
 
-Проект распространяется под лицензией [MIT](LICENSE).
-
-Используемые библиотеки:
-- [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-Clause)
-- [mimalloc](https://github.com/microsoft/mimalloc) (MIT)
-- [libdeflate](https://github.com/ebiggers/libdeflate) (MIT)
-- [DXVK](https://github.com/doitsujin/dxvk) (Zlib)
-- [DXVK-Async](https://github.com/Sporif/dxvk-async)
+Исходный код Gothic 3 Optima распространяется под лицензией [MIT](LICENSE).  
+Все сторонние компоненты остаются собственностью их авторов и распространяются под своими оригинальными лицензиями.
