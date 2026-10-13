@@ -182,7 +182,8 @@ void InitializeMathSIMDOptimizer() {
             }
         }
 
-        // 4. Hook bCVector::operator*(const bCMatrix&)
+        // 4. Hook bCVector::operator*(const bCMatrix&) disabled to prevent calling convention mismatch on struct return
+        /*
         void* pVecMul = (void*)GetProcAddress(hSharedBase, "??DbCVector@@QBE?AV0@ABVbCMatrix@@@Z");
         if (pVecMul) {
             if (MH_CreateHook(pVecMul, (LPVOID)Hooked_VectorMulMatrix, (LPVOID*)&Real_VectorMulMatrix) == MH_OK) {
@@ -190,6 +191,7 @@ void InitializeMathSIMDOptimizer() {
                 OutputDebugStringA("[Gothic3Optima] Hooked bCVector::operator*(bCMatrix) with SSE 4-way SIMD.\n");
             }
         }
+        */
     }
 
     // 5. Hook PhysXLoader.dll NxCreatePhysicsSDK

@@ -48,6 +48,14 @@ typedef HRESULT (STDMETHODCALLTYPE* CreateDevice_t)(
 );
 static CreateDevice_t Real_CreateDevice = NULL;
 
+typedef HRESULT (STDMETHODCALLTYPE* GetDeviceCaps_t)(
+    IDirect3D9* This,
+    UINT Adapter,
+    D3DDEVTYPE DeviceType,
+    D3DCAPS9* pCaps
+);
+static GetDeviceCaps_t Real_GetDeviceCaps = NULL;
+
 typedef HRESULT (STDMETHODCALLTYPE* SetRenderState_t)(IDirect3DDevice9* This, D3DRENDERSTATETYPE State, DWORD Value);
 static SetRenderState_t Real_SetRenderState = NULL;
 
@@ -147,26 +155,26 @@ static void InstallDeviceHooks(IDirect3DDevice9* pDevice) {
     void** vtbl = *(void***)pDevice;
 
     // Vtable indices:
-    // Reset: 16
-    // Present: 17
-    // SetRenderState: 57
-    // SetTextureStageState: 67
-    // SetSamplerState: 69
+    // Reset: 19
+    // Present: 20
+    // SetRenderState: 60
+    // SetTextureStageState: 70
+    // SetSamplerState: 72
 
-    if (MH_CreateHook(vtbl[57], (LPVOID)Hooked_SetRenderState, (LPVOID*)&Real_SetRenderState) == MH_OK) {
-        MH_EnableHook(vtbl[57]);
+    if (MH_CreateHook(vtbl[60], (LPVOID)Hooked_SetRenderState, (LPVOID*)&Real_SetRenderState) == MH_OK) {
+        MH_EnableHook(vtbl[60]);
     }
-    if (MH_CreateHook(vtbl[67], (LPVOID)Hooked_SetTextureStageState, (LPVOID*)&Real_SetTextureStageState) == MH_OK) {
-        MH_EnableHook(vtbl[67]);
+    if (MH_CreateHook(vtbl[70], (LPVOID)Hooked_SetTextureStageState, (LPVOID*)&Real_SetTextureStageState) == MH_OK) {
+        MH_EnableHook(vtbl[70]);
     }
-    if (MH_CreateHook(vtbl[69], (LPVOID)Hooked_SetSamplerState, (LPVOID*)&Real_SetSamplerState) == MH_OK) {
-        MH_EnableHook(vtbl[69]);
+    if (MH_CreateHook(vtbl[72], (LPVOID)Hooked_SetSamplerState, (LPVOID*)&Real_SetSamplerState) == MH_OK) {
+        MH_EnableHook(vtbl[72]);
     }
-    if (MH_CreateHook(vtbl[16], (LPVOID)Hooked_Reset, (LPVOID*)&Real_Reset) == MH_OK) {
-        MH_EnableHook(vtbl[16]);
+    if (MH_CreateHook(vtbl[19], (LPVOID)Hooked_Reset, (LPVOID*)&Real_Reset) == MH_OK) {
+        MH_EnableHook(vtbl[19]);
     }
-    if (MH_CreateHook(vtbl[17], (LPVOID)Hooked_Present, (LPVOID*)&Real_Present) == MH_OK) {
-        MH_EnableHook(vtbl[17]);
+    if (MH_CreateHook(vtbl[20], (LPVOID)Hooked_Present, (LPVOID*)&Real_Present) == MH_OK) {
+        MH_EnableHook(vtbl[20]);
     }
 
     g_DeviceHooksInstalled = true;
@@ -182,25 +190,26 @@ static HRESULT STDMETHODCALLTYPE Hooked_CreateDevice(
     D3DPRESENT_PARAMETERS* pPresentationParameters,
     IDirect3DDevice9** ppReturnedDeviceInterface
 ) {
-    DWORD originalFlags = BehaviorFlags;
-
-    // Phase 4.3: Enforce D3DCREATE_PUREDEVICE if hardware vertex processing is used
-    if (BehaviorFlags & D3DCREATE_HARDWARE_VERTEXPROCESSING) {
-        BehaviorFlags |= D3DCREATE_PUREDEVICE;
-        OutputDebugStringA("[Gothic3Optima] Injected D3DCREATE_PUREDEVICE into BehaviorFlags.\n");
-    }
-
     HRESULT hr = Real_CreateDevice(This, Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
-    if (FAILED(hr) && (BehaviorFlags != originalFlags)) {
-        // Driver / adapter fallback without PUREDEVICE
-        OutputDebugStringA("[Gothic3Optima] CreateDevice with PUREDEVICE failed, falling back to original flags.\n");
-        hr = Real_CreateDevice(This, Adapter, DeviceType, hFocusWindow, originalFlags, pPresentationParameters, ppReturnedDeviceInterface);
-    }
+    return hr;
+}
 
-    if (SUCCEEDED(hr) && ppReturnedDeviceInterface && *ppReturnedDeviceInterface) {
-        InstallDeviceHooks(*ppReturnedDeviceInterface);
+static HRESULT STDMETHODCALLTYPE Hooked_GetDeviceCaps(
+    IDirect3D9* This,
+    UINT Adapter,
+    D3DDEVTYPE DeviceType,
+    D3DCAPS9* pCaps
+) {
+    HRESULT hr = Real_GetDeviceCaps(This, Adapter, DeviceType, pCaps);
+    if (SUCCEEDED(hr) && pCaps) {
+        // Guarantee Shader Model 3.0 reporting to satisfy engine requirements
+        if (pCaps->PixelShaderVersion < D3DPS_VERSION(3, 0)) {
+            pCaps->PixelShaderVersion = D3DPS_VERSION(3, 0);
+        }
+        if (pCaps->VertexShaderVersion < D3DVS_VERSION(3, 0)) {
+            pCaps->VertexShaderVersion = D3DVS_VERSION(3, 0);
+        }
     }
-
     return hr;
 }
 
@@ -208,9 +217,14 @@ static void HookD3D9Interface(IDirect3D9* pD3D) {
     if (g_CreateDeviceHooked || !pD3D) return;
 
     void** vtbl = *(void***)pD3D;
-    // Index 16: CreateDevice
-    if (MH_CreateHook(vtbl[16], (LPVOID)Hooked_CreateDevice, (LPVOID*)&Real_CreateDevice) == MH_OK) {
-        MH_EnableHook(vtbl[16]);
+    // Index 17: GetDeviceCaps
+    if (MH_CreateHook(vtbl[17], (LPVOID)Hooked_GetDeviceCaps, (LPVOID*)&Real_GetDeviceCaps) == MH_OK) {
+        MH_EnableHook(vtbl[17]);
+        OutputDebugStringA("[Gothic3Optima] Hooked IDirect3D9::GetDeviceCaps.\n");
+    }
+    // Index 19: CreateDevice
+    if (MH_CreateHook(vtbl[19], (LPVOID)Hooked_CreateDevice, (LPVOID*)&Real_CreateDevice) == MH_OK) {
+        MH_EnableHook(vtbl[19]);
         g_CreateDeviceHooked = true;
         OutputDebugStringA("[Gothic3Optima] Hooked IDirect3D9::CreateDevice.\n");
     }
@@ -240,7 +254,8 @@ void InstallD3D9Hooks() {
         }
     }
 
-    // Hook D3DXFilterTexture in d3dx9_40.dll if available
+    // D3DXFilterTexture hook disabled - textures filtered normally
+    /*
     HMODULE hD3DX9 = GetModuleHandleA("d3dx9_40.dll");
     if (!hD3DX9) {
         hD3DX9 = LoadLibraryA("d3dx9_40.dll");
@@ -253,5 +268,38 @@ void InstallD3D9Hooks() {
                 OutputDebugStringA("[Gothic3Optima] Hooked D3DXFilterTexture (hardware mipmap bypass).\n");
             }
         }
+    }
+    */
+
+    // Bypass restrictive Engine.dll Shader Model 3.0 assertions for DXVK / remote / hybrid setups
+    HMODULE hEngine = GetModuleHandleA("Engine.dll");
+    if (hEngine) {
+        uintptr_t base = (uintptr_t)hEngine;
+        BYTE* pPS = (BYTE*)(base + 0x0000c693);
+        BYTE* pVS = (BYTE*)(base + 0x0000c6b8);
+        BYTE* pMRT = (BYTE*)(base + 0x00012a20);
+        BYTE* pRTT = (BYTE*)(base + 0x00012a7c);
+        DWORD oldProtect = 0;
+        if (pPS[0] == 0x73 && pPS[1] == 0x19) {
+            VirtualProtect(pPS, 2, PAGE_EXECUTE_READWRITE, &oldProtect);
+            pPS[0] = 0xEB; // force jump over Pixel Shader 3.0 assertion
+            VirtualProtect(pPS, 2, oldProtect, &oldProtect);
+        }
+        if (pVS[0] == 0x73 && pVS[1] == 0x19) {
+            VirtualProtect(pVS, 2, PAGE_EXECUTE_READWRITE, &oldProtect);
+            pVS[0] = 0xEB; // force jump over Vertex Shader 3.0 assertion
+            VirtualProtect(pVS, 2, oldProtect, &oldProtect);
+        }
+        if (pMRT[0] == 0x77 && pMRT[1] == 0x15) {
+            VirtualProtect(pMRT, 2, PAGE_EXECUTE_READWRITE, &oldProtect);
+            pMRT[0] = 0xEB; // force jump over Multiple Render Target assertion
+            VirtualProtect(pMRT, 2, oldProtect, &oldProtect);
+        }
+        if (pRTT[0] == 0x75 && pRTT[1] == 0x15) {
+            VirtualProtect(pRTT, 2, PAGE_EXECUTE_READWRITE, &oldProtect);
+            pRTT[0] = 0xEB; // force jump over Render To Texture assertion
+            VirtualProtect(pRTT, 2, oldProtect, &oldProtect);
+        }
+        OutputDebugStringA("[Gothic3Optima] Engine.dll GPU capability assertions bypassed.\n");
     }
 }

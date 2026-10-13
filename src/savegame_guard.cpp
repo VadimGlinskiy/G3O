@@ -100,9 +100,6 @@ static bool __fastcall Hooked_SaveGameWorld(void* pThis, void* /*edx*/, void* pS
 
 void InitializeSaveGameGuard() {
     HMODULE hGame = GetModuleHandleA("Game.dll");
-    if (!hGame) {
-        hGame = LoadLibraryA("Game.dll");
-    }
     if (hGame) {
         void* pSaveGameWorld = (void*)GetProcAddress(hGame, "?SaveGameWorld@gCWorld@@QAE_NABVbCString@@PAVeCGfxImageData@@PAXK@Z");
         if (pSaveGameWorld) {

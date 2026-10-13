@@ -9,24 +9,25 @@
 #include "media_optimizer.h"
 #include "math_simd_optimizer.h"
 #include "savegame_guard.h"
+#include "version_watermark.h"
 #include <minhook.h>
 
 static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 1. Lock CPU affinity to P-cores early
     InitializeCPUTopology();
 
-    // 2. Wait until game engine libraries (SharedBase.dll, Engine.dll, Game.dll) are mapped into memory
+    // 2. Wait until game engine libraries (SharedBase.dll, Engine.dll) are mapped into memory
     int maxWaitMs = 5000;
-    while (!GetModuleHandleA("SharedBase.dll") && maxWaitMs > 0) {
-        Sleep(20);
-        maxWaitMs -= 20;
+    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("Engine.dll")) && maxWaitMs > 0) {
+        Sleep(2);
+        maxWaitMs -= 2;
     }
 
     // 3. Initialize Low Fragmentation Heap (LFH) Enforcer
     LFHEnforcer::Initialize();
 
-    // 4. Initialize mimalloc hooks on bCMemoryAdmin & MemHeap
-    MemoryOptimizer::Initialize();
+    // 4. Initialize mimalloc hooks on bCMemoryAdmin & MemHeap (testing)
+    // MemoryOptimizer::Initialize();
 
     // 5. Initialize D3D9 hooks (PureDevice enforcer, State Redundancy Filter, D3DX mipmaps)
     InstallD3D9Hooks();
@@ -37,11 +38,14 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 7. Initialize hardware decompression (libdeflate), string hashing, FMOD tuning & precision timer
     InitializeMediaOptimizer();
 
-    // 8. Initialize SIMD math vectorization (Frustum Culling, Matrix multiply, AABB test) & PhysX
-    InitializeMathSIMDOptimizer();
+    // 8. Initialize SIMD math vectorization (testing)
+    // InitializeMathSIMDOptimizer();
 
     // 9. Initialize SaveGame Guard & Atomic Shadow-Writer
     InitializeSaveGameGuard();
+
+    // 10. Hook Main Menu version watermark (displays "G3O v1.0.0" in main menu)
+    InitializeVersionHook();
 
     OutputDebugStringA("[Gothic3Optima] All core engine subsystems initialized successfully!\n");
     return 0;

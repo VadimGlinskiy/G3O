@@ -297,7 +297,8 @@ void InitializeStreamingOptimizer() {
     }
     */
 
-    // 2. Hook eCThreadPool::Create in Engine.dll
+    // 2. Thread pool & CacheOut hooks disabled to preserve engine thread safety during startup
+    /*
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
     if (hEngine) {
         void* pThreadPoolCreate = (void*)GetProcAddress(hEngine, "?Create@eCThreadPool@@QAE_NK@Z");
@@ -317,6 +318,7 @@ void InitializeStreamingOptimizer() {
             }
         }
     }
+    */
 }
 
 void ShutdownStreamingOptimizer() {

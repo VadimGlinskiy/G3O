@@ -26,17 +26,7 @@ namespace LFHEnforcer {
         // 1. Enable LFH on the default process heap
         EnableLFH(GetProcessHeap());
 
-        // 2. Enable LFH on all existing process heaps
-        DWORD numHeaps = GetProcessHeaps(0, nullptr);
-        if (numHeaps > 0) {
-            std::vector<HANDLE> heaps(numHeaps);
-            DWORD actual = GetProcessHeaps(numHeaps, heaps.data());
-            for (DWORD i = 0; i < actual; ++i) {
-                EnableLFH(heaps[i]);
-            }
-        }
-
-        // 3. Hook HeapCreate so any newly created heap in Engine.dll / CRT automatically gets LFH
+        // 2. Hook HeapCreate so any newly created heap in Engine.dll / CRT automatically gets LFH
         HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
         if (hKernel32) {
             FARPROC pHeapCreate = GetProcAddress(hKernel32, "HeapCreate");

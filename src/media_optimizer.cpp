@@ -154,7 +154,8 @@ void InitializeMediaOptimizer() {
     }
     */
 
-    // 3. Hook g_GetHashValue in SharedBase.dll
+    // 3. String hashing hooks disabled to prevent hash table desynchronization
+    /*
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
     if (hSharedBase) {
         void* pHashBCString = (void*)GetProcAddress(hSharedBase, "??$g_GetHashValue@VbCString@@@@YGKABVbCString@@@Z");
@@ -173,6 +174,7 @@ void InitializeMediaOptimizer() {
             }
         }
     }
+    */
 
     // 4. Hook FMOD Ex
     HMODULE hFmod = GetModuleHandleA("fmodex.dll");

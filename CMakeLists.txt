@@ -50,6 +50,8 @@ add_library(dinput8 SHARED
     src/math_simd_optimizer.h
     src/savegame_guard.cpp
     src/savegame_guard.h
+    src/version_watermark.cpp
+    src/version_watermark.h
 )
 
 target_include_directories(dinput8 PRIVATE

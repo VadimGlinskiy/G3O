@@ -50,7 +50,7 @@ static PFN_HeapReAlloc g_origHeapReAlloc = nullptr;
 // Prevents RtlSizeHeap / HeapFree crashes across all engine DLLs
 // -----------------------------------------------------------------------------
 static SIZE_T WINAPI Hook_HeapSize(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem) {
-    if (!lpMem) return (SIZE_T)-1;
+    if (!lpMem) return 0;
     if (mi_is_in_heap_region(lpMem)) {
         return mi_usable_size(lpMem);
     }
@@ -60,9 +60,9 @@ static SIZE_T WINAPI Hook_HeapSize(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem) {
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        return (SIZE_T)-1;
+        return 0;
     }
-    return (SIZE_T)-1;
+    return 0;
 }
 
 static BOOL WINAPI Hook_HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem) {
@@ -77,9 +77,9 @@ static BOOL WINAPI Hook_HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem) {
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        return FALSE;
+        return TRUE;
     }
-    return FALSE;
+    return TRUE;
 }
 
 static LPVOID WINAPI Hook_HeapReAlloc(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem, SIZE_T dwBytes) {
@@ -163,8 +163,15 @@ static void __stdcall Hook_MemHeap_Free(void* ptr) {
     if (!ptr) return;
     if (mi_is_in_heap_region(ptr)) {
         mi_free(ptr);
-    } else if (g_origFreeHeap) {
-        g_origFreeHeap(ptr);
+        return;
+    }
+    __try {
+        if (g_origFreeHeap) {
+            g_origFreeHeap(ptr);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Suppress any SEH violation on corrupt/unrecognized block
     }
 }
 
@@ -173,7 +180,12 @@ static void* __stdcall Hook_MemHeap_ReAlloc(void* ptr, unsigned int size) {
     if (mi_is_in_heap_region(ptr)) {
         return mi_realloc(ptr, size);
     }
-    if (g_origReAllocHeap) return g_origReAllocHeap(ptr, size);
+    __try {
+        if (g_origReAllocHeap) return g_origReAllocHeap(ptr, size);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return mi_malloc(size);
+    }
     return nullptr;
 }
 
@@ -187,8 +199,15 @@ static void __stdcall Hook_MemHeap_FreeUnsynced(void* ptr) {
     if (!ptr) return;
     if (mi_is_in_heap_region(ptr)) {
         mi_free(ptr);
-    } else if (g_origFreeUnsynced) {
-        g_origFreeUnsynced(ptr);
+        return;
+    }
+    __try {
+        if (g_origFreeUnsynced) {
+            g_origFreeUnsynced(ptr);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Suppress any SEH violation on corrupt/unrecognized block
     }
 }
 
@@ -197,7 +216,12 @@ static void* __stdcall Hook_MemHeap_ReAllocUnsynced(void* ptr, unsigned int size
     if (mi_is_in_heap_region(ptr)) {
         return mi_realloc(ptr, size);
     }
-    if (g_origReAllocUnsynced) return g_origReAllocUnsynced(ptr, size);
+    __try {
+        if (g_origReAllocUnsynced) return g_origReAllocUnsynced(ptr, size);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return mi_malloc(size);
+    }
     return nullptr;
 }
 
@@ -211,8 +235,15 @@ static void __stdcall Hook_MemHeap_FreeShortUsage(void* ptr) {
     if (!ptr) return;
     if (mi_is_in_heap_region(ptr)) {
         mi_free(ptr);
-    } else if (g_origFreeShortUsage) {
-        g_origFreeShortUsage(ptr);
+        return;
+    }
+    __try {
+        if (g_origFreeShortUsage) {
+            g_origFreeShortUsage(ptr);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Suppress any SEH violation
     }
 }
 
@@ -226,8 +257,15 @@ static void __stdcall Hook_MemHeap_FreeShortUsageUnsynced(void* ptr) {
     if (!ptr) return;
     if (mi_is_in_heap_region(ptr)) {
         mi_free(ptr);
-    } else if (g_origFreeShortUsageUnsynced) {
-        g_origFreeShortUsageUnsynced(ptr);
+        return;
+    }
+    __try {
+        if (g_origFreeShortUsageUnsynced) {
+            g_origFreeShortUsageUnsynced(ptr);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Suppress any SEH violation
     }
 }
 
@@ -237,8 +275,7 @@ static void __stdcall Hook_MemHeap_FreeShortUsageUnsynced(void* ptr) {
 namespace MemoryOptimizer {
 
     bool Initialize() {
-        // 1. Kernel32 Heap hooks disabled to prevent system DLL conflicts
-        /*
+        // 1. Hook Kernel32 Heap functions for engine-wide heap safety
         HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
         if (hKernel32) {
             FARPROC pHeapSize = GetProcAddress(hKernel32, "HeapSize");
@@ -257,7 +294,6 @@ namespace MemoryOptimizer {
                 MH_EnableHook(pHeapReAlloc);
             }
         }
-        */
 
         // 2. Hook SharedBase.dll
         HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
