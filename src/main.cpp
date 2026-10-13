@@ -13,6 +13,7 @@
 #include "fall_guard.h"
 #include "lru_cache_manager.h"
 #include "high_memory_cache.h"
+#include "physics_stabilizer.h"
 #include <minhook.h>
 
 static DWORD WINAPI OptimaInitThread(LPVOID) {
@@ -56,6 +57,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 12. Initialize Adaptive LRU Cache Eviction (Phase 13.2)
     LRUCacheManager::Initialize();
 
+    // 13. Initialize PhysX Fixed Physics Substepping (Phase 15.1)
+    InitializePhysicsStabilizer();
+
     OutputDebugStringA("[Gothic3Optima] All core engine subsystems initialized successfully!\n");
     return 0;
 }
@@ -84,6 +88,7 @@ static void InitializeOptima() {
 
 static void ShutdownOptima() {
     OutputDebugStringA("[Gothic3Optima] Shutting down...\n");
+    ShutdownPhysicsStabilizer();
     LRUCacheManager::Shutdown();
     ShutdownFallGuard();
     ShutdownSaveGameGuard();

@@ -58,6 +58,8 @@ add_library(dinput8 SHARED
     src/lru_cache_manager.h
     src/high_memory_cache.cpp
     src/high_memory_cache.h
+    src/physics_stabilizer.cpp
+    src/physics_stabilizer.h
 )
 
 target_include_directories(dinput8 PRIVATE
