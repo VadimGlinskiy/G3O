@@ -16,9 +16,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 1. Lock CPU affinity to P-cores early
     InitializeCPUTopology();
 
-    // 2. Wait until game engine libraries (SharedBase.dll, Engine.dll) are mapped into memory
+    // 2. Wait until game engine libraries (SharedBase.dll, Engine.dll, FileSystem.dll) are mapped into memory
     int maxWaitMs = 5000;
-    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("Engine.dll")) && maxWaitMs > 0) {
+    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("Engine.dll") || !GetModuleHandleA("FileSystem.dll")) && maxWaitMs > 0) {
         Sleep(2);
         maxWaitMs -= 2;
     }

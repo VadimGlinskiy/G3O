@@ -31,14 +31,14 @@ struct ZlibStreamProxy {
 #define Z_STREAM_END 1
 #define Z_FINISH     4
 
-typedef int (__cdecl* Inflate_t)(ZlibStreamProxy* strm, int flush);
-static Inflate_t Real_Inflate = NULL;
+typedef int (__stdcall* FileSystem_Inflate_t)(ZlibStreamProxy* strm);
+static FileSystem_Inflate_t Real_FileSystem_Inflate = NULL;
 
 static thread_local struct libdeflate_decompressor* t_decompressor = nullptr;
 static volatile DWORD g_libdeflateOperations = 0;
 static volatile DWORD g_zlibFallbackOperations = 0;
 
-static int __cdecl Hooked_Inflate(ZlibStreamProxy* strm, int flush) {
+static int __stdcall Hooked_FileSystem_Inflate(ZlibStreamProxy* strm) {
     if (strm && strm->next_in && strm->next_out && strm->avail_in > 0 && strm->avail_out > 0) {
         if (!t_decompressor) {
             t_decompressor = libdeflate_alloc_decompressor();
@@ -46,13 +46,23 @@ static int __cdecl Hooked_Inflate(ZlibStreamProxy* strm, int flush) {
 
         if (t_decompressor) {
             size_t actual_out_nbytes = 0;
-            // Attempt fast SIMD zlib-stream decompression
+            // 1. Attempt fast SIMD zlib-stream decompression (standard RFC 1950)
             enum libdeflate_result res = libdeflate_zlib_decompress(
                 t_decompressor,
                 strm->next_in, strm->avail_in,
                 strm->next_out, strm->avail_out,
                 &actual_out_nbytes
             );
+
+            // 2. Attempt raw deflate stream decompression if zlib header was not present
+            if (res != LIBDEFLATE_SUCCESS) {
+                res = libdeflate_deflate_decompress(
+                    t_decompressor,
+                    strm->next_in, strm->avail_in,
+                    strm->next_out, strm->avail_out,
+                    &actual_out_nbytes
+                );
+            }
 
             if (res == LIBDEFLATE_SUCCESS) {
                 strm->next_in += strm->avail_in;
@@ -61,13 +71,14 @@ static int __cdecl Hooked_Inflate(ZlibStreamProxy* strm, int flush) {
                 strm->avail_out -= (unsigned int)actual_out_nbytes;
                 strm->total_out += (unsigned long)actual_out_nbytes;
                 InterlockedIncrement((volatile LONG*)&g_libdeflateOperations);
-                return Z_STREAM_END;
+                return Z_STREAM_END; // 1
             }
         }
     }
 
+    // Graceful fallback to original scalar zlib
     InterlockedIncrement((volatile LONG*)&g_zlibFallbackOperations);
-    return Real_Inflate(strm, flush);
+    return Real_FileSystem_Inflate(strm);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,16 +208,16 @@ void InitializeMediaOptimizer() {
     timeBeginPeriod(1);
     OutputDebugStringA("[Gothic3Optima] 1ms High-Resolution Multimedia Timer activated.\n");
 
-    // 2. FileSystem.dll internal zlib inflate hook disabled (unexported static function)
-    /*
+    // 2. FileSystem.dll internal zlib inflate hook (Phase 11.2 - Hardware SIMD Decompression)
     HMODULE hFileSystem = GetModuleHandleA("FileSystem.dll");
     if (hFileSystem) {
-        void* pInflate = (void*)((uintptr_t)hFileSystem + 0x153dc);
-        if (MH_CreateHook(pInflate, (LPVOID)Hooked_Inflate, (LPVOID*)&Real_Inflate) == MH_OK) {
+        // RVA 0xA430 in FileSystem.dll is FileSystem_Inflate(ZlibStreamProxy* strm)
+        void* pInflate = (void*)((uintptr_t)hFileSystem + 0xA430);
+        if (MH_CreateHook(pInflate, (LPVOID)Hooked_FileSystem_Inflate, (LPVOID*)&Real_FileSystem_Inflate) == MH_OK) {
             MH_EnableHook(pInflate);
+            OutputDebugStringA("[Gothic3Optima] Phase 11.2: libdeflate AVX2/SSE4.2 hardware decompression active (+0xA430)!\n");
         }
     }
-    */
 
     // 3. String hashing hooks disabled to prevent hash table desynchronization
     /*
