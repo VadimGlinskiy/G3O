@@ -2,7 +2,7 @@
 
 [English](README_en.md) · **Русский**
 
-# Gothic 3 Optima (G3O)
+# Gothic 3 Optima (G3O) Тестовая версия
 
 ### Библиотека оптимизации движка, интеграция DXVK и защита сохранений для Gothic 3
 

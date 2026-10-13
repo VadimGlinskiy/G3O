@@ -1,27 +1,32 @@
 #include "streaming_optimizer.h"
 #include <minhook.h>
+#include <windows.h>
 #include <stdio.h>
 #include <unordered_map>
 
 // ---------------------------------------------------------------------------
-// 1. In-Memory Archive Streaming (Memory-Mapped Files for .pak archives)
+// In-Memory Archive Streaming (Memory-Mapped Files for .pak archives)
 // ---------------------------------------------------------------------------
 
 struct MappedArchive {
     void*    pView;
     HANDLE   hMapping;
     uint64_t fileSize;
-    uint64_t currentPos;
 };
 
 static CRITICAL_SECTION g_archiveLock;
 static std::unordered_map<HANDLE, MappedArchive> g_mappedArchives;
+static volatile uint64_t g_currentMmapTotalBytes = 0;
 static volatile DWORD g_mmapReadOperations = 0;
 static volatile uint64_t g_mmapBytesRead = 0;
 
-// Maximum size of a single archive to keep entirely in virtual memory (350 MB)
-// Ensures we don't exhaust the 32-bit address space while accelerating 90%+ of archives.
-static const uint64_t MAX_MMAP_ARCHIVE_SIZE = 350ULL * 1024ULL * 1024ULL;
+// Maximum size of a single archive to keep entirely in virtual memory (200 MB)
+// Accellerates physics, animations, templates, scripts, lightmaps, UI, and all patch archives.
+static const uint64_t MAX_MMAP_ARCHIVE_SIZE = 200ULL * 1024ULL * 1024ULL;
+
+// Total memory budget for mapped views (750 MB)
+// Guarantees >3.2 GB of clean virtual address space remains for the 32-bit engine.
+static const uint64_t MAX_TOTAL_MMAP_BUDGET = 750ULL * 1024ULL * 1024ULL;
 
 typedef HANDLE (WINAPI* CreateFileA_t)(
     LPCSTR lpFileName,
@@ -43,13 +48,13 @@ typedef BOOL (WINAPI* ReadFile_t)(
 );
 static ReadFile_t Real_ReadFile = NULL;
 
-typedef DWORD (WINAPI* SetFilePointer_t)(
+typedef BOOL (WINAPI* SetFilePointerEx_t)(
     HANDLE hFile,
-    LONG lDistanceToMove,
-    PLONG lpDistanceToMoveHigh,
+    LARGE_INTEGER liDistanceToMove,
+    PLARGE_INTEGER lpNewFilePointer,
     DWORD dwMoveMethod
 );
-static SetFilePointer_t Real_SetFilePointer = NULL;
+static SetFilePointerEx_t Real_SetFilePointerEx = NULL;
 
 typedef BOOL (WINAPI* CloseHandle_t)(HANDLE hObject);
 static CloseHandle_t Real_CloseHandle = NULL;
@@ -58,10 +63,23 @@ static bool HasArchiveExtension(const char* path) {
     if (!path) return false;
     const char* ext = strrchr(path, '.');
     if (!ext) return false;
-    return (_stricmp(ext, ".pak") == 0 ||
-            _stricmp(ext, ".nod") == 0 ||
-            _stricmp(ext, ".cpt") == 0 ||
-            _stricmp(ext, ".hdr") == 0);
+
+    if (_stricmp(ext, ".pak") == 0 ||
+        _stricmp(ext, ".nod") == 0 ||
+        _stricmp(ext, ".cpt") == 0 ||
+        _stricmp(ext, ".hdr") == 0) {
+        return true;
+    }
+
+    // Check .p00 - .p99 and .c00 - .c99 patch archives
+    size_t len = strlen(ext);
+    if (len == 4 && (ext[1] == 'p' || ext[1] == 'P' || ext[1] == 'c' || ext[1] == 'C')) {
+        if (isdigit((unsigned char)ext[2]) && isdigit((unsigned char)ext[3])) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static HANDLE WINAPI Hooked_CreateFileA(
@@ -75,83 +93,51 @@ static HANDLE WINAPI Hooked_CreateFileA(
 ) {
     bool isArchive = HasArchiveExtension(lpFileName);
     if (isArchive) {
-        // Optimize OS caching flags for archive streaming
+        // Optimize OS cache behavior for archive reads
         dwFlagsAndAttributes |= FILE_FLAG_SEQUENTIAL_SCAN;
     }
 
     HANDLE hFile = Real_CreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
                                    dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 
-    if (hFile != INVALID_HANDLE_VALUE && isArchive && (dwDesiredAccess & GENERIC_READ)) {
+    if (hFile != INVALID_HANDLE_VALUE && isArchive && (dwDesiredAccess & GENERIC_READ) && !(dwDesiredAccess & (GENERIC_WRITE | FILE_WRITE_DATA))) {
         LARGE_INTEGER size;
         if (GetFileSizeEx(hFile, &size) && (uint64_t)size.QuadPart > 0 && (uint64_t)size.QuadPart <= MAX_MMAP_ARCHIVE_SIZE) {
-            HANDLE hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-            if (hMapping) {
-                void* pView = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
-                if (pView) {
-                    MappedArchive ma;
-                    ma.pView = pView;
-                    ma.hMapping = hMapping;
-                    ma.fileSize = (uint64_t)size.QuadPart;
-                    ma.currentPos = 0;
+            MEMORYSTATUSEX memStatus;
+            memStatus.dwLength = sizeof(memStatus);
+            GlobalMemoryStatusEx(&memStatus);
 
-                    EnterCriticalSection(&g_archiveLock);
-                    g_mappedArchives[hFile] = ma;
-                    LeaveCriticalSection(&g_archiveLock);
+            // Require at least 1200 MB free virtual memory before committing a new view
+            if (memStatus.ullAvailVirtual >= 1200ULL * 1024ULL * 1024ULL) {
+                EnterCriticalSection(&g_archiveLock);
+                if (g_currentMmapTotalBytes + (uint64_t)size.QuadPart <= MAX_TOTAL_MMAP_BUDGET) {
+                    HANDLE hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+                    if (hMapping) {
+                        void* pView = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+                        if (pView) {
+                            MappedArchive ma;
+                            ma.pView = pView;
+                            ma.hMapping = hMapping;
+                            ma.fileSize = (uint64_t)size.QuadPart;
 
-                    char buf[256];
-                    sprintf_s(buf, "[Gothic3Optima] Memory-mapped archive: %s (%.2f MB)\n",
-                        lpFileName, (double)size.QuadPart / (1024.0 * 1024.0));
-                    OutputDebugStringA(buf);
-                } else {
-                    CloseHandle(hMapping);
+                            g_mappedArchives[hFile] = ma;
+                            g_currentMmapTotalBytes += (uint64_t)size.QuadPart;
+
+                            char buf[256];
+                            sprintf_s(buf, "[Gothic3Optima] Memory-mapped archive: %s (%.2f MB, total RAM mapped: %.2f MB)\n",
+                                lpFileName, (double)size.QuadPart / (1024.0 * 1024.0),
+                                (double)g_currentMmapTotalBytes / (1024.0 * 1024.0));
+                            OutputDebugStringA(buf);
+                        } else {
+                            CloseHandle(hMapping);
+                        }
+                    }
                 }
+                LeaveCriticalSection(&g_archiveLock);
             }
         }
     }
     return hFile;
-}
-
-static DWORD WINAPI Hooked_SetFilePointer(
-    HANDLE hFile,
-    LONG lDistanceToMove,
-    PLONG lpDistanceToMoveHigh,
-    DWORD dwMoveMethod
-) {
-    EnterCriticalSection(&g_archiveLock);
-    auto it = g_mappedArchives.find(hFile);
-    if (it != g_mappedArchives.end()) {
-        MappedArchive& ma = it->second;
-        int64_t moveDist = (int64_t)lDistanceToMove;
-        if (lpDistanceToMoveHigh && *lpDistanceToMoveHigh) {
-            moveDist |= ((int64_t)(*lpDistanceToMoveHigh) << 32);
-        }
-
-        uint64_t newPos = ma.currentPos;
-        switch (dwMoveMethod) {
-        case FILE_BEGIN:
-            newPos = (moveDist >= 0) ? (uint64_t)moveDist : 0;
-            break;
-        case FILE_CURRENT:
-            newPos = (int64_t)ma.currentPos + moveDist >= 0 ? (uint64_t)((int64_t)ma.currentPos + moveDist) : 0;
-            break;
-        case FILE_END:
-            newPos = (int64_t)ma.fileSize + moveDist >= 0 ? (uint64_t)((int64_t)ma.fileSize + moveDist) : 0;
-            break;
-        }
-
-        if (newPos > ma.fileSize) newPos = ma.fileSize;
-        ma.currentPos = newPos;
-
-        if (lpDistanceToMoveHigh) {
-            *lpDistanceToMoveHigh = (LONG)(newPos >> 32);
-        }
-        LeaveCriticalSection(&g_archiveLock);
-        return (DWORD)(newPos & 0xFFFFFFFF);
-    }
-    LeaveCriticalSection(&g_archiveLock);
-
-    return Real_SetFilePointer(hFile, lDistanceToMove, lpDistanceToMoveHigh, dwMoveMethod);
 }
 
 static BOOL WINAPI Hooked_ReadFile(
@@ -161,28 +147,39 @@ static BOOL WINAPI Hooked_ReadFile(
     LPDWORD lpNumberOfBytesRead,
     LPOVERLAPPED lpOverlapped
 ) {
-    // Only intercept synchronous non-overlapped reads for mapped archives
-    if (!lpOverlapped) {
+    if (!lpOverlapped && lpBuffer && nNumberOfBytesToRead > 0 && Real_SetFilePointerEx) {
         EnterCriticalSection(&g_archiveLock);
         auto it = g_mappedArchives.find(hFile);
         if (it != g_mappedArchives.end()) {
-            MappedArchive& ma = it->second;
-            uint64_t remain = (ma.currentPos < ma.fileSize) ? (ma.fileSize - ma.currentPos) : 0;
-            DWORD toCopy = (DWORD)((remain < (uint64_t)nNumberOfBytesToRead) ? remain : (uint64_t)nNumberOfBytesToRead);
+            MappedArchive ma = it->second;
 
-            if (toCopy > 0) {
-                memcpy(lpBuffer, (const char*)ma.pView + ma.currentPos, toCopy);
-                ma.currentPos += toCopy;
+            // Query current file position from OS kernel handle
+            LARGE_INTEGER zero = { 0 };
+            LARGE_INTEGER currPos = { 0 };
+            if (Real_SetFilePointerEx(hFile, zero, &currPos, FILE_CURRENT)) {
+                uint64_t pos = (uint64_t)currPos.QuadPart;
+                uint64_t remain = (pos < ma.fileSize) ? (ma.fileSize - pos) : 0;
+                DWORD toCopy = (DWORD)((remain < (uint64_t)nNumberOfBytesToRead) ? remain : (uint64_t)nNumberOfBytesToRead);
+
+                if (toCopy > 0) {
+                    memcpy(lpBuffer, (const char*)ma.pView + pos, toCopy);
+                }
+
+                // Advance kernel file pointer atomically to keep OS handle in sync
+                LARGE_INTEGER advance;
+                advance.QuadPart = toCopy;
+                Real_SetFilePointerEx(hFile, advance, NULL, FILE_CURRENT);
+
+                if (lpNumberOfBytesRead) {
+                    *lpNumberOfBytesRead = toCopy;
+                }
+
+                g_mmapReadOperations++;
+                g_mmapBytesRead += toCopy;
+
+                LeaveCriticalSection(&g_archiveLock);
+                return TRUE;
             }
-
-            if (lpNumberOfBytesRead) {
-                *lpNumberOfBytesRead = toCopy;
-            }
-
-            g_mmapReadOperations++;
-            g_mmapBytesRead += toCopy;
-            LeaveCriticalSection(&g_archiveLock);
-            return TRUE;
         }
         LeaveCriticalSection(&g_archiveLock);
     }
@@ -194,71 +191,18 @@ static BOOL WINAPI Hooked_CloseHandle(HANDLE hObject) {
     EnterCriticalSection(&g_archiveLock);
     auto it = g_mappedArchives.find(hObject);
     if (it != g_mappedArchives.end()) {
-        UnmapViewOfFile(it->second.pView);
-        CloseHandle(it->second.hMapping);
+        MappedArchive ma = it->second;
+        g_currentMmapTotalBytes -= ma.fileSize;
         g_mappedArchives.erase(it);
+        LeaveCriticalSection(&g_archiveLock);
+
+        UnmapViewOfFile(ma.pView);
+        CloseHandle(ma.hMapping);
+    } else {
+        LeaveCriticalSection(&g_archiveLock);
     }
-    LeaveCriticalSection(&g_archiveLock);
 
     return Real_CloseHandle(hObject);
-}
-
-// ---------------------------------------------------------------------------
-// 2. Thread Pool Expansion (eCThreadPool::Create in Engine.dll)
-// ---------------------------------------------------------------------------
-
-typedef bool (__thiscall* eCThreadPool_Create_t)(void* pThis, unsigned long numThreads);
-static eCThreadPool_Create_t Real_eCThreadPool_Create = NULL;
-
-static bool __fastcall Hooked_eCThreadPool_Create(void* pThis, void* /*edx*/, unsigned long numThreads) {
-    SYSTEM_INFO sysInfo;
-    GetSystemInfo(&sysInfo);
-    unsigned long optimalThreads = sysInfo.dwNumberOfProcessors;
-    if (optimalThreads < 4) optimalThreads = 4;
-    if (optimalThreads > 8) optimalThreads = 8; // Avoid thread contention
-
-    char buf[128];
-    sprintf_s(buf, "[Gothic3Optima] eCThreadPool::Create: Scaled threads from %lu to %lu\n", numThreads, optimalThreads);
-    OutputDebugStringA(buf);
-
-    return Real_eCThreadPool_Create(pThis, optimalThreads);
-}
-
-// ---------------------------------------------------------------------------
-// 3. Cache Anti-Thrashing & OOM Guard (eCMainCache::CacheOutResource)
-// ---------------------------------------------------------------------------
-
-typedef bool (__thiscall* CacheOutResource_t)(void* pThis, void* pEntity, int behavior);
-static CacheOutResource_t Real_CacheOutResource = NULL;
-static volatile DWORD g_evictionsThrottled = 0;
-
-static bool __fastcall Hooked_CacheOutResource(void* pThis, void* /*edx*/, void* pEntity, int behavior) {
-    MEMORYSTATUSEX memStatus;
-    memStatus.dwLength = sizeof(memStatus);
-    GlobalMemoryStatusEx(&memStatus);
-
-    // OOM Guard: Virtual memory critically low (< 200 MB free)
-    if (memStatus.ullAvailVirtual < 200ULL * 1024ULL * 1024ULL) {
-        static DWORD s_lastOOMAlert = 0;
-        DWORD now = GetTickCount();
-        if (now - s_lastOOMAlert > 5000) {
-            char buf[128];
-            sprintf_s(buf, "[Gothic3Optima] OOM Guard: Low virtual memory (%.1f MB free)! Forcing cache eviction.\n",
-                (double)memStatus.ullAvailVirtual / (1024.0 * 1024.0));
-            OutputDebugStringA(buf);
-            s_lastOOMAlert = now;
-        }
-        return Real_CacheOutResource(pThis, pEntity, behavior);
-    }
-
-    // Cache Anti-Thrashing: Ample memory available (> 600 MB free virtual memory)
-    // Behavior == 0 represents passive/speculative cache eviction during camera rotations
-    if (memStatus.ullAvailVirtual >= 600ULL * 1024ULL * 1024ULL && behavior == 0) {
-        InterlockedIncrement((volatile LONG*)&g_evictionsThrottled);
-        return true; // Keep resource cached in memory
-    }
-
-    return Real_CacheOutResource(pThis, pEntity, behavior);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,14 +212,11 @@ static bool __fastcall Hooked_CacheOutResource(void* pThis, void* /*edx*/, void*
 void InitializeStreamingOptimizer() {
     InitializeCriticalSection(&g_archiveLock);
 
-    // 1. File IO hooks disabled - Gothic 3 uses multi-threaded concurrent reads per handle,
-    // which caused file pointer race conditions and corrupted string reads.
-    /*
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
+        Real_SetFilePointerEx = (SetFilePointerEx_t)GetProcAddress(hKernel32, "SetFilePointerEx");
         void* pCreateFileA = (void*)GetProcAddress(hKernel32, "CreateFileA");
         void* pReadFile = (void*)GetProcAddress(hKernel32, "ReadFile");
-        void* pSetFilePointer = (void*)GetProcAddress(hKernel32, "SetFilePointer");
         void* pCloseHandle = (void*)GetProcAddress(hKernel32, "CloseHandle");
 
         if (pCreateFileA) {
@@ -286,39 +227,13 @@ void InitializeStreamingOptimizer() {
             MH_CreateHook(pReadFile, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile);
             MH_EnableHook(pReadFile);
         }
-        if (pSetFilePointer) {
-            MH_CreateHook(pSetFilePointer, (LPVOID)Hooked_SetFilePointer, (LPVOID*)&Real_SetFilePointer);
-            MH_EnableHook(pSetFilePointer);
-        }
         if (pCloseHandle) {
             MH_CreateHook(pCloseHandle, (LPVOID)Hooked_CloseHandle, (LPVOID*)&Real_CloseHandle);
             MH_EnableHook(pCloseHandle);
         }
-    }
-    */
 
-    // 2. Thread pool & CacheOut hooks disabled to preserve engine thread safety during startup
-    /*
-    HMODULE hEngine = GetModuleHandleA("Engine.dll");
-    if (hEngine) {
-        void* pThreadPoolCreate = (void*)GetProcAddress(hEngine, "?Create@eCThreadPool@@QAE_NK@Z");
-        if (pThreadPoolCreate) {
-            if (MH_CreateHook(pThreadPoolCreate, (LPVOID)Hooked_eCThreadPool_Create, (LPVOID*)&Real_eCThreadPool_Create) == MH_OK) {
-                MH_EnableHook(pThreadPoolCreate);
-                OutputDebugStringA("[Gothic3Optima] Hooked eCThreadPool::Create (4-8 worker threads).\n");
-            }
-        }
-
-        // 3. Hook eCMainCache::CacheOutResource in Engine.dll
-        void* pCacheOut = (void*)GetProcAddress(hEngine, "?CacheOutResource@eCMainCache@@QAE_NAAVeCResourceDataEntity@@W4eEResourceCacheBehavior@@@Z");
-        if (pCacheOut) {
-            if (MH_CreateHook(pCacheOut, (LPVOID)Hooked_CacheOutResource, (LPVOID*)&Real_CacheOutResource) == MH_OK) {
-                MH_EnableHook(pCacheOut);
-                OutputDebugStringA("[Gothic3Optima] Hooked eCMainCache::CacheOutResource (Anti-thrashing & OOM Guard).\n");
-            }
-        }
+        OutputDebugStringA("[Gothic3Optima] In-Memory Archive Streaming (Memory-Mapped I/O) initialized successfully.\n");
     }
-    */
 }
 
 void ShutdownStreamingOptimizer() {
@@ -328,6 +243,7 @@ void ShutdownStreamingOptimizer() {
         CloseHandle(pair.second.hMapping);
     }
     g_mappedArchives.clear();
+    g_currentMmapTotalBytes = 0;
     LeaveCriticalSection(&g_archiveLock);
     DeleteCriticalSection(&g_archiveLock);
 }
