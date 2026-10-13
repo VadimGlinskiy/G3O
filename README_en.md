@@ -18,13 +18,7 @@
 
 <br />
 
-**[Quick Start](#-quick-start) · [DXVK Presets](#-dxvk-pipeline-presets) · [Comparison Matrix](#-subsystems-comparison-matrix) · [SaveGame Guard](#-savegame-guard-architecture) · [Subsystems](#-core-subsystems) · [FAQ](#-frequently-asked-questions)**
-
-<br />
-
-```cmd
-.\switch_dxvk.bat
-```
+**[Quick Start](#-quick-start) · [Releases & Downloads](#-release-packages--downloads) · [Comparison Matrix](#-subsystems-comparison-matrix) · [SaveGame Guard](#-savegame-guard-architecture) · [Subsystems](#-core-subsystems) · [FAQ](#-frequently-asked-questions)**
 
 <br />
 
@@ -34,7 +28,7 @@
 
 ## 📌 Overview
 
-**Gothic 3 Optima (G3O)** is not a conventional mod or a set of `ge3.ini` tweaks. It is an in-process native DLL proxy module (`dinput8.dll`) injected directly into the `Gothic3.exe` process space. It hooks virtual tables and IAT calls inside the Genome Engine (`Engine.dll`, `Game.dll`, `SharedBase.dll`, `FileSystem.dll`, `PhysXCore.dll`), replacing 2005–2006 engine bottlenecks with state-of-the-art parallel, vectorized algorithms.
+**Gothic 3 Optima (G3O)** is not a conventional mod or a set of `ge3.ini` tweaks. It is an in-process native DLL proxy module (`dinput8.dll`) injected directly into the `Gothic3.exe` process space. It hooks virtual tables and calls inside the Genome Engine (`Engine.dll`, `Game.dll`, `SharedBase.dll`, `FileSystem.dll`, `PhysXCore.dll`), replacing 2005–2006 engine bottlenecks with state-of-the-art parallel, vectorized algorithms.
 
 ### Key Solved Issues:
 1. 🛑 **Continuous micro-freezes and traversal stutters** across Myrtana, Varant, and Nordmar cell transitions.
@@ -46,44 +40,36 @@
 
 ## 🚀 Quick Start
 
-### Step 1. Installation
-Copy the compiled binaries into your Gothic 3 game directory (where `Gothic3.exe` resides):
-```text
-Gothic 3/
-├── dinput8.dll           <-- Gothic 3 Optima core proxy module
-├── d3d9.dll              <-- DXVK Vulkan translator
-├── dxgi.dll              <-- DXVK DXGI infrastructure
-├── dxvk.conf             <-- Tuned Vulkan profile
-├── switch_dxvk.bat       <-- 1-click DXVK preset switcher
-└── dxvk_presets/         <-- Presets directory (1.10.1, 1.10.3, 2.4.1, 3.0.1, 3.0.1 HDR)
-```
+Installation takes just two simple steps:
 
-### Step 2. Select DXVK Profile
-Run `switch_dxvk.bat` in your game folder and pick the preset best suited for your hardware:
-```cmd
-[1] DXVK 1.10.1 - Async    (Older version. Use for Intel GPUs or legacy hardware)
-[2] DXVK 1.10.3 - Async    (Older version. Use if GPU lacks Vulkan 1.3 support)
-[3] DXVK 2.4.1  - Stable   (Default: AMD Polaris/GCN, NVIDIA Pascal/Turing/Ampere)
-[4] DXVK 3.0.1             (Current version for GPUs with Vulkan 1.4 support)
-[5] DXVK 3.0.1  - HDR      (DXVK 3.0.1 with HDR output for HDR monitors & TVs)
-```
-
-### Step 3. Launch the Game
-Run `Gothic3.exe` through Steam, GOG, or standalone. All Optima hooks and optimizations initialize automatically in the background.
+1. **Choose and download the release archive** for your GPU from the [Release Packages & Downloads](#-release-packages--downloads) table.
+2. **Unpack archive contents** into your Gothic 3 game directory (where `Gothic3.exe` resides):
+   ```text
+   Gothic 3/
+   ├── dinput8.dll         <-- Gothic 3 Optima core proxy
+   ├── d3d9.dll            <-- DXVK Vulkan translator
+   ├── dxgi.dll            <-- DXVK DXGI infrastructure
+   ├── dxvk.conf           <-- Tuned Vulkan profile
+   └── README_INSTALL.txt  <-- Version guide
+   ```
+3. **Launch the game** through Steam, GOG, or `Gothic3.exe` directly. Optima hooks attach automatically.
 
 ---
 
-## 🎮 DXVK Pipeline Presets
+## 📦 Release Packages & Downloads
 
-Five pre-configured Direct3D 9 $\to$ Vulkan presets tailored specifically for Gothic 3:
+Each release package is a **standalone, ready-to-use archive** containing `dinput8.dll`, the matching version of `d3d9.dll` / `dxgi.dll`, and a tailored `dxvk.conf`:
 
-| Preset | DXVK Version | Characteristics | Target Hardware |
-| :--- | :--- | :--- | :--- |
-| **`1.10.1-async`** | DXVK 1.10.1 (Async) | `dxvk.enableAsync = true`<br>Lightweight requirements | **Intel HD / UHD Graphics**, legacy GPUs, or if newer versions exhibit artifacts. |
-| **`1.10.3-async`** | DXVK 1.10.3 (Async) | `dxvk.enableAsync = true`<br>Async pipeline compilation | Older GPUs lacking **Vulkan 1.3** support, or systems encountering issues with DXVK 2.x. |
-| **`2.4.1`** *(Recommended)* | DXVK 2.4.1 Stable | Graphics Pipeline Library (GPL)<br>Frame latency 1, 16x Anisotropy | **Golden Standard**: AMD Radeon (Polaris RX 400/500, Vega, RDNA), NVIDIA GeForce (GTX 10xx, RTX 20xx/30xx/40xx). |
-| **`3.0.1`** | DXVK 3.0.1 | Modern codebase<br>Optimized for **Vulkan 1.4** | Modern dedicated graphics cards with latest driver versions. |
-| **`3.0.1-hdr`** | DXVK 3.0.1 (Native HDR) | `dxvk.enableHDR = True`<br>`dxgi.enableHDR = True` | Systems with connected **HDR displays** (requires Windows HDR enabled in display settings). |
+| Release Package | DXVK Version | Description & Hardware Recommendations |
+| :--- | :--- | :--- |
+| **`Gothic3Optima-v1.0-DXVK-1.10.1-Async.zip`** | DXVK 1.10.1 (Async) | **Older version.** Use if you have an **Intel HD / UHD GPU**, legacy hardware, or if newer versions cause issues / artifacts. |
+| **`Gothic3Optima-v1.0-DXVK-1.10.3-Async.zip`** | DXVK 1.10.3 (Async) | **Older version.** Use if your GPU lacks **Vulkan 1.3** support or has issues with DXVK 2.0+. |
+| **`Gothic3Optima-v1.0-DXVK-2.4.1-Stable.zip`** *(Recommended)* | DXVK 2.4.1 Stable | **Stable version.** Golden standard of stability. Recommended for most PCs: **AMD Polaris** (RX 470/480/570/580), **Vega**, **RDNA**, and **NVIDIA Pascal** (GTX 10xx), **Turing** (GTX 16xx / RTX 20xx), **Ampere** (RTX 30xx). |
+| **`Gothic3Optima-v1.0-DXVK-3.0.1.zip`** | DXVK 3.0.1 | **Current version.** Latest release. Use if your GPU supports all required extensions and **Vulkan 1.4**. |
+| **`Gothic3Optima-v1.0-DXVK-3.0.1-HDR.zip`** | DXVK 3.0.1 (HDR) | **DXVK 3.0.1 with HDR output.** Use if you have an HDR-capable monitor / TV and Windows HDR enabled. |
+
+> [!TIP]
+> **Not sure which package to choose?** Download **`Gothic3Optima-v1.0-DXVK-2.4.1-Stable.zip`**. It provides the most tested and reliable experience across almost all graphics cards.
 
 ---
 
