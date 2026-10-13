@@ -1,4 +1,5 @@
 #include "streaming_optimizer.h"
+#include "high_memory_cache.h"
 #include <minhook.h>
 #include <windows.h>
 #include <stdio.h>
@@ -103,6 +104,7 @@ static HANDLE WINAPI Hooked_CreateFileA(
 
     if (hFile != INVALID_HANDLE_VALUE && isArchive && (dwDesiredAccess & GENERIC_READ) && !(dwDesiredAccess & (GENERIC_WRITE | FILE_WRITE_DATA))) {
         LARGE_INTEGER size;
+        bool mappedIn32Bit = false;
         if (GetFileSizeEx(hFile, &size) && (uint64_t)size.QuadPart > 0 && (uint64_t)size.QuadPart <= MAX_MMAP_ARCHIVE_SIZE) {
             MEMORYSTATUSEX memStatus;
             memStatus.dwLength = sizeof(memStatus);
@@ -137,12 +139,20 @@ static HANDLE WINAPI Hooked_CreateFileA(
                                     (double)g_currentMmapTotalBytes / (1024.0 * 1024.0));
                                 fclose(fLog);
                             }
+                            mappedIn32Bit = true;
                         } else {
                             CloseHandle(hMapping);
                         }
                     }
                 }
                 LeaveCriticalSection(&g_archiveLock);
+            }
+        }
+
+        // If not mapped into 32-bit virtual address space, cache into 64-bit High Memory (> 4 GB)
+        if (!mappedIn32Bit && HighMemoryCache::IsActive()) {
+            if (GetFileSizeEx(hFile, &size) && (uint64_t)size.QuadPart > 0) {
+                HighMemoryCache::RegisterArchive(lpFileName, hFile, (uint64_t)size.QuadPart);
             }
         }
     }
@@ -157,6 +167,7 @@ static BOOL WINAPI Hooked_ReadFile(
     LPOVERLAPPED lpOverlapped
 ) {
     if (!lpOverlapped && lpBuffer && nNumberOfBytesToRead > 0 && Real_SetFilePointerEx) {
+        // 1. Check 32-bit Memory-Mapped view
         EnterCriticalSection(&g_archiveLock);
         auto it = g_mappedArchives.find(hFile);
         if (it != g_mappedArchives.end()) {
@@ -200,6 +211,25 @@ static BOOL WINAPI Hooked_ReadFile(
             }
         }
         LeaveCriticalSection(&g_archiveLock);
+
+        // 2. Check 64-bit High Memory Shadow Cache (> 4 GB)
+        if (HighMemoryCache::IsActive() && HighMemoryCache::IsArchiveCached(hFile)) {
+            LARGE_INTEGER zero = { 0 };
+            LARGE_INTEGER currPos = { 0 };
+            if (Real_SetFilePointerEx(hFile, zero, &currPos, FILE_CURRENT)) {
+                DWORD bytesRead = 0;
+                if (HighMemoryCache::ReadArchive(hFile, (uint64_t)currPos.QuadPart, lpBuffer, nNumberOfBytesToRead, &bytesRead)) {
+                    LARGE_INTEGER advance;
+                    advance.QuadPart = bytesRead;
+                    Real_SetFilePointerEx(hFile, advance, NULL, FILE_CURRENT);
+
+                    if (lpNumberOfBytesRead) {
+                        *lpNumberOfBytesRead = bytesRead;
+                    }
+                    return TRUE;
+                }
+            }
+        }
     }
 
     return Real_ReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
@@ -218,6 +248,10 @@ static BOOL WINAPI Hooked_CloseHandle(HANDLE hObject) {
         CloseHandle(ma.hMapping);
     } else {
         LeaveCriticalSection(&g_archiveLock);
+    }
+
+    if (HighMemoryCache::IsActive()) {
+        HighMemoryCache::UnregisterArchive(hObject);
     }
 
     return Real_CloseHandle(hObject);
@@ -353,6 +387,8 @@ void InitializeStreamingOptimizer() {
 }
 
 void ShutdownStreamingOptimizer() {
+    HighMemoryCache::Shutdown();
+
     EnterCriticalSection(&g_archiveLock);
     for (auto& pair : g_mappedArchives) {
         UnmapViewOfFile(pair.second.pView);

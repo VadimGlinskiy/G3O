@@ -12,6 +12,7 @@
 #include "version_watermark.h"
 #include "fall_guard.h"
 #include "lru_cache_manager.h"
+#include "high_memory_cache.h"
 #include <minhook.h>
 
 static DWORD WINAPI OptimaInitThread(LPVOID) {
@@ -71,7 +72,10 @@ static void InitializeOptima() {
     // 2. Preload system dinput8 library
     Proxy::LoadSystemDirectInput();
 
-    // 3. Launch background initialization thread to hook engine components as they load
+    // 3. Initialize High Memory Shadow Cache (> 4 GB) on main thread
+    HighMemoryCache::Initialize();
+
+    // 4. Launch background initialization thread to hook engine components as they load
     HANDLE hThread = CreateThread(nullptr, 0, OptimaInitThread, nullptr, 0, nullptr);
     if (hThread) {
         CloseHandle(hThread);

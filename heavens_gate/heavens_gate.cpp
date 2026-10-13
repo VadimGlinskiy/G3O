@@ -95,6 +95,13 @@ namespace HeavensGate {
             _emit 0xCB
 
             // --- 32-BIT MODE ---
+            mov ax, 0x2b
+            mov ds, ax
+            mov es, ax
+            mov ss, ax
+            mov ax, 0x53
+            mov fs, ax
+
             mov eax, dword ptr [ebp - 0x10]
             mov edx, dword ptr [ebp - 0x0C]
             mov esp, ebp
@@ -181,6 +188,13 @@ namespace HeavensGate {
             _emit 0xCB
 
             // --- 32-BIT MODE ---
+            mov ax, 0x2b
+            mov ds, ax
+            mov es, ax
+            mov ss, ax
+            mov ax, 0x53
+            mov fs, ax
+
             mov esp, ebp
             mov eax, 1
 
@@ -266,6 +280,13 @@ namespace HeavensGate {
             _emit 0xCB
 
             // --- 32-BIT MODE ---
+            mov ax, 0x2b
+            mov ds, ax
+            mov es, ax
+            mov ss, ax
+            mov ax, 0x53
+            mov fs, ax
+
             mov esp, ebp
             mov eax, 1
 
@@ -297,6 +318,13 @@ namespace HeavensGate {
             // mov ebp, ebp (zero-extend ebp to rbp): 89 ed
             _emit 0x89
             _emit 0xED
+
+            // push rbx: 53
+            _emit 0x53
+
+            // push r12: 41 54
+            _emit 0x41
+            _emit 0x54
 
             // mov r12, rsp: 49 89 e4
             _emit 0x49
@@ -390,6 +418,13 @@ namespace HeavensGate {
             _emit 0x89
             _emit 0xE4
 
+            // pop r12: 41 5c
+            _emit 0x41
+            _emit 0x5C
+
+            // pop rbx: 5b
+            _emit 0x5B
+
             // sub rsp, 8: 48 83 ec 08
             _emit 0x48
             _emit 0x83
@@ -423,6 +458,13 @@ namespace HeavensGate {
             _emit 0xCB
 
             // --- 32-BIT MODE ---
+            mov ax, 0x2b
+            mov ds, ax
+            mov es, ax
+            mov ss, ax
+            mov ax, 0x53
+            mov fs, ax
+
             mov esp, ebp
             mov eax, dword ptr [ebp + 20]
             mov edx, dword ptr [ebp + 24]
@@ -573,51 +615,47 @@ namespace HeavensGate {
     }
 
     uint64_t AllocateHighMemory(size_t sizeInBytes) {
-        if (!Initialize()) return 0;
+        if (!Initialize() || sizeInBytes == 0) return 0;
 
-        // Try allocating above 4 GB first (start at 4 GB boundary: 0x100000000)
-        uint64_t baseAddressBuf = 0x0000000100000000ULL;
-        uint64_t regionSizeBuf = static_cast<uint64_t>(sizeInBytes);
-
-        uint64_t pBaseAddress = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&baseAddressBuf));
-        uint64_t pRegionSize = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&regionSizeBuf));
+        // Try high-memory candidate bases strictly above 4 GB (4GB, 6GB, 8GB, 12GB)
+        static const uint64_t candidateBases[] = {
+            0x0000000100000000ULL, // 4 GB
+            0x0000000180000000ULL, // 6 GB
+            0x0000000200000000ULL, // 8 GB
+            0x0000000300000000ULL  // 12 GB
+        };
 
         uint64_t processHandle = static_cast<uint64_t>(-1);
         uint64_t zeroBits = 0;
         uint64_t allocType = MEM_RESERVE | MEM_COMMIT;
         uint64_t protect = PAGE_READWRITE;
 
-        uint64_t status = Call64(
-            g_fnNtAllocateVirtualMemory,
-            6,
-            processHandle,
-            pBaseAddress,
-            zeroBits,
-            pRegionSize,
-            allocType,
-            protect
-        );
+        for (uint64_t candidate : candidateBases) {
+            uint64_t baseAddressBuf = candidate;
+            uint64_t regionSizeBuf = static_cast<uint64_t>(sizeInBytes);
 
-        if (status == 0) {
-            return baseAddressBuf;
-        }
+            uint64_t pBaseAddress = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&baseAddressBuf));
+            uint64_t pRegionSize = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&regionSizeBuf));
 
-        // If specific address failed, let OS allocate anywhere (base = 0)
-        baseAddressBuf = 0;
-        regionSizeBuf = static_cast<uint64_t>(sizeInBytes);
-        status = Call64(
-            g_fnNtAllocateVirtualMemory,
-            6,
-            processHandle,
-            pBaseAddress,
-            zeroBits,
-            pRegionSize,
-            allocType,
-            protect
-        );
+            uint64_t status = Call64(
+                g_fnNtAllocateVirtualMemory,
+                6,
+                processHandle,
+                pBaseAddress,
+                zeroBits,
+                pRegionSize,
+                allocType,
+                protect
+            );
 
-        if (status == 0) {
-            return baseAddressBuf;
+            if (status == 0) {
+                if (baseAddressBuf > 0xFFFFFFFFULL) {
+                    return baseAddressBuf;
+                }
+                // If by any chance Windows allocated below 4 GB, release it immediately
+                uint64_t freeSize = 0;
+                Call64(g_fnNtFreeVirtualMemory, 4, processHandle, pBaseAddress, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&freeSize)), static_cast<uint64_t>(MEM_RELEASE));
+            }
         }
 
         return 0;
