@@ -237,7 +237,8 @@ static void __stdcall Hook_MemHeap_FreeShortUsageUnsynced(void* ptr) {
 namespace MemoryOptimizer {
 
     bool Initialize() {
-        // 1. Hook Kernel32 Heap functions first for system-wide safety
+        // 1. Kernel32 Heap hooks disabled to prevent system DLL conflicts
+        /*
         HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
         if (hKernel32) {
             FARPROC pHeapSize = GetProcAddress(hKernel32, "HeapSize");
@@ -256,6 +257,7 @@ namespace MemoryOptimizer {
                 MH_EnableHook(pHeapReAlloc);
             }
         }
+        */
 
         // 2. Hook SharedBase.dll
         HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");

@@ -268,7 +268,9 @@ static bool __fastcall Hooked_CacheOutResource(void* pThis, void* /*edx*/, void*
 void InitializeStreamingOptimizer() {
     InitializeCriticalSection(&g_archiveLock);
 
-    // 1. Hook File IO for In-Memory Archive Streaming
+    // 1. File IO hooks disabled - Gothic 3 uses multi-threaded concurrent reads per handle,
+    // which caused file pointer race conditions and corrupted string reads.
+    /*
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
         void* pCreateFileA = (void*)GetProcAddress(hKernel32, "CreateFileA");
@@ -292,8 +294,8 @@ void InitializeStreamingOptimizer() {
             MH_CreateHook(pCloseHandle, (LPVOID)Hooked_CloseHandle, (LPVOID*)&Real_CloseHandle);
             MH_EnableHook(pCloseHandle);
         }
-        OutputDebugStringA("[Gothic3Optima] File IO hooks installed for Memory-Mapped Archive Streaming.\n");
     }
+    */
 
     // 2. Hook eCThreadPool::Create in Engine.dll
     HMODULE hEngine = GetModuleHandleA("Engine.dll");

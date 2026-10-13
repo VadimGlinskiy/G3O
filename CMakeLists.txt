@@ -5,8 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
-    add_compile_options(/O2 /Oi /Oy /W3 /EHsc)
+    add_compile_options(/O2 /Oi /Oy /W3 /EHsc /Zi)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /MAP:dinput8.map /DEBUG")
 endif()
 
 # Mimalloc configuration (static library, security overhead disabled for raw speed)

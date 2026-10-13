@@ -143,15 +143,16 @@ void InitializeMediaOptimizer() {
     timeBeginPeriod(1);
     OutputDebugStringA("[Gothic3Optima] 1ms High-Resolution Multimedia Timer activated.\n");
 
-    // 2. Hook inflate in FileSystem.dll
+    // 2. FileSystem.dll internal zlib inflate hook disabled (unexported static function)
+    /*
     HMODULE hFileSystem = GetModuleHandleA("FileSystem.dll");
     if (hFileSystem) {
         void* pInflate = (void*)((uintptr_t)hFileSystem + 0x153dc);
         if (MH_CreateHook(pInflate, (LPVOID)Hooked_Inflate, (LPVOID*)&Real_Inflate) == MH_OK) {
             MH_EnableHook(pInflate);
-            OutputDebugStringA("[Gothic3Optima] Hooked FileSystem.dll inflate with libdeflate AVX2 accelerator.\n");
         }
     }
+    */
 
     // 3. Hook g_GetHashValue in SharedBase.dll
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
