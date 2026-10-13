@@ -1,10 +1,13 @@
-# Script to package Gothic 3 Optima release ZIP archives for each DXVK preset
+# ==============================================================================
+# Gothic 3 Optima - Release Packaging Script
+# Generates 1 Core Package + 5 Modular DXVK Variant Archives for GitHub Releases
+# ==============================================================================
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root "dist"
 $packagesDir = Join-Path $dist "packages"
-$presetsDir = Join-Path $root "dxvk_presets"
+$dxvkDir = Join-Path $root "resources\dxvk"
 $bin = Join-Path $root "build\Release\dinput8.dll"
 
 if (-not (Test-Path $bin)) {
@@ -12,63 +15,135 @@ if (-not (Test-Path $bin)) {
     exit 1
 }
 
+if (Test-Path $packagesDir) {
+    Remove-Item $packagesDir -Recurse -Force
+}
 New-Item -ItemType Directory -Path $packagesDir -Force | Out-Null
 
-$presets = @(
+# ------------------------------------------------------------------------------
+# 1. Package Gothic3Optima-v1.0.0-Core.zip
+# ------------------------------------------------------------------------------
+Write-Host ">>> Packaging Gothic3Optima Core..."
+$stageCore = Join-Path $dist "stage_core"
+if (Test-Path $stageCore) { Remove-Item $stageCore -Recurse -Force }
+New-Item -ItemType Directory -Path $stageCore -Force | Out-Null
+
+Copy-Item $bin (Join-Path $stageCore "dinput8.dll") -Force
+
+$readmeCore = @"
+================================================================================
+GOTHIC 3 OPTIMA - CORE OPTIMIZATION & STABILITY SUITE (v1.0.0)
+================================================================================
+
+FEATURES INCLUDED:
+- Complete Replacement of Genome Engine Memory Allocator (HeapAlloc & VirtualAlloc)
+- 128-Byte Cache-Line Aligned Allocations (Eliminates False Sharing)
+- Dynamic Large Page Aware / Low-Fragmentation Virtual Sizing
+- Atomic Savegame Transaction Guard (Anti-Corruption & Temporary Write Buffer)
+- SIMD-Accelerated 3D Math Engine (AVX2 / SSE4.1 Vec4, Matrix4x4, Bounding Boxes)
+- High-Performance Work-Stealing Thread Pool with Lock-Free Task Queues
+- Safe SEH Exception Filter & Instant Crash Dump Generator
+
+INSTALLATION:
+1. Extract 'dinput8.dll' from this archive directly into your Gothic 3 game folder
+   (where 'Gothic3.exe' is located).
+2. [OPTIONAL & HIGHLY RECOMMENDED]: Download one of the DXVK packages from the
+   same release page matching your GPU to translate DirectX 9 to Vulkan:
+   - DXVK-2.4.1-Stable.zip (Default / Recommended for NVIDIA / AMD GPUs)
+   - DXVK-3.0.1.zip (Modern GPUs with Vulkan 1.4 support)
+   - DXVK-3.0.1-HDR.zip (With Native HDR output support)
+   - DXVK-1.10.3-Async.zip (Legacy GPUs lacking Vulkan 1.3)
+   - DXVK-1.10.1-Async.zip (Legacy Intel GPUs / Compatibility fallback)
+
+COMPATIBILITY:
+- Gothic 3 v1.75.14 (Community Patch)
+- Works with Update Pack 1.04+, Parallel Universe Patch, Questpaket, Content Mod.
+================================================================================
+"@
+Set-Content -Path (Join-Path $stageCore "README_INSTALL.txt") -Value $readmeCore -Encoding UTF8
+
+$coreZip = Join-Path $packagesDir "Gothic3Optima-v1.0.0-Core.zip"
+Compress-Archive -Path "$stageCore\*" -DestinationPath $coreZip -Force
+Remove-Item $stageCore -Recurse -Force
+Write-Host "[OK] Created: Gothic3Optima-v1.0.0-Core.zip"
+
+# ------------------------------------------------------------------------------
+# 2. Package Modular DXVK Addons
+# ------------------------------------------------------------------------------
+$dxvkVariants = @(
     @{
         Folder = "1.10.1-async";
-        ZipName = "Gothic3Optima-v1.0-DXVK-1.10.1-Async.zip";
-        Desc = "Older version. Use if you have an Intel GPU or newer versions cause issues."
+        ZipName = "DXVK-1.10.1-Async.zip";
+        Title = "DXVK 1.10.1 - Async (Legacy Intel & Fallback)";
+        Desc = "Older async DXVK build. Recommended if you have an older Intel GPU or newer DXVK versions experience crashes/driver timeouts."
     },
     @{
         Folder = "1.10.3-async";
-        ZipName = "Gothic3Optima-v1.0-DXVK-1.10.3-Async.zip";
-        Desc = "Older version. Use if your GPU lacks Vulkan 1.3 support or has issues with DXVK 2.0."
+        ZipName = "DXVK-1.10.3-Async.zip";
+        Title = "DXVK 1.10.3 - Async (Pre-Vulkan 1.3 Legacy GPU)";
+        Desc = "Async build for GPUs lacking Vulkan 1.3 support or facing stability issues on DXVK 2.x+."
     },
     @{
         Folder = "2.4.1";
-        ZipName = "Gothic3Optima-v1.0-DXVK-2.4.1-Stable.zip";
-        Desc = "Stable version. Recommended for AMD Polaris/GCN & NVIDIA Pascal/Turing/Ampere."
+        ZipName = "DXVK-2.4.1-Stable.zip";
+        Title = "DXVK 2.4.1 - Stable (Recommended)";
+        Desc = "Rock-solid DXVK release. Highly recommended for AMD Polaris/Vega/RDNA & NVIDIA Pascal/Turing/Ampere/Ada."
     },
     @{
         Folder = "3.0.1";
-        ZipName = "Gothic3Optima-v1.0-DXVK-3.0.1.zip";
-        Desc = "Current version. Use if your GPU supports all required extensions and Vulkan 1.4."
+        ZipName = "DXVK-3.0.1.zip";
+        Title = "DXVK 3.0.1 (Current Vulkan 1.4)";
+        Desc = "Latest generation DXVK translation layer. Requires modern GPU drivers supporting Vulkan 1.4."
     },
     @{
         Folder = "3.0.1-hdr";
-        ZipName = "Gothic3Optima-v1.0-DXVK-3.0.1-HDR.zip";
-        Desc = "DXVK 3.0.1 with HDR output. Use if you have an HDR-capable monitor and Windows HDR enabled."
+        ZipName = "DXVK-3.0.1-HDR.zip";
+        Title = "DXVK 3.0.1 - HDR (High Dynamic Range Output)";
+        Desc = "DXVK 3.0.1 with true HDR color pipeline. Use if you have an HDR monitor and Windows HDR is enabled."
     }
 )
 
-foreach ($p in $presets) {
-    $stage = Join-Path $dist "stage_$($p.Folder)"
+foreach ($v in $dxvkVariants) {
+    Write-Host ">>> Packaging $($v.ZipName)..."
+    $stage = Join-Path $dist "stage_$($v.Folder)"
+    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-    Copy-Item $bin (Join-Path $stage "dinput8.dll") -Force
-    Copy-Item (Join-Path $presetsDir "$($p.Folder)\*") $stage -Force
+    $variantSource = Join-Path $dxvkDir $v.Folder
+    Copy-Item (Join-Path $variantSource "*") $stage -Force
 
     $readme = @"
-========================================================================
-GOTHIC 3 OPTIMA - DXVK $($p.Folder.ToUpper()) EDITION
-========================================================================
-Description:
-$($p.Desc)
+================================================================================
+$($v.Title)
+Gothic 3 Optima - Vulkan Translation Addon
+================================================================================
+
+DESCRIPTION:
+$($v.Desc)
+
+INCLUDED FILES:
+- d3d9.dll   (DirectX 9 to Vulkan translation layer)
+- dxgi.dll   (DXGI interface)
+- dxvk.conf  (Tuned configuration for Gothic 3: async compile, VRAM limits)
 
 INSTALLATION:
-1. Copy all files from this archive into your Gothic 3 game directory
-   (where Gothic3.exe is located).
-2. Launch Gothic 3 through Steam, GOG, or Gothic3.exe directly.
-========================================================================
+1. Extract all files from this archive directly into your Gothic 3 game folder
+   (where 'Gothic3.exe' is located).
+2. Ensure you have installed 'Gothic3Optima-v1.0.0-Core.zip' (dinput8.dll) as well.
+3. Launch Gothic 3!
+================================================================================
 "@
-    Set-Content -Path (Join-Path $stage "README_INSTALL.txt") -Value $readme -Encoding UTF8
+    Set-Content -Path (Join-Path $stage "README_DXVK.txt") -Value $readme -Encoding UTF8
 
-    $zipPath = Join-Path $packagesDir $p.ZipName
+    $zipPath = Join-Path $packagesDir $v.ZipName
     Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force
     Remove-Item $stage -Recurse -Force
 
-    Write-Host "[OK] Created release package: $($p.ZipName)"
+    Write-Host "[OK] Created: $($v.ZipName)"
 }
 
-Write-Host "All release packages created in $packagesDir!"
+Write-Host ""
+Write-Host "========================================================================"
+Write-Host "All 6 release packages successfully created in: $packagesDir"
+Get-ChildItem -Path $packagesDir | Select-Object Name, Length
+Write-Host "========================================================================"
