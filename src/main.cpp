@@ -11,6 +11,7 @@
 #include "savegame_guard.h"
 #include "version_watermark.h"
 #include "fall_guard.h"
+#include "lru_cache_manager.h"
 #include <minhook.h>
 
 static DWORD WINAPI OptimaInitThread(LPVOID) {
@@ -51,6 +52,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 11. Initialize Ground Recovery Fall Guard (Phase 12.2)
     InitializeFallGuard();
 
+    // 12. Initialize Adaptive LRU Cache Eviction (Phase 13.2)
+    LRUCacheManager::Initialize();
+
     OutputDebugStringA("[Gothic3Optima] All core engine subsystems initialized successfully!\n");
     return 0;
 }
@@ -76,6 +80,7 @@ static void InitializeOptima() {
 
 static void ShutdownOptima() {
     OutputDebugStringA("[Gothic3Optima] Shutting down...\n");
+    LRUCacheManager::Shutdown();
     ShutdownFallGuard();
     ShutdownSaveGameGuard();
     ShutdownMediaOptimizer();

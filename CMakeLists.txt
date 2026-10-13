@@ -54,6 +54,8 @@ add_library(dinput8 SHARED
     src/version_watermark.h
     src/fall_guard.cpp
     src/fall_guard.h
+    src/lru_cache_manager.cpp
+    src/lru_cache_manager.h
 )
 
 target_include_directories(dinput8 PRIVATE

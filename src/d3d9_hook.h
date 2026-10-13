@@ -8,6 +8,7 @@ extern "C" {
 
 void InstallD3D9Hooks();
 void GetD3D9FilterStatistics(DWORD* pFilteredRenderStates, DWORD* pFilteredStageStates, DWORD* pFilteredSamplerStates);
+void EvictD3D9Resources();
 
 #ifdef __cplusplus
 }

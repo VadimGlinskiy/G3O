@@ -181,6 +181,15 @@ static void InstallDeviceHooks(IDirect3DDevice9* pDevice) {
     OutputDebugStringA("[Gothic3Optima] Installed IDirect3DDevice9 State Redundancy Filter hooks.\n");
 }
 
+static IDirect3DDevice9* s_pActiveDevice = nullptr;
+
+void EvictD3D9Resources() {
+    InvalidateStateCaches();
+    if (s_pActiveDevice) {
+        s_pActiveDevice->EvictManagedResources();
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE Hooked_CreateDevice(
     IDirect3D9* This,
     UINT Adapter,
@@ -191,6 +200,10 @@ static HRESULT STDMETHODCALLTYPE Hooked_CreateDevice(
     IDirect3DDevice9** ppReturnedDeviceInterface
 ) {
     HRESULT hr = Real_CreateDevice(This, Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
+    if (SUCCEEDED(hr) && ppReturnedDeviceInterface && *ppReturnedDeviceInterface) {
+        s_pActiveDevice = *ppReturnedDeviceInterface;
+        InstallDeviceHooks(*ppReturnedDeviceInterface);
+    }
     return hr;
 }
 

@@ -1,4 +1,5 @@
 #include "fall_guard.h"
+#include "lru_cache_manager.h"
 #include <minhook.h>
 #include <math.h>
 
@@ -39,6 +40,7 @@ static void __fastcall Hooked_SetCurrentPosition(void* pThis, void* /*edx*/, con
     if (Real_GetMovementIsControledByPlayer && Real_GetMovementIsControledByPlayer(pThis)) {
         ULONGLONG now = GetTickCount64();
         GothicVector3 safePos = *pPos;
+        LRUCacheManager::NotifyPlayerPosition(safePos.x, safePos.y, safePos.z);
 
         EnterCriticalSection(&s_fallGuardLock);
         if (s_hasValidGround) {
