@@ -42,7 +42,7 @@ Releases are split into the **Core engine mod** and **DXVK packages** tailored t
 ```mermaid
 graph TD
     subgraph GitHub_Release ["GitHub Release (single page)"]
-        Core["Gothic3Optima-v1.0.0-Core.zip<br/>(dinput8.dll: allocator, save guard, SIMD, threads)"]
+        Core["Gothic3Optima-v1.1.0-Core.zip<br/>(dinput8.dll: allocator, save guard, SIMD, threads)"]
         DXVK1["DXVK-2.4.1-Stable.zip<br/>(Recommended for NVIDIA / AMD)"]
         DXVK2["DXVK-3.0.1.zip<br/>(For Vulkan 1.4)"]
         DXVK3["DXVK-3.0.1-HDR.zip<br/>(For HDR monitors)"]
@@ -67,7 +67,7 @@ graph TD
 ### Steps:
 
 1. **Download the Core mod:**
-   - Grab `Gothic3Optima-v1.0.0-Core.zip` from the release page.
+   - Grab `Gothic3Optima-v1.1.0-Core.zip` from the release page.
    - Copy `dinput8.dll` into your Gothic 3 game directory (next to `Gothic3.exe`).
 2. **Download the DXVK package for your GPU:**
    - Pick the appropriate DXVK archive from the table below on the same release page.
@@ -83,7 +83,7 @@ All archives are attached to the same release on GitHub:
 ### 1. Core Mod (Required)
 | Package | Size | Description |
 | :--- | :--- | :--- |
-| **`Gothic3Optima-v1.0.0-Core.zip`** | ~80 KB | Core mod (`dinput8.dll`). Includes mimalloc allocator replacement, SaveGame Guard, SIMD geometry acceleration, worker thread pool expansion, and exception handler. Works on native D3D9 or with any DXVK build. |
+| **`Gothic3Optima-v1.1.0-Core.zip`** | ~119 KB | Core mod (`dinput8.dll`). Includes mimalloc allocator replacement, SaveGame Guard, SIMD geometry acceleration, worker thread pool expansion, Multi-Ray Footprint, Combatant Culling Bypass, and exception handler. Works on native D3D9 or with any DXVK build. |
 
 ### 2. DXVK Variants (Pick one)
 | Package | Version | Recommendation |
@@ -95,7 +95,7 @@ All archives are attached to the same release on GitHub:
 | **`DXVK-1.10.1-Async.zip`** | DXVK 1.10.1 Async | For Intel HD/UHD integrated graphics or legacy hardware. |
 
 > [!TIP]
-> For standard gaming PCs, use: **`Gothic3Optima-v1.0.0-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
+> For standard gaming PCs, use: **`Gothic3Optima-v1.1.0-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
 
 ---
 
@@ -115,7 +115,7 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | **File I/O** | Synchronous `SetFilePointer` and small-buffer `ReadFile` calls | Disk seek latency, repeated kernel transitions | **Memory-Mapped Files (`MapViewOfFile`):** direct file mappings (750 MB budget) | In-memory archive access without disk stalls |
 | **Sector Streaming** | Static radial sphere around hero in `eCPVSPrefetcher3` | Micro-stutters (50-200 ms) when crossing sector boundaries | **Motion Vector Prefetch:** sphere projected 10-30m ahead along motion vector | Seamless streaming: sector cells loaded before hero arrives |
 | **Math & Physics** | Calculations use legacy x87 FPU (`fld`, `fmul`, `fstp`) in `SharedBase.dll` | Slow Frustum Culling and bounding volume checks | Replaced culling and matrix math with SSE intrinsics | Faster visibility calculations |
-| **Fall-Through Guard** | Raycast misses on polygonal seams and cliff meshes | Hero clipping through terrain into the void, lethal fall damage | **Ground Recovery Fall Guard:** detects unphysical vertical drops ($>6$m in 1 frame), restores safe ground | Hero never falls through geometry or dies from collision bugs |
+| **Fall-Through & GeoData Guard** | Single raycast slips through polygon seams in terrain meshes, spurious fall detection | Hero clipping through terrain into the void, slipping into geometry seams, lethal fall damage | **Multi-Ray Footprint & Ground Recovery Fall Guard:** 5-ray cross footprint cluster under character feet (0.25m radius) via `TraceRayNearestHit` hook in `Engine.dll`, lateral hit centering, abnormal vertical drop detector ($>6$m) restoring safe ground and resetting fall velocity | Hero never clips through geometry cracks, rock-solid footing on slopes and seams, zero fall damage from glitches |
 | **String Hashing** | Byte-by-byte loop in `g_GetHashValue<bCString>` | Map lookup delays during NPC spawning | Vectorized string hash routine | Faster object and dialogue map lookups |
 | **CPU Topology** | Threads randomly scheduled onto slow E-cores | Frame drops on Intel 12-14th Gen and AMD Hybrid chips | Game threads bound to Performance cores (P-cores) | Consistent framerate on hybrid processors |
 | **PhysX Physics & Ragdolls** | Variable PhysX 2.4.1 timestep, zero bone damping, unbounded velocity accumulation on collision geometry clipping | Ragdoll corpses launching into the stratosphere, limbs stretching into spaghetti, micro-stutters at >60 / 144 Hz | **Fixed Physics Substep & Bone Velocity Clamp:** enforced 16.6 ms (1/60s, `NX_TIMESTEP_FIXED`), bone linear/angular damping (0.20/0.25), clamping of anomalous velocities ($\le 20$ m/s, $\le 12$ rad/s), and NaN spike suppression | Natural ragdoll settling without flying corpses or limb stretching, smooth simulation at 144+ Hz |
@@ -124,6 +124,7 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | **Address Space** | 32-bit limit (4 GB virtual memory space) | Insufficient virtual space for massive archives (`_compiledImage.pak`, `_compiledMesh.pak`) | **High Memory Shadow Cache (> 4 GB):** 64-bit shadow pool (2 GB) via Heaven's Gate (`AllocateHighMemory`, `ReadHighMemory`) | Massive archives cached directly in 64-bit RAM, eliminating 32-bit memory pressure |
 | **Z-Buffer & Shadows** | 24-bit integer depth buffer (D24S8/D16), non-linear precision loss across FarClipPlane distances ($1/z$), insufficient shadow bias, severe polygon Z-fighting | Striped shadow acne artifacts on characters and terrain, distant mountain and foliage flickering | **High-Precision Floating-Point Z-Buffer (`VK_FORMAT_D32_SFLOAT`) & Shadow Depth Bias Hook:** translated via `d3d9.useD32forD24 = True`, `d3d9.supportD32 = True`, IEEE-754 `d3d9.floatEmulation = Strict`, D16 auto-upgrade, position invariance `invariantPosition`, and dynamic shadow bias scaling via `D3DRS_DEPTHBIAS` (1.35x) and `D3DRS_SLOPESCALEDEPTHBIAS` (1.50x) | Preserved depth precision up to 1000m distances, complete elimination of distant Z-fighting and shadow acne on terrain and faces |
 | **Vertex & Index Buffers** | 16-bit index constraint (max 65,535 vertices), small geometry pool step (1024 chunks), constrained dynamic buffers (64-256 KB) | Flickering and missing meshes, polygon tearing in high-poly mods, stalls from frequent reallocations | **Dynamic Buffer Scaling & 32-Bit Index Promotion (`D3DFMT_INDEX32`):** hooked `CreateVertexBuffer` / `CreateIndexBuffer` (min 1 MB / 512 KB, 2x scaling), instance pool growth expanded to 4096 in `Engine.dll`, and auto-promotion to 32-bit indices for meshes with $>65,535$ vertices | Flawless rendering of heavy mods and high-poly meshes without missing geometry or stretched polygons |
+| **AI Combat Focus (Aggro)** | Entities culled from processing when outside camera frustum (`ExtractFromEntity`: `CullTreeHC`, `CullVPTHC`, `CullSmallObject`) | Pursuing monsters and enemies behind the hero freezing or losing target when turning camera away | **Combatant Culling Bypass (`src/combat_guard.cpp`):** hooks visibility tree and frustum culling checks in `Engine.dll` for active combatants (`gCNPC_PS`) targeting the player within 65m | Enemies relentlessly pursue and engage the player regardless of camera orientation |
 
 ---
 
@@ -171,7 +172,8 @@ sequenceDiagram
 - `src/streaming_optimizer.cpp` - maps `.pak` archives into RAM via `MapViewOfFile`, predictive cell prefetching by motion vector (`eCPVSPrefetcher3`), and expands `eCThreadPool` to 4-8 worker threads.
 - `src/media_optimizer.cpp` - integrates `libdeflate` (AVX2/SSE4.2) for fast archive decompression, expands FMOD Ex DSP buffer (2048x4), and sets 1.0 ms high-resolution timer.
 - `src/math_simd_optimizer.cpp` - replaces `bCFrustum::Cull` and matrix operations with SSE vector intrinsics.
-- `src/fall_guard.cpp` - protects player from falling through world geometry meshes and negates fall damage on collision glitches.
+- `src/fall_guard.cpp` - multi-ray footprint cluster under character feet, protection from falling through geometry seams (`TraceRayNearestHit`), and automatic ground recovery fall guard with fall damage cancellation.
+- `src/combat_guard.cpp` - bypasses Frustum Culling (`CullTreeHC`, `CullVPTHC`, `CullSmallObject`) for active combatants targeting the player within 65m to preserve pursue logic and combat animations when looking away.
 - `src/physics_stabilizer.cpp` - PhysX ragdoll stabilizer (`eCPhysicsScene::Simulate` and `CreateActor`), enforced `NX_TIMESTEP_FIXED` (16.6 ms / 60 Hz), linear and angular bone damping (0.20/0.25), anomalous skeleton bone velocity clamping ($\le 20$ m/s, $\le 12$ rad/s), and joint NaN explosion neutralization.
 - `src/lru_cache_manager.cpp` - adaptive LRU cache eviction on `eCMainCache`, fresh asset retention (<300s), VRAM flush and stale asset eviction across regional biome changes.
 - `src/savegame_guard.cpp` - writes saves to `.tmp`, verifies file size, creates `.bak` backup, and performs atomic replacement via `ReplaceFileW`.

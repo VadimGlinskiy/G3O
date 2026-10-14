@@ -1,37 +1,10 @@
 #include "cpu_topology.h"
-#include <minhook.h>
+#include <windows.h>
 #include <stdio.h>
-#include <vector>
 
 static DWORD_PTR g_pCoreMask = 0;
 static DWORD_PTR g_allCoresMask = 0;
 static bool g_isHybrid = false;
-
-typedef HANDLE (WINAPI* CreateThread_t)(
-    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    SIZE_T dwStackSize,
-    LPTHREAD_START_ROUTINE lpStartAddress,
-    LPVOID lpParameter,
-    DWORD dwCreationFlags,
-    LPDWORD lpThreadId
-);
-static CreateThread_t Real_CreateThread = NULL;
-
-static HANDLE WINAPI Hooked_CreateThread(
-    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    SIZE_T dwStackSize,
-    LPTHREAD_START_ROUTINE lpStartAddress,
-    LPVOID lpParameter,
-    DWORD dwCreationFlags,
-    LPDWORD lpThreadId
-) {
-    HANDLE hThread = Real_CreateThread(lpThreadAttributes, dwStackSize, lpStartAddress, lpParameter, dwCreationFlags, lpThreadId);
-    if (hThread && g_isHybrid && g_pCoreMask != 0) {
-        // Ensure new thread is explicitly locked to P-cores
-        SetThreadAffinityMask(hThread, g_pCoreMask);
-    }
-    return hThread;
-}
 
 DWORD_PTR GetPCoreAffinityMask() {
     return g_pCoreMask;
@@ -45,11 +18,18 @@ void InitializeCPUTopology() {
         return;
     }
 
-    std::vector<BYTE> buffer(length);
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buffer.data();
+    BYTE stackBuf[2048];
+    BYTE* pBuf = stackBuf;
+    if (length > sizeof(stackBuf)) {
+        pBuf = (BYTE*)LocalAlloc(LPTR, length);
+        if (!pBuf) return;
+    }
+
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)pBuf;
 
     if (!GetLogicalProcessorInformationEx(RelationProcessorCore, info, &length)) {
         OutputDebugStringA("[Gothic3Optima] Failed to read processor topology.\n");
+        if (pBuf != stackBuf) LocalFree(pBuf);
         return;
     }
 
@@ -59,7 +39,7 @@ void InitializeCPUTopology() {
     // First pass: find min/max EfficiencyClass
     DWORD offset = 0;
     while (offset < length) {
-        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX item = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(buffer.data() + offset);
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX item = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(pBuf + offset);
         if (item->Relationship == RelationProcessorCore) {
             BYTE eff = item->Processor.EfficiencyClass;
             if (eff > maxEfficiencyClass) maxEfficiencyClass = eff;
@@ -79,7 +59,7 @@ void InitializeCPUTopology() {
     // Second pass: construct mask
     offset = 0;
     while (offset < length) {
-        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX item = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(buffer.data() + offset);
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX item = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(pBuf + offset);
         if (item->Relationship == RelationProcessorCore) {
             for (WORD i = 0; i < item->Processor.GroupCount; ++i) {
                 KAFFINITY mask = item->Processor.GroupMask[i].Mask;
@@ -95,6 +75,10 @@ void InitializeCPUTopology() {
         offset += item->Size;
     }
 
+    if (pBuf != stackBuf) {
+        LocalFree(pBuf);
+    }
+
     g_allCoresMask = allMask;
     g_pCoreMask = (pCoreMask != 0) ? pCoreMask : allMask;
 
@@ -108,17 +92,5 @@ void InitializeCPUTopology() {
         sprintf_s(logBuf, "[Gothic3Optima] Uniform CPU topology detected (%d cores). Affinity mask: 0x%IX\n",
             pCoreCount, g_pCoreMask);
         OutputDebugStringA(logBuf);
-    }
-
-    // Hook CreateThread to enforce affinity on dynamically created threads
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        void* pCreateThread = (void*)GetProcAddress(hKernel32, "CreateThread");
-        if (pCreateThread) {
-            if (MH_CreateHook(pCreateThread, (LPVOID)Hooked_CreateThread, (LPVOID*)&Real_CreateThread) == MH_OK) {
-                MH_EnableHook(pCreateThread);
-                OutputDebugStringA("[Gothic3Optima] Hooked CreateThread for thread affinity enforcement.\n");
-            }
-        }
     }
 }

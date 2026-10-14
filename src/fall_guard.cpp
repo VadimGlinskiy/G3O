@@ -27,6 +27,80 @@ static ULONGLONG s_lastGroundTime = 0;
 static bool s_hasValidGround = false;
 static CRITICAL_SECTION s_fallGuardLock;
 static volatile DWORD g_fallRecoveries = 0;
+static volatile DWORD g_multiRayRecoveries = 0;
+
+typedef bool (__thiscall* TraceRayNearestHit_t)(
+    void* pThis,
+    const GothicVector3* pFrom,
+    const GothicVector3* pTo,
+    const void* pIgnoreEntity,
+    unsigned long uCollisionGroup,
+    unsigned long uQueryFlags,
+    unsigned long ePSType,
+    unsigned long eShapeGroup
+);
+static TraceRayNearestHit_t Real_TraceRayNearestHit = NULL;
+
+static bool __fastcall Hooked_TraceRayNearestHit(
+    void* pThis,
+    void* /*edx*/,
+    const GothicVector3* pFrom,
+    const GothicVector3* pTo,
+    const void* pIgnoreEntity,
+    unsigned long uCollisionGroup,
+    unsigned long uQueryFlags,
+    unsigned long ePSType,
+    unsigned long eShapeGroup
+) {
+    if (!Real_TraceRayNearestHit || !pThis || !pFrom || !pTo) {
+        return false;
+    }
+
+    // 1. Perform primary central raycast
+    bool bHit = Real_TraceRayNearestHit(pThis, pFrom, pTo, pIgnoreEntity, uCollisionGroup, uQueryFlags, ePSType, eShapeGroup);
+    if (bHit) {
+        return true;
+    }
+
+    // 2. Check if this is a downward ground-probing raycast
+    float dy = pTo->y - pFrom->y;
+    float dx = pTo->x - pFrom->x;
+    float dz = pTo->z - pFrom->z;
+    float horizDistSq = dx * dx + dz * dz;
+
+    // Ground ray: downward trajectory (dy < -20.0f) and near-vertical orientation (dx^2 + dz^2 < 10000.0f = 1m radius)
+    if (dy < -20.0f && horizDistSq < 10000.0f) {
+        // Multi-Ray Footprint: cross cluster around foot contact area (radius 25 cm = 25.0f units)
+        static const struct { float ox; float oz; } s_footprintOffsets[4] = {
+            { +25.0f,   0.0f },
+            { -25.0f,   0.0f },
+            {   0.0f, +25.0f },
+            {   0.0f, -25.0f }
+        };
+
+        for (int i = 0; i < 4; ++i) {
+            GothicVector3 fromOff = { pFrom->x + s_footprintOffsets[i].ox, pFrom->y, pFrom->z + s_footprintOffsets[i].oz };
+            GothicVector3 toOff   = { pTo->x   + s_footprintOffsets[i].ox, pTo->y,   pTo->z   + s_footprintOffsets[i].oz };
+
+            if (Real_TraceRayNearestHit(pThis, &fromOff, &toOff, pIgnoreEntity, uCollisionGroup, uQueryFlags, ePSType, eShapeGroup)) {
+                // Recovered solid ground contact through footprint ray cluster!
+                BYTE* pSceneBytes = (BYTE*)pThis;
+                void* pReport = *(void**)(pSceneBytes + 0xac);
+                if (pReport) {
+                    // Re-align lateral X and Z hit coordinates back to character central column
+                    float* pHitX = (float*)((BYTE*)pReport + 0x68);
+                    float* pHitZ = (float*)((BYTE*)pReport + 0x70);
+                    *pHitX = pFrom->x;
+                    *pHitZ = pFrom->z;
+                }
+                InterlockedIncrement((volatile LONG*)&g_multiRayRecoveries);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
 
 static void __fastcall Hooked_SetCurrentPosition(void* pThis, void* /*edx*/, const GothicVector3* pPos, bool bFlag) {
     if (!pThis || !pPos || !Real_SetCurrentPosition) {
@@ -92,6 +166,22 @@ static void __fastcall Hooked_SetCurrentPosition(void* pThis, void* /*edx*/, con
 
 void InitializeFallGuard() {
     InitializeCriticalSection(&s_fallGuardLock);
+
+    HMODULE hEngine = GetModuleHandleA("Engine.dll");
+    if (hEngine) {
+        void* pTraceRay = (void*)GetProcAddress(
+            hEngine, "?TraceRayNearestHit@eCPhysicsScene@@QAE_NABVbCVector@@0PBVeCEntity@@K1W4eEPropertySetType@@W4eEShapeGroup@@@Z"
+        );
+        if (!pTraceRay) {
+            pTraceRay = (void*)((uintptr_t)hEngine + 0x16d980);
+        }
+        if (pTraceRay) {
+            if (MH_CreateHook(pTraceRay, (LPVOID)Hooked_TraceRayNearestHit, (LPVOID*)&Real_TraceRayNearestHit) == MH_OK) {
+                MH_EnableHook(pTraceRay);
+                OutputDebugStringA("[Gothic3Optima] Phase 12.1: Multi-Ray Footprint active (?TraceRayNearestHit@eCPhysicsScene).\n");
+            }
+        }
+    }
 
     HMODULE hGame = GetModuleHandleA("Game.dll");
     if (hGame) {

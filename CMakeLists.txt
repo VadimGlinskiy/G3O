@@ -60,6 +60,8 @@ add_library(dinput8 SHARED
     src/high_memory_cache.h
     src/physics_stabilizer.cpp
     src/physics_stabilizer.h
+    src/combat_guard.cpp
+    src/combat_guard.h
 )
 
 target_include_directories(dinput8 PRIVATE

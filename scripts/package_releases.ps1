@@ -1,3 +1,7 @@
+param(
+    [string]$Version = "v1.1.0"
+)
+
 # ==============================================================================
 # Gothic 3 Optima - Release Packaging Script
 # Generates 1 Core Package + 5 Modular DXVK Variant Archives for GitHub Releases
@@ -20,9 +24,9 @@ if (-not (Test-Path $packagesDir)) {
 }
 
 # ------------------------------------------------------------------------------
-# 1. Package Gothic3Optima-v1.0.0-Core.zip
+# 1. Package Gothic3Optima-Core.zip
 # ------------------------------------------------------------------------------
-Write-Host ">>> Packaging Gothic3Optima Core..."
+Write-Host ">>> Packaging Gothic3Optima Core ($Version)..."
 $stageCore = Join-Path $dist "stage_core"
 if (Test-Path $stageCore) { Remove-Item $stageCore -Recurse -Force }
 New-Item -ItemType Directory -Path $stageCore -Force | Out-Null
@@ -31,7 +35,7 @@ Copy-Item $bin (Join-Path $stageCore "dinput8.dll") -Force
 
 $readmeCore = @"
 ================================================================================
-GOTHIC 3 OPTIMA - CORE OPTIMIZATION & STABILITY SUITE (v1.0.0)
+GOTHIC 3 OPTIMA - CORE OPTIMIZATION & STABILITY SUITE ($Version)
 ================================================================================
 
 FEATURES INCLUDED:
@@ -42,6 +46,12 @@ FEATURES INCLUDED:
 - SIMD-Accelerated 3D Math Engine (AVX2 / SSE4.1 Vec4, Matrix4x4, Bounding Boxes)
 - High-Performance Work-Stealing Thread Pool with Lock-Free Task Queues
 - Safe SEH Exception Filter & Instant Crash Dump Generator
+- High Memory Shadow Cache (> 4 GB via Heaven's Gate)
+- Fixed Physics Substep (16.6 ms) & Bone Velocity / NaN Ragdoll Clamp
+- Dynamic Vertex & Index Buffer Scaling (1-8 MB, 32-bit Index Promotion)
+- High-Precision Floating-Point Z-Buffer & Shadow Depth Bias Calibration
+- Combatant Frustum Culling Bypass (Continuous AI Pursuit & Aggro Focus)
+- Multi-Ray Footprint & Ground Recovery Fall Guard (Seam Fall Prevention)
 
 INSTALLATION:
 1. Extract 'dinput8.dll' from this archive directly into your Gothic 3 game folder
@@ -61,10 +71,10 @@ COMPATIBILITY:
 "@
 Set-Content -Path (Join-Path $stageCore "README_INSTALL.txt") -Value $readmeCore -Encoding UTF8
 
-$coreZip = Join-Path $packagesDir "Gothic3Optima-v1.0.0-Core.zip"
+$coreZip = Join-Path $packagesDir "Gothic3Optima-$Version-Core.zip"
 Compress-Archive -Path "$stageCore\*" -DestinationPath $coreZip -Force
 Remove-Item $stageCore -Recurse -Force
-Write-Host "[OK] Created: Gothic3Optima-v1.0.0-Core.zip"
+Write-Host "[OK] Created: Gothic3Optima-$Version-Core.zip"
 
 # ------------------------------------------------------------------------------
 # 2. Package Modular DXVK Addons
