@@ -73,8 +73,8 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 15. Initialize Adaptive LRU Cache Eviction (Phase 13.2)
     LRUCacheManager::Initialize();
 
-    // 16. PhysX Fixed Physics Substepping (Phase 15.1 / 23.2)
-    InitializePhysicsStabilizer();
+    // 16. PhysX Fixed Physics Substepping (Phase 15.1) - Disabled to prevent actor creation crash and preserve vanilla kinematics
+    // InitializePhysicsStabilizer();
 
     // 17. Initialize Combatant Frustum Culling Exclusion (Phase 19.1) - Disabled to prevent LOD dissolve blur & floating weapon glitches
     // InitializeCombatGuard();
@@ -95,7 +95,7 @@ static void ShutdownOptima() {
     OutputDebugStringA("[Gothic3Optima] Shutting down...\n");
     ShutdownCombatGuard();
     ShutdownMulticoreManager();
-    ShutdownPhysicsStabilizer();
+    // ShutdownPhysicsStabilizer();
     LRUCacheManager::Shutdown();
     // ShutdownFallGuard();
     ShutdownSaveGameGuard();
