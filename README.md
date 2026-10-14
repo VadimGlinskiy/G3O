@@ -6,7 +6,7 @@
 
 ### Библиотека оптимизации движка, интеграция DXVK и защита сохранений для Gothic 3
 
-[![Gothic 3 Version](https://img.shields.io/badge/Gothic%203-v1.75.14%20%2B%20UP%201.04.11-gold.svg?style=flat-square)](file:///E:/SteamLibrary/steamapps/common/Gothic%203)
+[![Gothic 3 Version](https://img.shields.io/badge/Gothic%203-v1.75.14%20%2B%20UP%201.04.11%20%2F%201.05.10-gold.svg?style=flat-square)](file:///E:/SteamLibrary/steamapps/common/Gothic%203)
 [![DXVK](https://img.shields.io/badge/Vulkan-DXVK%201.10%20%2F%202.4%20%2F%203.0-red.svg?style=flat-square)](https://github.com/doitsujin/dxvk)
 [![Memory Allocator](https://img.shields.io/badge/Allocator-mimalloc%20v3.5.3-blue.svg?style=flat-square)](https://github.com/microsoft/mimalloc)
 [![Decompression](https://img.shields.io/badge/Decompressor-libdeflate%20AVX2-green.svg?style=flat-square)](https://github.com/ebiggers/libdeflate)
@@ -212,9 +212,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package_releases.ps1
 ## FAQ
 
 <details>
-<summary><strong>Совместим ли мод с Community Patch 1.75.14 и Update Pack 1.04.11?</strong></summary>
+<summary><strong>Совместим ли мод с Community Patch 1.75.14 и Update Pack 1.04.11 / 1.05.10 (PublicBeta)?</strong></summary>
 
-Да. Мод писался и тестировался на чистой Gothic 3 v1.75.14 с установленным Update Pack v1.04.11. Все адреса и структуры совпадают.
+Да. Мод полноценно протестирован и проверен на Gothic 3 v1.75.14 как с Update Pack v1.04.11, так и с новейшим Update Pack v1.05.10 (PublicBeta). Динамическое связывание хуков по экспортируемым именам C++ гарантирует полную совместимость с обеими версиями движка.
 </details>
 
 <details>
@@ -259,7 +259,7 @@ dxvk.hud = fps,frametimes,memory,devinfo
 | **[MinHook](https://github.com/TsudaKageyu/minhook)** | Tsuda Kageyu ([TsudaKageyu](https://github.com/TsudaKageyu)) | BSD 2-Clause | Минималистичная и потокобезопасная библиотека низкоуровневых API-перехватов (detours/trampolines) для x86. |
 | **[Heaven's Gate](https://github.com/Gothic3Optima)** | Roy M. ([ReWolf](https://github.com/mwrl)), mixcode, antivm | Public Domain | Архитектурная концепция переключения процессора x86 $\to$ x64 через селектор сегмента `0x33` для доступа к памяти за пределами 4 ГБ в Windows x64. |
 | **Community Patch Team (CPT)** | CPT Team | - | За титанический труд над Community Patch 1.75.14, декомпиляцию бинарников Genome Engine и спасение игры. |
-| **Update Pack Team** | zandr, Dimus и сообщество World of Players | - | За разработку Update Pack 1.04.11, исправление сотен скриптов и стабилизацию библиотек `Engine.dll` / `Game.dll`. |
+| **Update Pack Team** | zandr, Dimus и сообщество World of Players | - | За разработку Update Pack 1.04.11 и 1.05.10 PublicBeta, исправление сотен скриптов и стабилизацию библиотек `Engine.dll` / `Game.dll`. |
 | **Piranha Bytes** | Piranha Bytes | - | Создатели бессмертной вселенной Gothic и оригинального движка Genome Engine. |
 
 ---

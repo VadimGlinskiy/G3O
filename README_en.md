@@ -6,7 +6,7 @@
 
 ### Engine optimization library, DXVK integration, and save protection for Gothic 3
 
-[![Gothic 3 Version](https://img.shields.io/badge/Gothic%203-v1.75.14%20%2B%20UP%201.04.11-gold.svg?style=flat-square)](file:///E:/SteamLibrary/steamapps/common/Gothic%203)
+[![Gothic 3 Version](https://img.shields.io/badge/Gothic%203-v1.75.14%20%2B%20UP%201.04.11%20%2F%201.05.10-gold.svg?style=flat-square)](file:///E:/SteamLibrary/steamapps/common/Gothic%203)
 [![DXVK](https://img.shields.io/badge/Vulkan-DXVK%201.10%20%2F%202.4%20%2F%203.0-red.svg?style=flat-square)](https://github.com/doitsujin/dxvk)
 [![Memory Allocator](https://img.shields.io/badge/Allocator-mimalloc%20v3.5.3-blue.svg?style=flat-square)](https://github.com/microsoft/mimalloc)
 [![Decompression](https://img.shields.io/badge/Decompressor-libdeflate%20AVX2-green.svg?style=flat-square)](https://github.com/ebiggers/libdeflate)
@@ -212,9 +212,9 @@ Archives will be generated in `dist/packages/`.
 ## FAQ
 
 <details>
-<summary><strong>Is this compatible with Community Patch 1.75.14 and Update Pack 1.04.11?</strong></summary>
+<summary><strong>Is this compatible with Community Patch 1.75.14 and Update Pack 1.04.11 / 1.05.10 (PublicBeta)?</strong></summary>
 
-Yes. It was developed and verified against Gothic 3 v1.75.14 with Update Pack v1.04.11. All binary offsets and structures match.
+Yes. The mod is thoroughly tested and verified with both Update Pack v1.04.11 and the latest Update Pack v1.05.10 (PublicBeta). Dynamic symbol resolution via exported C++ names guarantees seamless compatibility across both versions.
 </details>
 
 <details>
@@ -259,7 +259,7 @@ Gothic 3 Optima builds upon and benefits from the research, work, and open-sourc
 | **[MinHook](https://github.com/TsudaKageyu/minhook)** | Tsuda Kageyu ([TsudaKageyu](https://github.com/TsudaKageyu)) | BSD 2-Clause | Minimalist and thread-safe low-level x86 API hooking library (detours and trampolines). |
 | **[Heaven's Gate](https://github.com/Gothic3Optima)** | Roy M. ([ReWolf](https://github.com/mwrl)), mixcode, antivm | Public Domain | Architectural concept for switching the CPU from x86 to x64 mode via segment selector `0x33` to allocate large off-heap cache buffers beyond the 4 GB virtual address limit on 64-bit Windows. |
 | **Community Patch Team (CPT)** | CPT Team | - | For the colossal work on Community Patch 1.75.14, reverse engineering Genome Engine binaries, and saving Gothic 3. |
-| **Update Pack Team** | zandr, Dimus, and the World of Players community | - | For developing Update Pack 1.04.11, fixing hundreds of quests/scripts, and stabilizing `Engine.dll` / `Game.dll`. |
+| **Update Pack Team** | zandr, Dimus, and the World of Players community | - | For developing Update Pack 1.04.11 and 1.05.10 PublicBeta, fixing hundreds of quests/scripts, and stabilizing `Engine.dll` / `Game.dll`. |
 | **Piranha Bytes** | Piranha Bytes | - | Creators of the timeless Gothic universe and the original Genome Engine. |
 
 ---
