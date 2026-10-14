@@ -122,6 +122,7 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | **Frame Pacing** | Stock Windows timer resolution defaults to 15.6 ms | Jittery frame delivery even at 60 / 120 FPS | Forced `timeBeginPeriod(1)` for 1.0 ms precision | Consistent frame pacing |
 | **FMOD Audio** | Small DSP buffer in `fmodex.dll` (512 samples, 10.6 ms), 16 KB file buffer | Audio clicks, crackles, background music stopping in cities | Hooked `FMOD::System::init`: 2048x4 samples DSP buffer (170.6 ms), 64 channels, 64 KB stream buffer | Clean audio without crackles, uninterrupted music under load |
 | **Address Space** | 32-bit limit (4 GB virtual memory space) | Insufficient virtual space for massive archives (`_compiledImage.pak`, `_compiledMesh.pak`) | **High Memory Shadow Cache (> 4 GB):** 64-bit shadow pool (2 GB) via Heaven's Gate (`AllocateHighMemory`, `ReadHighMemory`) | Massive archives cached directly in 64-bit RAM, eliminating 32-bit memory pressure |
+| **Z-Buffer & Shadows** | 24-bit integer depth buffer (D24S8/D16), non-linear precision loss across FarClipPlane distances ($1/z$), severe polygon Z-fighting | Striped shadow acne artifacts on characters and terrain, distant mountain and foliage flickering | **High-Precision Floating-Point Z-Buffer (`VK_FORMAT_D32_SFLOAT`):** translated via `d3d9.useD32forD24 = True`, `d3d9.supportD32 = True`, IEEE-754 `d3d9.floatEmulation = Strict`, D16 auto-upgrade, and position invariance `invariantPosition` | Preserved depth precision up to 1000m distances, elimination of distant Z-fighting and shadow acne |
 
 ---
 
@@ -165,7 +166,7 @@ sequenceDiagram
 
 - `heavens_gate/` - x86 to x64 bridge via segment selector switch (`retf 0x33`) to allocate memory beyond 4 GB using 64-bit `ntdll.dll`.
 - `src/memory_allocator.cpp` & `src/lfh_enforcer.cpp` - complete swap of `bCMemoryAdmin`, global `_new@8`, `MemHeap` methods, and IAT `HeapAlloc` with mimalloc using three isolated lifetime-based pools; enforces LFH on system heaps.
-- `src/d3d9_hook.cpp` - adds `D3DCREATE_PUREDEVICE`, maintains shadow render state cache to filter duplicate D3D9 calls.
+- `src/d3d9_hook.cpp` - adds `D3DCREATE_PUREDEVICE`, maintains shadow render state cache, filters duplicate D3D9 calls, auto-upgrades depth format to 24/32-bit, and exposes Depth Bias / Slope Scale caps.
 - `src/streaming_optimizer.cpp` - maps `.pak` archives into RAM via `MapViewOfFile`, predictive cell prefetching by motion vector (`eCPVSPrefetcher3`), and expands `eCThreadPool` to 4-8 worker threads.
 - `src/media_optimizer.cpp` - integrates `libdeflate` (AVX2/SSE4.2) for fast archive decompression, expands FMOD Ex DSP buffer (2048x4), and sets 1.0 ms high-resolution timer.
 - `src/math_simd_optimizer.cpp` - replaces `bCFrustum::Cull` and matrix operations with SSE vector intrinsics.

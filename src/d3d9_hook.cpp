@@ -199,10 +199,19 @@ static HRESULT STDMETHODCALLTYPE Hooked_CreateDevice(
     D3DPRESENT_PARAMETERS* pPresentationParameters,
     IDirect3DDevice9** ppReturnedDeviceInterface
 ) {
+    if (pPresentationParameters && pPresentationParameters->EnableAutoDepthStencil) {
+        // Phase 17.1: Upgrade any low-precision depth buffer (e.g. D16) to 24/32-bit depth
+        // With DXVK active, d3d9.useD32forD24 = True seamlessly backs D24S8 with VK_FORMAT_D32_SFLOAT
+        if (pPresentationParameters->AutoDepthStencilFormat == D3DFMT_D16) {
+            pPresentationParameters->AutoDepthStencilFormat = D3DFMT_D24S8;
+        }
+    }
+
     HRESULT hr = Real_CreateDevice(This, Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
     if (SUCCEEDED(hr) && ppReturnedDeviceInterface && *ppReturnedDeviceInterface) {
         s_pActiveDevice = *ppReturnedDeviceInterface;
         InstallDeviceHooks(*ppReturnedDeviceInterface);
+        OutputDebugStringA("[Gothic3Optima] D3D9 Device initialized with high-precision Z-buffer support.\n");
     }
     return hr;
 }
@@ -222,6 +231,8 @@ static HRESULT STDMETHODCALLTYPE Hooked_GetDeviceCaps(
         if (pCaps->VertexShaderVersion < D3DVS_VERSION(3, 0)) {
             pCaps->VertexShaderVersion = D3DVS_VERSION(3, 0);
         }
+        // Phase 17.1: Report Slope-Scale Depth Bias & Depth Bias capabilities
+        pCaps->RasterCaps |= D3DPRASTERCAPS_DEPTHBIAS | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS;
     }
     return hr;
 }
