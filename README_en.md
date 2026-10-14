@@ -8,7 +8,7 @@
 
 [![Gothic 3 Version](https://img.shields.io/badge/Gothic%203-v1.75.14%20%2B%20UP%201.04.11%20%2F%201.05.10-gold.svg?style=flat-square)](file:///E:/SteamLibrary/steamapps/common/Gothic%203)
 [![DXVK](https://img.shields.io/badge/Vulkan-DXVK%201.10%20%2F%202.4%20%2F%203.0-red.svg?style=flat-square)](https://github.com/doitsujin/dxvk)
-[![Memory Allocator](https://img.shields.io/badge/Allocator-mimalloc%20v3.5.3-blue.svg?style=flat-square)](https://github.com/microsoft/mimalloc)
+[![Memory Architecture](https://img.shields.io/badge/Memory-Adaptive%20LRU%20%2B%20VRAM-blue.svg?style=flat-square)](#changes-table)
 [![Decompression](https://img.shields.io/badge/Decompressor-libdeflate%20AVX2-green.svg?style=flat-square)](https://github.com/ebiggers/libdeflate)
 [![Compiler](https://img.shields.io/badge/Compiler-MSVC%20v143%20(VS%202022)-orange.svg?style=flat-square)](CMakeLists.txt)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg?style=flat-square)](LICENSE)
@@ -29,8 +29,8 @@
 
 The project addresses core technical issues in the original game:
 1. **World streaming stutters** - solved with multicore archive loading and fast SIMD decompression via libdeflate.
-2. **"Where is the guru?" crashes** - replaces the stock heap allocator with mimalloc, enables LFH on all heaps, and mitigates x86 virtual memory exhaustion.
-3. **Savegame corruption (0-byte files on crash)** - writes saves to a temporary file first, verifies file integrity, and atomically swaps the destination file with automatic `.bak` backups.
+2. **"Where is the guru?" crashes** - eliminated x86 address space exhaustion via Adaptive LRU Cache resource eviction, texture offloading to VRAM via DXVK, and pre-save memory flushing.
+3. **Savegame corruption (0-byte files on crash)** - safety `.bak` backups created prior to saving, post-write size validation, and automatic rollback on failure.
 4. **Direct3D 9 single-thread draw bottlenecks** - eliminates redundant RenderState calls and translates DirectX 9 to Vulkan via DXVK.
 
 ---
@@ -83,7 +83,7 @@ All archives are attached to the same release on GitHub:
 ### 1. Core Mod (Required)
 | Package | Size | Description |
 | :--- | :--- | :--- |
-| **`Gothic3Optima-v1.3.0-Core.zip`** | ~110 KB | Core mod (`dinput8.dll`). Includes isolated mimalloc engine pools (`bCMemoryAdmin` & `MemHeap`), Multicore Threading Engine (safe worker thread scaling on active caches without skeletal bone desynchronization), SaveGame Guard (atomic saves and corruption prevention), Fixed Physics Substepping (PhysX 2.4.1 on 60+ FPS), Adaptive LRU Cache, hardware decompression via libdeflate, and DXVK integration. |
+| **`Gothic3Optima-v1.3.0-Core.zip`** | ~106 KB | Core mod (`dinput8.dll`). Features Multicore Threading Engine (dynamic eCThreadPool worker scaling for parallel cache decompression without bone desynchronization), Predictive PVS Cell Prefetcher (motion-vector world streaming), SaveGame Guard (pre-save .bak backups, memory flush, 0-byte recovery), Adaptive LRU Cache (leak protection during biome transitions), hardware decompression via libdeflate AVX2/SSE4.2, and DXVK integration. |
 
 ### 2. DXVK Variants (Pick one)
 | Package | Version | Recommendation |
@@ -105,7 +105,7 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 
 | Subsystem | Vanilla Behavior | Issue | Solution in Mod | Result |
 | :--- | :--- | :--- | :--- | :--- |
-| **Saves** | In-place file rewrite (`0x1019c6b0`), truncates to 0 on open | Corrupt 0-byte saves if game crashes during F5 | **SaveGame Guard:** cache flush, write to `.tmp`, verify size, atomic `ReplaceFileW` | Saves remain uncorrupted even on sudden crash or power loss |
+| **Saves** | In-place file rewrite (`SaveGameWorld`), truncates to 0 on crash | Corrupt 0-byte saves if game crashes during F5, loss of game progress, "Where is the guru?" error | **SaveGame Guard:** `.bak` safety backup, memory page flushing before save, post-save file size verification (>256 bytes), and automatic `.bak` restore on failure | Saves will never be lost or corrupted even on sudden crash or power loss |
 | **Memory** | Engine `bCMemoryAdmin`, `MemHeap::s_cLock` spinlocks, virtual memory fragmentation | x86 address space fragmentation, lock stalls, OOM crashes ("Where is the guru?") | **Stable Memory Isolation:** eliminated invasive global Win32 Heap hooks, preserved native `SharedBase.dll` allocator pools (preventing `RtlSizeHeap` crashes in `ntdll.dll`), while memory pressure is controlled by Adaptive LRU Cache and pre-save page flushing | Crash prevention against `bCString` allocator mismatch, stable memory operations across long game sessions |
 | **Graphics** | D3D9 without `D3DCREATE_PUREDEVICE`, textures kept in system RAM | High RAM usage, CPU validation overhead in driver | **DXVK** (Vulkan backend) + SM3.0 check bypass in `Engine.dll` | Textures offloaded to VRAM, freeing ~1 GB system RAM |
 | **D3D9 & Overlay Compatibility** | Vtable hook contention on CreateDevice by third-party overlays (Steam Overlay `gameoverlayrenderer.dll`, Bandicam, Discord, RivaTuner) | Startup crash `g_App::Create failed: Can't create application singleton`, EXCEPTION_ACCESS_VIOLATION in `DINPUT8.dll` during SwapScreen | **Clean Graphics Pipeline:** eliminated vtable `CreateDevice` interception, allowing native D3D9/DXVK and overlays to communicate directly | 100% compatibility with Steam Overlay, DXVK, Discord, zero startup crashes |
@@ -115,16 +115,16 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | **File I/O & VFS** | Limited caching, risk of CRT stream desynchronization (`fread`/`fseek`) on I/O hooks | Archive header corruption, malformed `bCString` buffers, `RtlSizeHeap` crashes in `ntdll.dll` | **Clean VFS & Native OS Cache:** eliminated invasive `kernel32.dll` hooks (`CreateFileA`, `ReadFile`, `CloseHandle`), archive disk caching offloaded to native Windows Standby Cache at full RAM/NVMe speed | 100% Virtual File System integrity, zero archive parsing corruption, rock-solid stability |
 | **Sector Streaming** | Static radial sphere around hero in `eCPVSPrefetcher3` | Micro-stutters (50-200 ms) when crossing sector boundaries | **Motion Vector Prefetch:** sphere projected 10-30m ahead along motion vector | Seamless streaming: sector cells loaded before hero arrives |
 | **Math & Physics** | Calculations use legacy x87 FPU (`fld`, `fmul`, `fstp`) in `SharedBase.dll` | Slow Frustum Culling and bounding volume checks | Replaced culling and matrix math with SSE intrinsics | Faster visibility calculations |
-| **Fall-Through & GeoData Guard** | Single raycast slips through polygon seams in terrain meshes, spurious fall detection | Hero clipping through terrain into the void, slipping into geometry seams, lethal fall damage | **Multi-Ray Footprint & Ground Recovery Fall Guard:** 5-ray footprint cluster under feet (disabled in v1.2.2 to preserve smooth locomotion without vertical jitter) | Native smooth character movement without vertical jerking or false jumping |
+| **Fall-Through & GeoData Guard** | Single raycast slips through polygon seams in terrain meshes, spurious fall detection | Hero clipping through terrain into the void, slipping into geometry seams, lethal fall damage | **Multi-Ray Footprint & Ground Recovery Fall Guard:** 5-ray footprint cluster under feet (disabled in v1.3.0 to preserve smooth locomotion without vertical jitter) | Native smooth character movement without vertical jerking or false jumping |
 | **String Hashing** | Byte-by-byte loop in `g_GetHashValue<bCString>` | Map lookup delays during NPC spawning | Vectorized string hash routine | Faster object and dialogue map lookups |
 | **CPU Topology** | Threads randomly scheduled onto slow E-cores | Frame drops on Intel 12-14th Gen and AMD Hybrid chips | Game threads bound to Performance cores (P-cores) | Consistent framerate on hybrid processors |
-| **PhysX Physics & Ragdolls** | Variable PhysX 2.4.1 timestep, zero bone damping | Ragdoll corpses launching into the stratosphere, limbs stretching into spaghetti | **Fixed Physics Substep & Bone Velocity Clamp:** PhysX step locking (disabled in v1.2.2 to prevent collision micro-stutters) | Vanilla PhysX behavior without animation or ragdoll desynchronization |
+| **PhysX Physics & Ragdolls** | Variable PhysX 2.4.1 timestep, zero bone damping | Ragdoll corpses launching into the stratosphere, limbs stretching into spaghetti | **PhysX Stability Guard:** preserved native PhysX actor instantiation (invasive CreateActor hook disabled in v1.3.0 to prevent world load crashes) | Vanilla PhysX behavior without entity spawn failures or animation desynchronization |
 | **Frame Pacing** | Stock Windows timer resolution defaults to 15.6 ms | Jittery frame delivery even at 60 / 120 FPS | Forced `timeBeginPeriod(1)` for 1.0 ms precision | Consistent frame pacing |
 | **FMOD Audio** | Small DSP buffer in `fmodex.dll` (512 samples, 10.6 ms), 16 KB file buffer | Audio clicks, crackles, background music stopping in cities | Hooked `FMOD::System::init`: 2048x4 samples DSP buffer (170.6 ms), 64 channels, 64 KB stream buffer | Clean audio without crackles, uninterrupted music under load |
 | **Address Space** | 32-bit limit (4 GB virtual memory space) | Insufficient virtual space for massive archives (`_compiledImage.pak`, `_compiledMesh.pak`) | **High Memory Shadow Cache (> 4 GB):** 64-bit shadow pool (2 GB) via Heaven's Gate (`AllocateHighMemory`, `ReadHighMemory`) | Massive archives cached directly in 64-bit RAM, eliminating 32-bit memory pressure |
 | **Z-Buffer & Depth** | 16-bit integer depth buffer (D16) on certain driver setups, non-linear precision loss across FarClipPlane distances ($1/z$) | Severe distant polygon Z-fighting on mountains and terrain | **High-Precision Z-Buffer:** hooked CreateDevice with automatic D16 promotion to 24-bit D24S8 (on native D3D9) and 32-bit float VK_FORMAT_D32_SFLOAT under DXVK | High depth precision up to 1000m distances, eliminating distant Z-fighting on cliffs and horizons |
 | **Engine Geometry Pools** | Static geometry pool chunk sizing (growth step only 1024 instances), strict Shader Model 3.0 driver assertions | Geometry batch reallocation stalls in dense scenes, startup crashes on non-standard GPU reports | **Instance Pool Expansion & SM3.0 Assertion Bypass:** expanded Engine.dll instance pool growth step to 4096 and guaranteed SM3.0 cap reporting in GetDeviceCaps | Smooth rendering in dense scenes, eliminated false-positive GPU initialization errors |
-| **AI Combat Focus (Aggro)** | Entities culled from processing when outside camera frustum (`ExtractFromEntity`: `CullTreeHC`, `CullVPTHC`, `CullSmallObject`) | Pursuing monsters and enemies behind the hero freezing or losing target when turning camera away | **Combatant Culling Bypass (`src/combat_guard.cpp`):** hooks visibility tree checks (disabled in v1.2.2 to prevent character LOD dissolve blurring and weapon socket detachment) | Vanilla character rendering without ghosting or floating weapon artifacts |
+| **AI Combat Focus (Aggro)** | Entities culled from processing when outside camera frustum (`ExtractFromEntity`: `CullTreeHC`, `CullVPTHC`, `CullSmallObject`) | Pursuing monsters and enemies behind the hero freezing or losing target when turning camera away | **Combatant Culling Bypass (`src/combat_guard.cpp`):** hooks visibility tree checks (disabled in v1.3.0 to prevent character LOD dissolve blurring and weapon socket detachment) | Vanilla character rendering without ghosting or floating weapon artifacts |
 
 ---
 
@@ -138,27 +138,24 @@ sequenceDiagram
     actor Player as Player (F5 / QuickSave)
     participant Game as Game.dll
     participant Guard as SaveGame Guard
-    participant Memory as mimalloc
     participant Disk as Disk
 
-    Player->>Game: Press F5
-    Game->>Guard: Intercept save call (0x1019c6b0)
-    Guard->>Guard: Check free memory
-    alt Free memory < 350 MB
-        Guard->>Memory: Reclaim memory pages
+    Player->>Game: Press F5 (Save Game)
+    Game->>Guard: Intercept SaveGameWorld
+    Guard->>Guard: Check available virtual memory (< 500 MB)
+    alt Low Memory
+        Guard->>Guard: Emergency cache & page flush
     end
-    Guard->>Disk: Write to temporary file (.tmp)
-    Game->>Disk: Serialize world state
-    Game->>Guard: Close handle (CloseHandle)
-    Guard->>Disk: Flush buffers to disk (FlushFileBuffers)
-    Guard->>Guard: Verify file size (>256 bytes)
-    alt Corrupted write (0 bytes)
-        Guard->>Disk: Remove corrupt .tmp file
-        Guard-->>Player: Save cancelled, original file preserved
+    Guard->>Disk: Create safety backups of existing saves (.bak)
+    Guard->>Game: Call original SaveGameWorld
+    Game->>Disk: Serialize world state (.g3savdat)
+    Game-->>Guard: Save routine finished
+    Guard->>Disk: Validate savegame file size (> 256 bytes)
+    alt File corrupted (0 bytes / crash during write)
+        Guard->>Disk: Automatic recovery from .bak backup
+        Guard-->>Player: Save protected, corrupted file restored
     else File valid
-        Guard->>Disk: Create backup (.bak)
-        Guard->>Disk: Atomic swap via ReplaceFileW
-        Guard-->>Player: Game saved successfully
+        Guard-->>Player: Game saved successfully (.g3savdat + .bak)
     end
 ```
 
@@ -172,11 +169,9 @@ sequenceDiagram
 - `src/streaming_optimizer.cpp` - predictive sector cell prefetching by motion vector (`eCPVSPrefetcher3`) and safe `.pak` archive management.
 - `src/media_optimizer.cpp` - hardware SIMD decompression of `.pak` archives via `libdeflate` (AVX2/SSE4.2), FMOD Ex DSP buffer expansion (2048x4), and high-precision 1.0 ms timer.
 - `src/lru_cache_manager.cpp` - adaptive LRU cache eviction on `eCMainCache`, fresh asset retention (<300s), VRAM flush, and background watchdog.
-- `src/savegame_guard.cpp` - writes saves to `.tmp`, verifies file size, creates `.bak` backup, and performs atomic replacement via `ReplaceFileW`.
+- `src/savegame_guard.cpp` - pre-save .bak safety backup, memory page flushing before save, post-save file integrity validation (>256 bytes), and automatic rollback on failure.
 - `src/version_watermark.cpp` - displays Gothic 3 Optima version (v1.3.0) in the game's main menu.
-- `src/memory_allocator.cpp` - isolated mimalloc engine allocator for `SharedBase.dll` pools (`bCMemoryAdmin` & `MemHeap`) eliminating "Where is the guru?" crashes.
-- `src/physics_stabilizer.cpp` - fixed PhysX 2.4.1 timestep (60 Hz fixed quantum) for high refresh rate monitors (>60 / 144 Hz) without affecting character kinematics.
-- `src/combat_guard.cpp` & `src/fall_guard.cpp` - experimental modules (disabled to preserve vanilla kinematics and eliminate LOD dither artifacts).
+- `src/memory_allocator.cpp` & `src/physics_stabilizer.cpp` & `src/combat_guard.cpp` & `src/fall_guard.cpp` - experimental modules (disabled in v1.3.0 to preserve 100% hybrid engine heap stability, vanilla PhysX actor spawning, and smooth character locomotion).
 
 ---
 
@@ -265,7 +260,7 @@ Gothic 3 Optima builds upon and benefits from the research, work, and open-sourc
 | :--- | :--- | :--- | :--- |
 | **[DXVK](https://github.com/doitsujin/dxvk)** | Philip Rebohle ([doitsujin](https://github.com/doitsujin)) & contributors | Zlib License | Direct3D 9 to native Vulkan translation layer, offloading texture creation and shader compilation to asynchronous Vulkan transfer queues, enabling 32-bit floating point depth buffers. |
 | **[DXVK-Async](https://github.com/Sporif/dxvk-async)** | [Sporif](https://github.com/Sporif) | Zlib License | Asynchronous graphics pipeline compilation patch for classic DXVK 1.10.x builds. |
-| **[mimalloc](https://github.com/microsoft/mimalloc)** | Daan Leijen ([Microsoft Research](https://github.com/microsoft)) | MIT License | High-performance compact memory allocator eliminating external heap fragmentation and replacing the slow engine heap manager `bCMemoryAdmin`. |
+| **[mimalloc](https://github.com/microsoft/mimalloc)** | Daan Leijen ([Microsoft Research](https://github.com/microsoft)) | MIT License | Compact high-speed memory allocator (used for emergency garbage collection in SaveGame Guard and experimental heap modules). |
 | **[libdeflate](https://github.com/ebiggers/libdeflate)** | Eric Biggers ([ebiggers](https://github.com/ebiggers)) | MIT License | Fast zlib/deflate decompression library with hardware SSE4.2 / AVX2 SIMD acceleration for unpacking meshes and textures from `.pak` archives. |
 | **[MinHook](https://github.com/TsudaKageyu/minhook)** | Tsuda Kageyu ([TsudaKageyu](https://github.com/TsudaKageyu)) | BSD 2-Clause | Minimalist and thread-safe low-level x86 API hooking library (detours and trampolines). |
 | **[Heaven's Gate](https://github.com/Gothic3Optima)** | Roy M. ([ReWolf](https://github.com/mwrl)), mixcode, antivm | Public Domain | Architectural concept for switching the CPU from x86 to x64 mode via segment selector `0x33` to allocate large off-heap cache buffers beyond the 4 GB virtual address limit on 64-bit Windows. |
