@@ -11,7 +11,6 @@
 // 2. Unlocks asynchronous streaming queues via eCThreadPool::EnableAllThreads(true).
 // 3. Eliminates synchronous cache locks via eCMainCache::AccessDisableThreading hook.
 // 4. Boosts main game loop thread priority and balances worker priorities.
-// 5. Configures PhysX 2.4.1 scene multithreading (4 worker threads).
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -23,10 +22,9 @@ constexpr uintptr_t RVA_MAINCACHE_ACCESS_DISABLE_THREADING  = 0x000065B0;
 constexpr uintptr_t RVA_THREADPOOL_ENABLE_ALL_THREADS       = 0x001F3C60;
 constexpr uintptr_t RVA_THREADPOOL_GET_GLOBAL_JOBS          = 0x001F4260;
 constexpr uintptr_t RVA_THREADPOOL_GET_GLOBAL_WORKING       = 0x001F4270;
-constexpr uintptr_t RVA_ENGINE_CLOCK_PTR                    = 0x00602A88;
 
 // Function pointer types
-typedef void (__thiscall* BaseCache_SetNumThreads_t)(void* pThis, uint32_t uNumThreads);
+typedef uint32_t (__thiscall* BaseCache_SetNumThreads_t)(void* pThis, uint32_t uNumThreads);
 static BaseCache_SetNumThreads_t Real_BaseCache_SetNumThreads = nullptr;
 
 typedef bool (__thiscall* ThreadPool_Create_t)(void* pThis, uint32_t uNumThreads);
@@ -41,7 +39,6 @@ typedef unsigned long (__stdcall* GetGlobalThreadStats_t)();
 static EnableAllThreads_t g_pfnEnableAllThreads = nullptr;
 static GetGlobalThreadStats_t g_pfnGetGlobalJobsInQueue = nullptr;
 static GetGlobalThreadStats_t g_pfnGetGlobalThreadsWorking = nullptr;
-static void** g_ppEngineClock = nullptr;
 
 // State tracking
 static uint32_t g_targetWorkerThreads = 4;
@@ -54,7 +51,7 @@ static bool s_multicoreInitialized = false;
 // 1. Hook for eCBaseCache::SetNumThreadsAndCreate (0x101ef8f0)
 // Intercepts cache thread configuration for Mesh, Image, Animation, Collision, etc.
 // ---------------------------------------------------------------------------
-static void __fastcall Hooked_BaseCache_SetNumThreads(void* pThis, void* /*edx*/, uint32_t uNumThreads) {
+static uint32_t __fastcall Hooked_BaseCache_SetNumThreads(void* pThis, void* /*edx*/, uint32_t uNumThreads) {
     uint32_t configuredThreads = uNumThreads;
     if (uNumThreads < g_targetWorkerThreads) {
         uNumThreads = g_targetWorkerThreads;
@@ -67,7 +64,7 @@ static void __fastcall Hooked_BaseCache_SetNumThreads(void* pThis, void* /*edx*/
         configuredThreads, uNumThreads, pThis);
     OutputDebugStringA(buf);
 
-    Real_BaseCache_SetNumThreads(pThis, uNumThreads);
+    return Real_BaseCache_SetNumThreads(pThis, uNumThreads);
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +93,7 @@ static bool __fastcall Hooked_ThreadPool_Create(void* pThis, void* /*edx*/, uint
 // Always returns reference to false, preventing engine from disabling threading.
 // ---------------------------------------------------------------------------
 static bool& __fastcall Hooked_AccessDisableThreading(void* /*pThis*/, void* /*edx*/) {
+    s_alwaysFalse = false;
     return s_alwaysFalse;
 }
 
@@ -147,23 +145,6 @@ static void BoostMainThreadPriority() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 5. Configure PhysX 2.4.1 Scene Multithreading
-// ---------------------------------------------------------------------------
-static void ConfigurePhysXMultithreading(uintptr_t engineBase) {
-    g_ppEngineClock = reinterpret_cast<void**>(engineBase + RVA_ENGINE_CLOCK_PTR);
-    if (g_ppEngineClock && *g_ppEngineClock) {
-        // Offset 0x148 in clock / engine object controls PhysX scene worker threads
-        uint32_t* pPhysXThreads = reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(*g_ppEngineClock) + 0x148);
-        if (*pPhysXThreads == 0) {
-            *pPhysXThreads = (g_targetWorkerThreads >= 4) ? 4 : g_targetWorkerThreads;
-            char buf[128];
-            sprintf_s(buf, "[Gothic3Optima] Multicore: Enabled PhysX 2.4.1 scene multithreading with %u threads\n", *pPhysXThreads);
-            OutputDebugStringA(buf);
-        }
-    }
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -185,12 +166,14 @@ void InitializeMulticoreManager() {
     GetSystemInfo(&si);
     DWORD numCores = si.dwNumberOfProcessors;
 
-    // Scale dynamically: 4 cores -> 4 workers; 6 cores -> 5 workers; 8+ cores -> 6-8 workers
+    // Scale dynamically: 2 cores -> 2 workers; 4 cores -> 3 workers; 6 cores -> 4 workers; 8+ cores -> 6-8 workers
     // Max capped at 8 to remain safely below Genome Engine assertion limit (10).
-    if (numCores <= 4) {
-        g_targetWorkerThreads = 4;
+    if (numCores <= 2) {
+        g_targetWorkerThreads = 2;
+    } else if (numCores <= 4) {
+        g_targetWorkerThreads = 3;
     } else if (numCores <= 6) {
-        g_targetWorkerThreads = 5;
+        g_targetWorkerThreads = 4;
     } else if (numCores <= 8) {
         g_targetWorkerThreads = 6;
     } else {
@@ -261,9 +244,6 @@ void InitializeMulticoreManager() {
 
     // 7. Boost main thread priority
     BoostMainThreadPriority();
-
-    // 8. Configure PhysX multithreading
-    ConfigurePhysXMultithreading(engineBase);
 
     s_multicoreInitialized = true;
     OutputDebugStringA("[Gothic3Optima] Multicore Threading Engine initialized successfully.\n");
