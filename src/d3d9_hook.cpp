@@ -27,6 +27,9 @@ static volatile DWORD g_filteredRenderStates = 0;
 static volatile DWORD g_filteredStageStates = 0;
 static volatile DWORD g_filteredSamplerStates = 0;
 static volatile DWORD g_tunedDepthBiasCalls = 0;
+static volatile DWORD g_scaledVertexBuffers = 0;
+static volatile DWORD g_scaledIndexBuffers = 0;
+static volatile DWORD g_promoted32BitIndexBuffers = 0;
 
 void GetD3D9FilterStatistics(DWORD* pFilteredRenderStates, DWORD* pFilteredStageStates, DWORD* pFilteredSamplerStates) {
     if (pFilteredRenderStates) *pFilteredRenderStates = g_filteredRenderStates;
@@ -71,6 +74,45 @@ static Reset_t Real_Reset = NULL;
 
 typedef HRESULT (STDMETHODCALLTYPE* Present_t)(IDirect3DDevice9* This, const RECT* pSourceRect, const RECT* pDestRect, HWND hDestWindowOverride, const RGNDATA* pDirtyRegion);
 static Present_t Real_Present = NULL;
+
+typedef HRESULT (STDMETHODCALLTYPE* CreateVertexBuffer_t)(
+    IDirect3DDevice9* This,
+    UINT Length,
+    DWORD Usage,
+    DWORD FVF,
+    D3DPOOL Pool,
+    IDirect3DVertexBuffer9** ppVertexBuffer,
+    HANDLE* pSharedHandle
+);
+static CreateVertexBuffer_t Real_CreateVertexBuffer = NULL;
+
+typedef HRESULT (STDMETHODCALLTYPE* CreateIndexBuffer_t)(
+    IDirect3DDevice9* This,
+    UINT Length,
+    DWORD Usage,
+    D3DFORMAT Format,
+    D3DPOOL Pool,
+    IDirect3DIndexBuffer9** ppIndexBuffer,
+    HANDLE* pSharedHandle
+);
+static CreateIndexBuffer_t Real_CreateIndexBuffer = NULL;
+
+struct SIndexSubDesc {
+    DWORD* pIndices;
+    DWORD  numIndices;
+};
+
+struct SIndexDescArray {
+    WORD capacity;
+    WORD count;
+    SIndexSubDesc** pItems;
+};
+
+typedef bool (__thiscall* eCVertexProcessorIndex_CreateBuffer_t)(void* pThis, SIndexDescArray* pDescs);
+static eCVertexProcessorIndex_CreateBuffer_t Real_eCVertexProcessorIndex_CreateBuffer = NULL;
+static BYTE* s_pIndex32CheckJump = NULL;
+static CRITICAL_SECTION s_index32Lock;
+static bool s_index32LockInit = false;
 
 // D3DX9 function pointers
 typedef HRESULT (WINAPI* D3DXFilterTexture_t)(LPDIRECT3DBASETEXTURE9 pBaseTexture, const PALETTEENTRY* pPalette, UINT SrcLevel, DWORD Filter);
@@ -141,6 +183,116 @@ static HRESULT STDMETHODCALLTYPE Hooked_SetSamplerState(IDirect3DDevice9* This, 
     return Real_SetSamplerState(This, Sampler, Type, Value);
 }
 
+static HRESULT STDMETHODCALLTYPE Hooked_CreateVertexBuffer(
+    IDirect3DDevice9* This,
+    UINT Length,
+    DWORD Usage,
+    DWORD FVF,
+    D3DPOOL Pool,
+    IDirect3DVertexBuffer9** ppVertexBuffer,
+    HANDLE* pSharedHandle
+) {
+    UINT newLength = Length;
+    if (Usage & D3DUSAGE_DYNAMIC) {
+        // Enforce minimum capacity of 1 MB and double small/medium buffers up to 8 MB
+        if (newLength < 1048576) {
+            newLength = 1048576;
+        } else if (newLength < 8388608) {
+            newLength *= 2;
+        }
+        newLength = (newLength + 4095) & ~4095;
+        InterlockedIncrement((volatile LONG*)&g_scaledVertexBuffers);
+    }
+
+    HRESULT hr = Real_CreateVertexBuffer(This, newLength, Usage, FVF, Pool, ppVertexBuffer, pSharedHandle);
+    if (FAILED(hr) && newLength != Length) {
+        hr = Real_CreateVertexBuffer(This, Length, Usage, FVF, Pool, ppVertexBuffer, pSharedHandle);
+    }
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE Hooked_CreateIndexBuffer(
+    IDirect3DDevice9* This,
+    UINT Length,
+    DWORD Usage,
+    D3DFORMAT Format,
+    D3DPOOL Pool,
+    IDirect3DIndexBuffer9** ppIndexBuffer,
+    HANDLE* pSharedHandle
+) {
+    UINT newLength = Length;
+    if (Usage & D3DUSAGE_DYNAMIC) {
+        // Enforce minimum capacity of 512 KB and double small/medium buffers up to 4 MB
+        if (newLength < 524288) {
+            newLength = 524288;
+        } else if (newLength < 4194304) {
+            newLength *= 2;
+        }
+        newLength = (newLength + 255) & ~255;
+        InterlockedIncrement((volatile LONG*)&g_scaledIndexBuffers);
+    }
+
+    HRESULT hr = Real_CreateIndexBuffer(This, newLength, Usage, Format, Pool, ppIndexBuffer, pSharedHandle);
+    if (FAILED(hr) && newLength != Length) {
+        hr = Real_CreateIndexBuffer(This, Length, Usage, Format, Pool, ppIndexBuffer, pSharedHandle);
+    }
+    return hr;
+}
+
+static bool __fastcall Hooked_eCVertexProcessorIndex_CreateBuffer(void* pThis, void* /*edx*/, SIndexDescArray* pDescs) {
+    bool force32Bit = false;
+    if (pDescs && pDescs->pItems && pDescs->count > 0) {
+        DWORD totalIndices = 0;
+        for (WORD i = 0; i < pDescs->count; ++i) {
+            SIndexSubDesc* pSub = pDescs->pItems[i];
+            if (!pSub) continue;
+            totalIndices += pSub->numIndices;
+            if (pSub->pIndices) {
+                for (DWORD k = 0; k < pSub->numIndices; ++k) {
+                    if (pSub->pIndices[k] > 0xFFFF) {
+                        force32Bit = true;
+                        break;
+                    }
+                }
+            }
+            if (force32Bit) break;
+        }
+        if (totalIndices > 0xFFFF) {
+            force32Bit = true;
+        }
+    }
+
+    if (force32Bit && s_pIndex32CheckJump) {
+        if (!s_index32LockInit) {
+            InitializeCriticalSection(&s_index32Lock);
+            s_index32LockInit = true;
+        }
+        EnterCriticalSection(&s_index32Lock);
+
+        DWORD oldProt = 0;
+        VirtualProtect(s_pIndex32CheckJump, 2, PAGE_EXECUTE_READWRITE, &oldProt);
+        BYTE orig0 = s_pIndex32CheckJump[0];
+        BYTE orig1 = s_pIndex32CheckJump[1];
+        s_pIndex32CheckJump[0] = 0x90; // NOP
+        s_pIndex32CheckJump[1] = 0x90; // NOP
+        VirtualProtect(s_pIndex32CheckJump, 2, oldProt, &oldProt);
+
+        InterlockedIncrement((volatile LONG*)&g_promoted32BitIndexBuffers);
+
+        bool result = Real_eCVertexProcessorIndex_CreateBuffer(pThis, pDescs);
+
+        VirtualProtect(s_pIndex32CheckJump, 2, PAGE_EXECUTE_READWRITE, &oldProt);
+        s_pIndex32CheckJump[0] = orig0;
+        s_pIndex32CheckJump[1] = orig1;
+        VirtualProtect(s_pIndex32CheckJump, 2, oldProt, &oldProt);
+
+        LeaveCriticalSection(&s_index32Lock);
+        return result;
+    }
+
+    return Real_eCVertexProcessorIndex_CreateBuffer(pThis, pDescs);
+}
+
 static HRESULT STDMETHODCALLTYPE Hooked_Reset(IDirect3DDevice9* This, D3DPRESENT_PARAMETERS* pPresentationParameters) {
     InvalidateStateCaches();
     return Real_Reset(This, pPresentationParameters);
@@ -151,8 +303,9 @@ static HRESULT STDMETHODCALLTYPE Hooked_Present(IDirect3DDevice9* This, const RE
     s_presentFrame++;
     if ((s_presentFrame % 3600) == 0) {
         char buf[256];
-        sprintf_s(buf, "[Gothic3Optima] D3D9 Filter: RS: %u, TSS: %u, SS: %u | Shadow Depth Bias Tuned: %u\n",
-            g_filteredRenderStates, g_filteredStageStates, g_filteredSamplerStates, g_tunedDepthBiasCalls);
+        sprintf_s(buf, "[Gothic3Optima] D3D9 Filter: RS: %u, TSS: %u, SS: %u | Shadow Bias: %u | VB Scaled: %u, IB Scaled: %u, IB32: %u\n",
+            g_filteredRenderStates, g_filteredStageStates, g_filteredSamplerStates, g_tunedDepthBiasCalls,
+            g_scaledVertexBuffers, g_scaledIndexBuffers, g_promoted32BitIndexBuffers);
         OutputDebugStringA(buf);
     }
     return Real_Present(This, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
@@ -178,6 +331,8 @@ static void InstallDeviceHooks(IDirect3DDevice9* pDevice) {
     // Vtable indices:
     // Reset: 19
     // Present: 20
+    // CreateVertexBuffer: 26
+    // CreateIndexBuffer: 27
     // SetRenderState: 60
     // SetTextureStageState: 70
     // SetSamplerState: 72
@@ -191,6 +346,12 @@ static void InstallDeviceHooks(IDirect3DDevice9* pDevice) {
     if (MH_CreateHook(vtbl[72], (LPVOID)Hooked_SetSamplerState, (LPVOID*)&Real_SetSamplerState) == MH_OK) {
         MH_EnableHook(vtbl[72]);
     }
+    if (MH_CreateHook(vtbl[26], (LPVOID)Hooked_CreateVertexBuffer, (LPVOID*)&Real_CreateVertexBuffer) == MH_OK) {
+        MH_EnableHook(vtbl[26]);
+    }
+    if (MH_CreateHook(vtbl[27], (LPVOID)Hooked_CreateIndexBuffer, (LPVOID*)&Real_CreateIndexBuffer) == MH_OK) {
+        MH_EnableHook(vtbl[27]);
+    }
     if (MH_CreateHook(vtbl[19], (LPVOID)Hooked_Reset, (LPVOID*)&Real_Reset) == MH_OK) {
         MH_EnableHook(vtbl[19]);
     }
@@ -199,7 +360,7 @@ static void InstallDeviceHooks(IDirect3DDevice9* pDevice) {
     }
 
     g_DeviceHooksInstalled = true;
-    OutputDebugStringA("[Gothic3Optima] Installed IDirect3DDevice9 State Redundancy Filter hooks.\n");
+    OutputDebugStringA("[Gothic3Optima] Installed IDirect3DDevice9 State Filter and Vertex/Index Buffer scaling hooks.\n");
 }
 
 static IDirect3DDevice9* s_pActiveDevice = nullptr;
@@ -254,6 +415,12 @@ static HRESULT STDMETHODCALLTYPE Hooked_GetDeviceCaps(
         }
         // Phase 17.1: Report Slope-Scale Depth Bias & Depth Bias capabilities
         pCaps->RasterCaps |= D3DPRASTERCAPS_DEPTHBIAS | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS;
+
+        // Phase 18.1: Expand vertex, primitive and index capacity for high-poly mods
+        pCaps->MaxVertexIndex = 0x00FFFFFF;
+        pCaps->MaxPrimitiveCount = 0x00FFFFFF;
+        pCaps->MaxStreams = 16;
+        pCaps->MaxStreamStride = 512;
     }
     return hr;
 }
@@ -346,5 +513,40 @@ void InstallD3D9Hooks() {
             VirtualProtect(pRTT, 2, oldProtect, &oldProtect);
         }
         OutputDebugStringA("[Gothic3Optima] Engine.dll GPU capability assertions bypassed.\n");
+
+        // Phase 18.1: Expand geometry instance pool growth increment in Engine.dll
+        // 0x101dbc6c: cmp eax, 0x400 -> cmp eax, 0x1000 (4096 instances per batch chunk)
+        // 0x101dbc7f: mov eax, 0x400 -> mov eax, 0x1000
+        // 0x101dbc78: mov eax, 8 -> mov eax, 256 (initial pool reservation)
+        BYTE* pPoolCmp = (BYTE*)(base + 0x001dbc6c);
+        BYTE* pPoolMov = (BYTE*)(base + 0x001dbc7f);
+        BYTE* pPoolInit = (BYTE*)(base + 0x001dbc78);
+        if (pPoolCmp[0] == 0x3D && *(DWORD*)(pPoolCmp + 1) == 0x00000400) {
+            DWORD oldProt = 0;
+            VirtualProtect(pPoolCmp, 5, PAGE_EXECUTE_READWRITE, &oldProt);
+            *(DWORD*)(pPoolCmp + 1) = 0x00001000;
+            VirtualProtect(pPoolCmp, 5, oldProt, &oldProt);
+        }
+        if (pPoolMov[0] == 0xB8 && *(DWORD*)(pPoolMov + 1) == 0x00000400) {
+            DWORD oldProt = 0;
+            VirtualProtect(pPoolMov, 5, PAGE_EXECUTE_READWRITE, &oldProt);
+            *(DWORD*)(pPoolMov + 1) = 0x00001000;
+            VirtualProtect(pPoolMov, 5, oldProt, &oldProt);
+        }
+        if (pPoolInit[0] == 0xB8 && *(DWORD*)(pPoolInit + 1) == 0x00000008) {
+            DWORD oldProt = 0;
+            VirtualProtect(pPoolInit, 5, PAGE_EXECUTE_READWRITE, &oldProt);
+            *(DWORD*)(pPoolInit + 1) = 0x00000100;
+            VirtualProtect(pPoolInit, 5, oldProt, &oldProt);
+        }
+        OutputDebugStringA("[Gothic3Optima] Engine.dll geometry instance pool growth expanded to 4096.\n");
+
+        // Phase 18.1: Hook eCVertexProcessorIndex::CreateBuffer for automatic 32-bit index promotion
+        void* pCreateBuffer = (void*)(base + 0x0020c980);
+        s_pIndex32CheckJump = (BYTE*)(base + 0x0020c9ea);
+        if (MH_CreateHook(pCreateBuffer, (LPVOID)Hooked_eCVertexProcessorIndex_CreateBuffer, (LPVOID*)&Real_eCVertexProcessorIndex_CreateBuffer) == MH_OK) {
+            MH_EnableHook(pCreateBuffer);
+            OutputDebugStringA("[Gothic3Optima] Hooked eCVertexProcessorIndex::CreateBuffer for 32-bit index auto-promotion.\n");
+        }
     }
 }
