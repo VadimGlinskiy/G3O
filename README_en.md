@@ -42,7 +42,7 @@ Releases are split into the **Core engine mod** and **DXVK packages** tailored t
 ```mermaid
 graph TD
     subgraph GitHub_Release ["GitHub Release (single page)"]
-        Core["Gothic3Optima-v1.1.0-Core.zip<br/>(dinput8.dll: allocator, save guard, SIMD, threads)"]
+        Core["Gothic3Optima-v1.3.0-Core.zip<br/>(dinput8.dll: saves, threads, LRU cache, DXVK)"]
         DXVK1["DXVK-2.4.1-Stable.zip<br/>(Recommended for NVIDIA / AMD)"]
         DXVK2["DXVK-3.0.1.zip<br/>(For Vulkan 1.4)"]
         DXVK3["DXVK-3.0.1-HDR.zip<br/>(For HDR monitors)"]
@@ -67,7 +67,7 @@ graph TD
 ### Steps:
 
 1. **Download the Core mod:**
-   - Grab `Gothic3Optima-v1.2.2-Core.zip` from the release page.
+   - Grab `Gothic3Optima-v1.3.0-Core.zip` from the release page.
    - Copy `dinput8.dll` into your Gothic 3 game directory (next to `Gothic3.exe`).
 2. **Download the DXVK package for your GPU:**
    - Pick the appropriate DXVK archive from the table below on the same release page.
@@ -83,7 +83,7 @@ All archives are attached to the same release on GitHub:
 ### 1. Core Mod (Required)
 | Package | Size | Description |
 | :--- | :--- | :--- |
-| **`Gothic3Optima-v1.2.2-Core.zip`** | ~120 KB | Core mod (`dinput8.dll`). Includes Multicore Threading Engine (eCThreadPool pool scaling to 2-8 workers, priority scheduler), mimalloc allocator replacement, SaveGame Guard, SIMD geometry acceleration, Combatant Culling Bypass, and exception handler. Works on native D3D9 or with any DXVK build. |
+| **`Gothic3Optima-v1.3.0-Core.zip`** | ~110 KB | Core mod (`dinput8.dll`). Includes isolated mimalloc engine pools (`bCMemoryAdmin` & `MemHeap`), Multicore Threading Engine (safe worker thread scaling on active caches without skeletal bone desynchronization), SaveGame Guard (atomic saves and corruption prevention), Fixed Physics Substepping (PhysX 2.4.1 on 60+ FPS), Adaptive LRU Cache, hardware decompression via libdeflate, and DXVK integration. |
 
 ### 2. DXVK Variants (Pick one)
 | Package | Version | Recommendation |
@@ -95,7 +95,7 @@ All archives are attached to the same release on GitHub:
 | **`DXVK-1.10.1-Async.zip`** | DXVK 1.10.1 Async | For Intel HD/UHD integrated graphics or legacy hardware. |
 
 > [!TIP]
-> For standard gaming PCs, use: **`Gothic3Optima-v1.2.2-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
+> For standard gaming PCs, use: **`Gothic3Optima-v1.3.0-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
 
 ---
 
@@ -106,13 +106,13 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | Subsystem | Vanilla Behavior | Issue | Solution in Mod | Result |
 | :--- | :--- | :--- | :--- | :--- |
 | **Saves** | In-place file rewrite (`0x1019c6b0`), truncates to 0 on open | Corrupt 0-byte saves if game crashes during F5 | **SaveGame Guard:** cache flush, write to `.tmp`, verify size, atomic `ReplaceFileW` | Saves remain uncorrupted even on sudden crash or power loss |
-| **Memory** | Engine `bCMemoryAdmin`, `_new@8` with `MemHeap::s_cLock` spinlock, CRT `HeapAlloc` | x86 address space fragmentation, lock stalls, OOM crashes ("Where is the guru?") | Complete swap of `bCMemoryAdmin`, `_new@8`, `MemHeap`, and IAT `HeapAlloc` with **mimalloc** using three isolated pools (Engine, MemHeap, ShortUsage) + LFH | External heap fragmentation eliminated, no lock contention, memory crashes resolved |
-| **Graphics** | D3D9 without `D3DCREATE_PUREDEVICE`, textures kept in system RAM | High RAM usage, CPU validation overhead in driver | **DXVK** + forced `D3DCREATE_PUREDEVICE` flag | Textures offloaded to VRAM, freeing ~1 GB system RAM |
-| **D3D9 States** | Engine emits thousands of redundant `SetRenderState` calls per frame | CPU draw call bottleneck | **State Filter:** shadow table filters duplicate calls | Reduced driver overhead, improved 1% low frametimes |
-| **Multicore Threading** | Main game loop, AI logic, PhysX, D3D9 call submission, and asset streaming in vanilla are locked to a single thread (eCThreadPool hardcoded to 1 or 0 workers), D3D9 is synchronous | 100% saturation on core 0, stuttering during asset decompression, severe underutilization of 6-16 core CPUs | **Multicore Threading Engine (Phase 20):** hooked eCBaseCache::SetNumThreadsAndCreate (RVA `0x1EF8F0`) and eCThreadPool::Create (RVA `0x1F4010`) scaling pools to 2-8 workers per cache adapted to CPU core topology, eCThreadPool::EnableAllThreads(true), bypass of eCMainCache::AccessDisableThreading, unblocked asynchronous worker queues, and elevated main thread priority to THREAD_PRIORITY_ABOVE_NORMAL | Parallel loading and decompression of geometry, textures, audio, and animations across all available CPU cores, asynchronous CSMT rendering via DXVK, full utilization of modern multicore architectures |
+| **Memory** | Engine `bCMemoryAdmin`, `MemHeap::s_cLock` spinlocks, virtual memory fragmentation | x86 address space fragmentation, lock stalls, OOM crashes ("Where is the guru?") | **Stable Memory Isolation:** eliminated invasive global Win32 Heap hooks, preserved native `SharedBase.dll` allocator pools (preventing `RtlSizeHeap` crashes in `ntdll.dll`), while memory pressure is controlled by Adaptive LRU Cache and pre-save page flushing | Crash prevention against `bCString` allocator mismatch, stable memory operations across long game sessions |
+| **Graphics** | D3D9 without `D3DCREATE_PUREDEVICE`, textures kept in system RAM | High RAM usage, CPU validation overhead in driver | **DXVK** (Vulkan backend) + SM3.0 check bypass in `Engine.dll` | Textures offloaded to VRAM, freeing ~1 GB system RAM |
+| **D3D9 & Overlay Compatibility** | Vtable hook contention on CreateDevice by third-party overlays (Steam Overlay `gameoverlayrenderer.dll`, Bandicam, Discord, RivaTuner) | Startup crash `g_App::Create failed: Can't create application singleton`, EXCEPTION_ACCESS_VIOLATION in `DINPUT8.dll` during SwapScreen | **Clean Graphics Pipeline:** eliminated vtable `CreateDevice` interception, allowing native D3D9/DXVK and overlays to communicate directly | 100% compatibility with Steam Overlay, DXVK, Discord, zero startup crashes |
+| **Multicore Threading** | Main game loop, AI logic, PhysX, D3D9 call submission, and asset streaming in vanilla are locked to a single thread (eCThreadPool hardcoded to 1 or 0 workers), D3D9 is synchronous | 100% saturation on core 0, stuttering during asset decompression, severe underutilization of 6-16 core CPUs | **Multicore Threading Engine (Phase 20 & 21):** dynamic scaling of `eCThreadPool` workers up to 4 threads strictly on active parallel caches (`uNumThreads > 0`), single-threaded skeletal bone matrices protected from race conditions, preserving `AccessDisableThreading` during maintenance | Parallel asset decompression on idle cores, zero weapon attachment race conditions (no floating swords), background CSMT rendering via DXVK |
 | **Resource Cache & GC** | Aggressive resource eviction or unbounded asset buildup in long play sessions | Stutter when looking around, memory leaks when traveling between biomes (Myrtana/Varant/Nordmar) | **Adaptive LRU Cache Eviction (`eCMainCache`):** fresh assets (<300s) retained when memory is free, stale assets (>300s) evicted, VRAM flush and background watchdog | Zero camera turnaround stutters, memory automatically reclaimed on regional transitions and teleports |
 | **Decompression** | Scalar `zlib 1.2.5` in `FileSystem.dll` | Traversal CPU spikes decompressing `.pak` chunks | Integrated **libdeflate** with AVX2 / SSE4.2 SIMD (hook at RVA `0xA430`) | 3-4x faster archive decompression |
-| **File I/O** | Synchronous `SetFilePointer` and small-buffer `ReadFile` calls | Disk seek latency, repeated kernel transitions | **Memory-Mapped Files (`MapViewOfFile`):** direct file mappings (750 MB budget) | In-memory archive access without disk stalls |
+| **File I/O & VFS** | Limited caching, risk of CRT stream desynchronization (`fread`/`fseek`) on I/O hooks | Archive header corruption, malformed `bCString` buffers, `RtlSizeHeap` crashes in `ntdll.dll` | **Clean VFS & Native OS Cache:** eliminated invasive `kernel32.dll` hooks (`CreateFileA`, `ReadFile`, `CloseHandle`), archive disk caching offloaded to native Windows Standby Cache at full RAM/NVMe speed | 100% Virtual File System integrity, zero archive parsing corruption, rock-solid stability |
 | **Sector Streaming** | Static radial sphere around hero in `eCPVSPrefetcher3` | Micro-stutters (50-200 ms) when crossing sector boundaries | **Motion Vector Prefetch:** sphere projected 10-30m ahead along motion vector | Seamless streaming: sector cells loaded before hero arrives |
 | **Math & Physics** | Calculations use legacy x87 FPU (`fld`, `fmul`, `fstp`) in `SharedBase.dll` | Slow Frustum Culling and bounding volume checks | Replaced culling and matrix math with SSE intrinsics | Faster visibility calculations |
 | **Fall-Through & GeoData Guard** | Single raycast slips through polygon seams in terrain meshes, spurious fall detection | Hero clipping through terrain into the void, slipping into geometry seams, lethal fall damage | **Multi-Ray Footprint & Ground Recovery Fall Guard:** 5-ray footprint cluster under feet (disabled in v1.2.2 to preserve smooth locomotion without vertical jitter) | Native smooth character movement without vertical jerking or false jumping |
@@ -122,9 +122,9 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | **Frame Pacing** | Stock Windows timer resolution defaults to 15.6 ms | Jittery frame delivery even at 60 / 120 FPS | Forced `timeBeginPeriod(1)` for 1.0 ms precision | Consistent frame pacing |
 | **FMOD Audio** | Small DSP buffer in `fmodex.dll` (512 samples, 10.6 ms), 16 KB file buffer | Audio clicks, crackles, background music stopping in cities | Hooked `FMOD::System::init`: 2048x4 samples DSP buffer (170.6 ms), 64 channels, 64 KB stream buffer | Clean audio without crackles, uninterrupted music under load |
 | **Address Space** | 32-bit limit (4 GB virtual memory space) | Insufficient virtual space for massive archives (`_compiledImage.pak`, `_compiledMesh.pak`) | **High Memory Shadow Cache (> 4 GB):** 64-bit shadow pool (2 GB) via Heaven's Gate (`AllocateHighMemory`, `ReadHighMemory`) | Massive archives cached directly in 64-bit RAM, eliminating 32-bit memory pressure |
-| **Z-Buffer & Shadows** | 24-bit integer depth buffer (D24S8/D16), non-linear precision loss across FarClipPlane distances ($1/z$), insufficient shadow bias, severe polygon Z-fighting | Striped shadow acne artifacts on characters and terrain, distant mountain and foliage flickering | **High-Precision Floating-Point Z-Buffer (`VK_FORMAT_D32_SFLOAT`) & Shadow Depth Bias Hook:** translated via `d3d9.useD32forD24 = True`, `d3d9.supportD32 = True`, IEEE-754 `d3d9.floatEmulation = Strict`, D16 auto-upgrade, position invariance `invariantPosition`, and dynamic shadow bias scaling via `D3DRS_DEPTHBIAS` (1.35x) and `D3DRS_SLOPESCALEDEPTHBIAS` (1.50x) | Preserved depth precision up to 1000m distances, complete elimination of distant Z-fighting and shadow acne on terrain and faces |
-| **Vertex & Index Buffers** | 16-bit index constraint (max 65,535 vertices), small geometry pool step (1024 chunks), constrained dynamic buffers (64-256 KB) | Flickering and missing meshes, polygon tearing in high-poly mods, stalls from frequent reallocations | **Dynamic Buffer Scaling & 32-Bit Index Promotion (`D3DFMT_INDEX32`):** hooked `CreateVertexBuffer` / `CreateIndexBuffer` (min 1 MB / 512 KB, 2x scaling), instance pool growth expanded to 4096 in `Engine.dll`, and auto-promotion to 32-bit indices for meshes with $>65,535$ vertices | Flawless rendering of heavy mods and high-poly meshes without missing geometry or stretched polygons |
-| **AI Combat Focus (Aggro)** | Entities culled from processing when outside camera frustum (`ExtractFromEntity`: `CullTreeHC`, `CullVPTHC`, `CullSmallObject`) | Pursuing monsters and enemies behind the hero freezing or losing target when turning camera away | **Combatant Culling Bypass (`src/combat_guard.cpp`):** hooks visibility tree and frustum culling checks in `Engine.dll` for active combatants (`gCNPC_PS`) targeting the player within 65m | Enemies relentlessly pursue and engage the player regardless of camera orientation |
+| **Z-Buffer & Depth** | 16-bit integer depth buffer (D16) on certain driver setups, non-linear precision loss across FarClipPlane distances ($1/z$) | Severe distant polygon Z-fighting on mountains and terrain | **High-Precision Z-Buffer:** hooked CreateDevice with automatic D16 promotion to 24-bit D24S8 (on native D3D9) and 32-bit float VK_FORMAT_D32_SFLOAT under DXVK | High depth precision up to 1000m distances, eliminating distant Z-fighting on cliffs and horizons |
+| **Engine Geometry Pools** | Static geometry pool chunk sizing (growth step only 1024 instances), strict Shader Model 3.0 driver assertions | Geometry batch reallocation stalls in dense scenes, startup crashes on non-standard GPU reports | **Instance Pool Expansion & SM3.0 Assertion Bypass:** expanded Engine.dll instance pool growth step to 4096 and guaranteed SM3.0 cap reporting in GetDeviceCaps | Smooth rendering in dense scenes, eliminated false-positive GPU initialization errors |
+| **AI Combat Focus (Aggro)** | Entities culled from processing when outside camera frustum (`ExtractFromEntity`: `CullTreeHC`, `CullVPTHC`, `CullSmallObject`) | Pursuing monsters and enemies behind the hero freezing or losing target when turning camera away | **Combatant Culling Bypass (`src/combat_guard.cpp`):** hooks visibility tree checks (disabled in v1.2.2 to prevent character LOD dissolve blurring and weapon socket detachment) | Vanilla character rendering without ghosting or floating weapon artifacts |
 
 ---
 
@@ -167,17 +167,16 @@ sequenceDiagram
 ## Code Structure
 
 - `heavens_gate/` - x86 to x64 bridge via segment selector switch (`retf 0x33`) to allocate memory beyond 4 GB using 64-bit `ntdll.dll`.
-- `src/memory_allocator.cpp` & `src/lfh_enforcer.cpp` - complete swap of `bCMemoryAdmin`, global `_new@8`, `MemHeap` methods, and IAT `HeapAlloc` with mimalloc using three isolated lifetime-based pools; enforces LFH on system heaps.
-- `src/d3d9_hook.cpp` - adds `D3DCREATE_PUREDEVICE`, maintains shadow render state cache, filters duplicate D3D9 calls, auto-upgrades depth format to 24/32-bit, exposes Depth Bias / Slope Scale caps, dynamically scales shadow depth bias (1.35x Depth Bias, 1.50x Slope Scale), scales dynamic vertex/index buffers (1-8 MB), expands geometry instance pool chunk to 4096, and auto-promotes index buffers to 32-bit `D3DFMT_INDEX32`.
-- `src/streaming_optimizer.cpp` - maps `.pak` archives into RAM via `MapViewOfFile`, predictive cell prefetching by motion vector (`eCPVSPrefetcher3`), and expands `eCThreadPool` to 4-8 worker threads.
-- `src/media_optimizer.cpp` - integrates `libdeflate` (AVX2/SSE4.2) for fast archive decompression, expands FMOD Ex DSP buffer (2048x4), and sets 1.0 ms high-resolution timer.
-- `src/math_simd_optimizer.cpp` - replaces `bCFrustum::Cull` and matrix operations with SSE vector intrinsics.
-- `src/fall_guard.cpp` - multi-ray footprint cluster under character feet, protection from falling through geometry seams (`TraceRayNearestHit`), and automatic ground recovery fall guard with fall damage cancellation.
-- `src/combat_guard.cpp` - bypasses Frustum Culling (`CullTreeHC`, `CullVPTHC`, `CullSmallObject`) for active combatants targeting the player within 65m to preserve pursue logic and combat animations when looking away.
-- `src/physics_stabilizer.cpp` - PhysX ragdoll stabilizer (`eCPhysicsScene::Simulate` and `CreateActor`), enforced `NX_TIMESTEP_FIXED` (16.6 ms / 60 Hz), linear and angular bone damping (0.20/0.25), anomalous skeleton bone velocity clamping ($\le 20$ m/s, $\le 12$ rad/s), and joint NaN explosion neutralization.
-- `src/lru_cache_manager.cpp` - adaptive LRU cache eviction on `eCMainCache`, fresh asset retention (<300s), VRAM flush and stale asset eviction across regional biome changes.
+- `src/d3d9_hook.cpp` - bypasses legacy Shader Model 3.0 capability assertions in `Engine.dll` for a clean pipeline without overlay conflicts.
+- `src/multicore_manager.cpp` - dynamic scaling of `eCThreadPool` worker pools strictly on active parallel caches (`uNumThreads > 0`), protecting single-threaded skeletal animation and weapon sockets from desynchronization.
+- `src/streaming_optimizer.cpp` - predictive sector cell prefetching by motion vector (`eCPVSPrefetcher3`) and safe `.pak` archive management.
+- `src/media_optimizer.cpp` - hardware SIMD decompression of `.pak` archives via `libdeflate` (AVX2/SSE4.2), FMOD Ex DSP buffer expansion (2048x4), and high-precision 1.0 ms timer.
+- `src/lru_cache_manager.cpp` - adaptive LRU cache eviction on `eCMainCache`, fresh asset retention (<300s), VRAM flush, and background watchdog.
 - `src/savegame_guard.cpp` - writes saves to `.tmp`, verifies file size, creates `.bak` backup, and performs atomic replacement via `ReplaceFileW`.
-- `src/version_watermark.cpp` - displays Gothic 3 Optima version and status in the game's main menu.
+- `src/version_watermark.cpp` - displays Gothic 3 Optima version (v1.3.0) in the game's main menu.
+- `src/memory_allocator.cpp` - isolated mimalloc engine allocator for `SharedBase.dll` pools (`bCMemoryAdmin` & `MemHeap`) eliminating "Where is the guru?" crashes.
+- `src/physics_stabilizer.cpp` - fixed PhysX 2.4.1 timestep (60 Hz fixed quantum) for high refresh rate monitors (>60 / 144 Hz) without affecting character kinematics.
+- `src/combat_guard.cpp` & `src/fall_guard.cpp` - experimental modules (disabled to preserve vanilla kinematics and eliminate LOD dither artifacts).
 
 ---
 
@@ -236,6 +235,18 @@ dxvk.hud = fps,frametimes,memory,devinfo
 <summary><strong>What to do if there is a black screen or Vulkan error on startup?</strong></summary>
 
 Use `DXVK-1.10.1-Async.zip` or `DXVK-1.10.3-Async.zip`. They have broader compatibility with older GPUs and legacy drivers.
+</details>
+
+<details>
+<summary><strong>Game freezes on Alt+Tab, black screen or shader compilation? Recommended ge3.ini setting</strong></summary>
+
+To prevent the game from capturing the mouse cursor exclusively and locking the system during window switching (`Alt+Tab`, `Ctrl+Shift+Esc`, Start menu):
+In the `Ini\ge3.ini` file in your game directory, find the `[Window]` section and set:
+```ini
+[Window]
+CaptureCursor=false
+```
+With `CaptureCursor=false`, the game physically cannot trap the mouse or lock the desktop. Even during heavy loading and initial shader cache compilation, the cursor remains free, and Windows and Task Manager are fully accessible without risk of a PC freeze.
 </details>
 
 <details>

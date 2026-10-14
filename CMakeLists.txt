@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
-    add_compile_options(/O2 /Oi /Oy /W3 /EHsc /Zi)
+    add_compile_options(/O2 /Oi /Oy /W3 /EHsc /Zi /utf-8)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /MAP:dinput8.map /DEBUG")
 endif()
@@ -81,6 +81,9 @@ target_link_libraries(dinput8 PRIVATE
     heavens_gate
     d3d9
     winmm
+    shell32
+    gdi32
+    user32
 )
 
 # Output name must be dinput8.dll
@@ -88,3 +91,4 @@ set_target_properties(dinput8 PROPERTIES
     OUTPUT_NAME "dinput8"
     PREFIX ""
 )
+

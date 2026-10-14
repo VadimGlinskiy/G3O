@@ -43,7 +43,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 6. Initialize Low Fragmentation Heap (LFH) Enforcer
     LFHEnforcer::Initialize();
 
-    // 7. Initialize mimalloc hooks on bCMemoryAdmin, operator new & MemHeap
+    // 7. Initialize mimalloc hooks on bCMemoryAdmin & MemHeap (Phase 23.1)
     MemoryOptimizer::Initialize();
 
     // 8. Initialize D3D9 hooks (PureDevice enforcer, State Redundancy Filter, D3DX mipmaps)
@@ -64,7 +64,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 12. Initialize SaveGame Guard & Atomic Shadow-Writer
     InitializeSaveGameGuard();
 
-    // 13. Hook Main Menu version watermark (displays "G3O v1.0.0" in main menu)
+    // 13. Hook Main Menu version watermark (displays "G3O v1.3.0" in main menu)
     InitializeVersionHook();
 
     // 14. Ground Recovery Fall Guard (Phase 12.2) - Disabled to preserve smooth character locomotion
@@ -73,11 +73,11 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 15. Initialize Adaptive LRU Cache Eviction (Phase 13.2)
     LRUCacheManager::Initialize();
 
-    // 16. PhysX Fixed Physics Substepping (Phase 15.1) - Disabled to prevent ragdoll and movement jitter
-    // InitializePhysicsStabilizer();
+    // 16. PhysX Fixed Physics Substepping (Phase 15.1 / 23.2)
+    InitializePhysicsStabilizer();
 
-    // 17. Initialize Combatant Frustum Culling Exclusion (Phase 19.1)
-    InitializeCombatGuard();
+    // 17. Initialize Combatant Frustum Culling Exclusion (Phase 19.1) - Disabled to prevent LOD dissolve blur & floating weapon glitches
+    // InitializeCombatGuard();
 
     OutputDebugStringA("[Gothic3Optima] All core engine subsystems initialized successfully!\n");
     return 0;
@@ -95,7 +95,7 @@ static void ShutdownOptima() {
     OutputDebugStringA("[Gothic3Optima] Shutting down...\n");
     ShutdownCombatGuard();
     ShutdownMulticoreManager();
-    // ShutdownPhysicsStabilizer();
+    ShutdownPhysicsStabilizer();
     LRUCacheManager::Shutdown();
     // ShutdownFallGuard();
     ShutdownSaveGameGuard();

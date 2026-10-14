@@ -30,8 +30,6 @@ static BaseCache_SetNumThreads_t Real_BaseCache_SetNumThreads = nullptr;
 typedef bool (__thiscall* ThreadPool_Create_t)(void* pThis, uint32_t uNumThreads);
 static ThreadPool_Create_t Real_ThreadPool_Create = nullptr;
 
-typedef bool& (__thiscall* AccessDisableThreading_t)(void* pThis);
-static AccessDisableThreading_t Real_AccessDisableThreading = nullptr;
 
 typedef void (__stdcall* EnableAllThreads_t)(bool bEnable);
 typedef unsigned long (__stdcall* GetGlobalThreadStats_t)();
@@ -44,7 +42,6 @@ static GetGlobalThreadStats_t g_pfnGetGlobalThreadsWorking = nullptr;
 static uint32_t g_targetWorkerThreads = 4;
 static volatile LONG g_scaledCachesCount = 0;
 static volatile LONG g_scaledPoolsCount = 0;
-static bool s_alwaysFalse = false;
 static bool s_multicoreInitialized = false;
 
 // ---------------------------------------------------------------------------
@@ -53,7 +50,9 @@ static bool s_multicoreInitialized = false;
 // ---------------------------------------------------------------------------
 static uint32_t __fastcall Hooked_BaseCache_SetNumThreads(void* pThis, void* /*edx*/, uint32_t uNumThreads) {
     uint32_t configuredThreads = uNumThreads;
-    if (uNumThreads < g_targetWorkerThreads) {
+    // Only scale caches that were designed to be threaded (uNumThreads > 0).
+    // Single-threaded caches (e.g. animation, skeletal sockets) must remain 0 to prevent matrix desynchronization.
+    if (uNumThreads > 0 && uNumThreads < g_targetWorkerThreads) {
         uNumThreads = g_targetWorkerThreads;
     }
 
@@ -73,7 +72,7 @@ static uint32_t __fastcall Hooked_BaseCache_SetNumThreads(void* pThis, void* /*e
 // ---------------------------------------------------------------------------
 static bool __fastcall Hooked_ThreadPool_Create(void* pThis, void* /*edx*/, uint32_t uNumThreads) {
     uint32_t originalThreads = uNumThreads;
-    if (uNumThreads < g_targetWorkerThreads) {
+    if (uNumThreads > 0 && uNumThreads < g_targetWorkerThreads) {
         uNumThreads = g_targetWorkerThreads;
     }
 
@@ -86,15 +85,6 @@ static bool __fastcall Hooked_ThreadPool_Create(void* pThis, void* /*edx*/, uint
         OutputDebugStringA(buf);
     }
     return result;
-}
-
-// ---------------------------------------------------------------------------
-// 3. Hook for eCMainCache::AccessDisableThreading (0x100065b0)
-// Always returns reference to false, preventing engine from disabling threading.
-// ---------------------------------------------------------------------------
-static bool& __fastcall Hooked_AccessDisableThreading(void* /*pThis*/, void* /*edx*/) {
-    s_alwaysFalse = false;
-    return s_alwaysFalse;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,18 +156,13 @@ void InitializeMulticoreManager() {
     GetSystemInfo(&si);
     DWORD numCores = si.dwNumberOfProcessors;
 
-    // Scale dynamically: 2 cores -> 2 workers; 4 cores -> 3 workers; 6 cores -> 4 workers; 8+ cores -> 6-8 workers
-    // Max capped at 8 to remain safely below Genome Engine assertion limit (10).
+    // Scale dynamically: 2 cores -> 2 workers; 3-4 cores -> 3 workers; 5+ cores -> 4 workers (maximum stable thread count)
     if (numCores <= 2) {
         g_targetWorkerThreads = 2;
     } else if (numCores <= 4) {
         g_targetWorkerThreads = 3;
-    } else if (numCores <= 6) {
-        g_targetWorkerThreads = 4;
-    } else if (numCores <= 8) {
-        g_targetWorkerThreads = 6;
     } else {
-        g_targetWorkerThreads = 8;
+        g_targetWorkerThreads = 4;
     }
 
     char buf[256];
@@ -206,18 +191,6 @@ void InitializeMulticoreManager() {
         if (MH_CreateHook(pThreadPoolCreate, (LPVOID)Hooked_ThreadPool_Create, (LPVOID*)&Real_ThreadPool_Create) == MH_OK) {
             MH_EnableHook(pThreadPoolCreate);
             OutputDebugStringA("[Gothic3Optima] Multicore: Hooked eCThreadPool::Create.\n");
-        }
-    }
-
-    // 4. Hook eCMainCache::AccessDisableThreading (RVA 0x65B0)
-    void* pAccessDisableThreading = (void*)GetProcAddress(hEngine, "?AccessDisableThreading@eCMainCache@@QAEAA_NXZ");
-    if (!pAccessDisableThreading) {
-        pAccessDisableThreading = reinterpret_cast<void*>(engineBase + RVA_MAINCACHE_ACCESS_DISABLE_THREADING);
-    }
-    if (pAccessDisableThreading) {
-        if (MH_CreateHook(pAccessDisableThreading, (LPVOID)Hooked_AccessDisableThreading, (LPVOID*)&Real_AccessDisableThreading) == MH_OK) {
-            MH_EnableHook(pAccessDisableThreading);
-            OutputDebugStringA("[Gothic3Optima] Multicore: Hooked eCMainCache::AccessDisableThreading (enforcing active threading).\n");
         }
     }
 

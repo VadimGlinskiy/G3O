@@ -22,7 +22,7 @@ static void __fastcall Hooked_SetWindowTextA(void* pThis, void* /*edx*/, void* p
             if (wstr[0] != L'\0' && !wcsstr(wstr, L"G3O")) {
                 if ((iswdigit(wstr[0]) && wcsstr(wstr, L"1.")) || wcsstr(wstr, L"CP ") || wcsstr(wstr, L"1.75")) {
                     wchar_t newBuf[256];
-                    swprintf_s(newBuf, L"%s | G3O v1.2.2", wstr);
+                    swprintf_s(newBuf, L"%s | G3O v1.3.0", wstr);
                     Real_bCUnicodeString_Assign(pUnicodeStr, nullptr, newBuf);
                     OutputDebugStringW(L"[Gothic3Optima] Main menu version watermark injected via SetWindowTextA: ");
                     OutputDebugStringW(newBuf);
@@ -34,34 +34,6 @@ static void __fastcall Hooked_SetWindowTextA(void* pThis, void* /*edx*/, void* p
     Real_SetWindowTextA(pThis, nullptr, pUnicodeStr);
 }
 
-// -----------------------------------------------------------------------------
-// Hook 2: Engine.dll eCApplication::GetApplicationVersionString
-// -----------------------------------------------------------------------------
-typedef void* (__fastcall* Real_GetAppVer_t)(void* pThis, void* dummy, void* pOutString);
-static Real_GetAppVer_t Real_GetAppVer = nullptr;
-
-typedef void* (__fastcall* Real_bCString_Assign_t)(void* pThis, void* dummy, const char* str);
-static Real_bCString_Assign_t Real_bCString_Assign = nullptr;
-
-static void* __fastcall Hooked_GetApplicationVersionString(void* pThis, void* /*edx*/, void* pOutString) {
-    void* result = Real_GetAppVer(pThis, nullptr, pOutString);
-    if (result && pOutString && Real_bCString_Assign) {
-        const char* const* ppStr = (const char* const*)pOutString;
-        if (ppStr && *ppStr) {
-            const char* orig = *ppStr;
-            if (orig[0] != '\0' && !strstr(orig, "G3O")) {
-                char buf[256];
-                sprintf_s(buf, "%s | G3O v1.2.2", orig);
-                Real_bCString_Assign(pOutString, nullptr, buf);
-                OutputDebugStringA("[Gothic3Optima] Version string injected via GetApplicationVersionString: ");
-                OutputDebugStringA(buf);
-                OutputDebugStringA("\n");
-            }
-        }
-    }
-    return result;
-}
-
 void InitializeVersionHook() {
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
     if (!hSharedBase) {
@@ -69,7 +41,6 @@ void InitializeVersionHook() {
     }
     if (hSharedBase) {
         Real_bCUnicodeString_Assign = (Real_bCUnicodeString_Assign_t)GetProcAddress(hSharedBase, "??4bCUnicodeString@@QAEAAV0@PB_W@Z");
-        Real_bCString_Assign = (Real_bCString_Assign_t)GetProcAddress(hSharedBase, "??4bCString@@QAEAAV0@PBD@Z");
     }
 
     HMODULE hGFC = GetModuleHandleA("GFC.dll");
@@ -81,21 +52,7 @@ void InitializeVersionHook() {
         if (pSetWindowText) {
             if (MH_CreateHook(pSetWindowText, (LPVOID)Hooked_SetWindowTextA, (LPVOID*)&Real_SetWindowTextA) == MH_OK) {
                 MH_EnableHook(pSetWindowText);
-                OutputDebugStringA("[Gothic3Optima] Hooked CFFGFCWnd::SetWindowTextA.\n");
-            }
-        }
-    }
-
-    HMODULE hEngine = GetModuleHandleA("Engine.dll");
-    if (!hEngine) {
-        hEngine = LoadLibraryA("Engine.dll");
-    }
-    if (hEngine) {
-        void* pGetAppVer = (void*)GetProcAddress(hEngine, "?GetApplicationVersionString@eCApplication@@QAE?AVbCString@@XZ");
-        if (pGetAppVer) {
-            if (MH_CreateHook(pGetAppVer, (LPVOID)Hooked_GetApplicationVersionString, (LPVOID*)&Real_GetAppVer) == MH_OK) {
-                MH_EnableHook(pGetAppVer);
-                OutputDebugStringA("[Gothic3Optima] Hooked eCApplication::GetApplicationVersionString.\n");
+                OutputDebugStringA("[Gothic3Optima] Hooked CFFGFCWnd::SetWindowTextA (Main Menu Watermark).\n");
             }
         }
     }

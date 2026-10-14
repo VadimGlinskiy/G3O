@@ -242,40 +242,8 @@ void __fastcall Hooked_eCPhysicsScene_Simulate(void* pThis, void* /*edx*/) {
         }
     }
 
-    // 4. Bound frame delta time & accumulator to eliminate impulse explosions on framerate drops
-    void* pClock = (g_ppEngineClock && *g_ppEngineClock) ? *g_ppEngineClock : nullptr;
-    if (pClock) {
-        float* pElapsedTime = reinterpret_cast<float*>(reinterpret_cast<char*>(pClock) + OFFSET_CLOCK_ELAPSED);
-        float origElapsed = *pElapsedTime;
-
-        // Clamp frame delta time fed to physics simulation step
-        if (*pElapsedTime > MAX_ALLOWED_FRAME_DELTA) {
-            *pElapsedTime = MAX_ALLOWED_FRAME_DELTA;
-        }
-
-        // Clamp accumulator backlog so excess time never produces more than 2 substeps in one frame
-        float* pAccumulator = reinterpret_cast<float*>(reinterpret_cast<char*>(pThis) + OFFSET_ACCUMULATOR);
-        float maxAllowedAcc = MAX_ALLOWED_FRAME_DELTA - *pElapsedTime;
-        if (maxAllowedAcc < 0.0f) {
-            maxAllowedAcc = 0.0f;
-        }
-        if (*pAccumulator > maxAllowedAcc) {
-            *pAccumulator = maxAllowedAcc;
-        }
-        if (*pAccumulator < 0.0f) {
-            *pAccumulator = 0.0f;
-        }
-
-        Real_eCPhysicsScene_Simulate(pThis);
-
-        // Restore real elapsed time for uninhibited render pacing
-        *pElapsedTime = origElapsed;
-    } else {
-        Real_eCPhysicsScene_Simulate(pThis);
-    }
-
-    // 5. Phase 15.2: Clamp anomalous bone velocities and suppress NaN spikes across all active ragdoll skeletons
-    ClampSkeletonBoneVelocities(pThis);
+    // 4. Run native physics simulation step (Engine Clock remains untouched)
+    Real_eCPhysicsScene_Simulate(pThis);
 }
 
 } // namespace

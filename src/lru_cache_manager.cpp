@@ -120,13 +120,11 @@ namespace LRUCacheManager {
             return Real_CacheOutResource(pThis, pResourceEntity, behavior);
         }
 
-        // 4. Cache retention throttle: if memory is healthy (> 600 MB) and asset is fresh (< 300s),
-        // retain in memory to prevent camera turn stuttering
-        if (memStatus.ullAvailVirtual >= 600ULL * 1024ULL * 1024ULL && hasRecord) {
-            return true; // Successfully retained in memory
-        }
+        EnterCriticalSection(&s_lruLock);
+        s_resourceLastSeen.erase(pResourceEntity);
+        LeaveCriticalSection(&s_lruLock);
 
-        // Default engine eviction
+        // Always delegate to real engine eviction to keep cache reference counts and state synchronized
         return Real_CacheOutResource(pThis, pResourceEntity, behavior);
     }
 

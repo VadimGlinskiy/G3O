@@ -208,16 +208,17 @@ void InitializeMediaOptimizer() {
     timeBeginPeriod(1);
     OutputDebugStringA("[Gothic3Optima] 1ms High-Resolution Multimedia Timer activated.\n");
 
-    // 2. FileSystem.dll internal zlib inflate hook (Phase 11.2 - Hardware SIMD Decompression)
+    // 2. FileSystem.dll internal zlib inflate hook disabled to ensure 100% stable archive decompression
+    /*
     HMODULE hFileSystem = GetModuleHandleA("FileSystem.dll");
     if (hFileSystem) {
-        // RVA 0xA430 in FileSystem.dll is FileSystem_Inflate(ZlibStreamProxy* strm)
         void* pInflate = (void*)((uintptr_t)hFileSystem + 0xA430);
         if (MH_CreateHook(pInflate, (LPVOID)Hooked_FileSystem_Inflate, (LPVOID*)&Real_FileSystem_Inflate) == MH_OK) {
             MH_EnableHook(pInflate);
             OutputDebugStringA("[Gothic3Optima] Phase 11.2: libdeflate AVX2/SSE4.2 hardware decompression active (+0xA430)!\n");
         }
     }
+    */
 
     // 3. String hashing hooks disabled to prevent hash table desynchronization
     /*
