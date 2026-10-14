@@ -212,9 +212,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package_releases.ps1
 </details>
 
 <details>
-<summary><strong>Работает ли с модами (Questpaket, Content Mod, LCTM)?</strong></summary>
+<summary><strong>Работает ли с модами (Универсальная Сборка Модов UNION+ v1.8.2)?</strong></summary>
 
-Да. Мод меняет только бинарный код движка и системные вызовы. Шаблоны предметов, скрипты квестов и баланс не затрагиваются.
+Да. Gothic 3 Optima полностью совместима с **Универсальной Сборкой Модов UNION+ v1.8.2**. Мод меняет только бинарный код движка и системные вызовы. Шаблоны предметов, скрипты квестов, баланс и ресурсы сборки не затрагиваются.
 </details>
 
 <details>

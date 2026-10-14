@@ -212,9 +212,9 @@ Yes. The mod is thoroughly tested and verified with both Update Pack v1.04.11 an
 </details>
 
 <details>
-<summary><strong>Does it work with mods (Questpaket, Content Mod, LCTM)?</strong></summary>
+<summary><strong>Does it work with modpacks (Universal Modpack UNION+ v1.8.2)?</strong></summary>
 
-Yes. The mod only modifies binary engine code and OS API calls. Quest scripts, balance tables, and asset templates are untouched.
+Yes. Gothic 3 Optima is fully compatible with **Universal Modpack UNION+ v1.8.2** (Универсальная Сборка Модов UNION+ v1.8.2). The mod only modifies binary engine code and OS API calls. Quest scripts, balance tables, and asset templates are untouched.
 </details>
 
 <details>

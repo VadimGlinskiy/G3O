@@ -67,7 +67,7 @@ INSTALLATION:
 
 COMPATIBILITY:
 - Gothic 3 v1.75.14 (Community Patch)
-- Works with Update Pack 1.04+, Parallel Universe Patch, Questpaket, Content Mod.
+- Works with Update Pack 1.04+, Update Pack 1.05+, Universal Modpack UNION+ v1.8.2.
 ================================================================================
 "@
 Set-Content -Path (Join-Path $stageCore "README_INSTALL.txt") -Value $readmeCore -Encoding UTF8
