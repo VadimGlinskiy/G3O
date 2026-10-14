@@ -79,6 +79,20 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 17. Initialize Combatant Frustum Culling Exclusion (Phase 19.1) - Disabled to prevent LOD dissolve blur & floating weapon glitches
     // InitializeCombatGuard();
 
+    // 18. Initialize G3SE Plugin Extender (Data\G3SE\Plugins\*.dll)
+    HMODULE hG3SE = LoadLibraryA("G3SDK.dll");
+    if (!hG3SE) {
+        hG3SE = LoadLibraryA("G3SE.dll");
+    }
+    if (hG3SE) {
+        typedef void (*LoadPlugins_t)(const char*);
+        LoadPlugins_t pLoadPlugins = (LoadPlugins_t)GetProcAddress(hG3SE, "?LoadPlugins@G3SDK@@YAXPBD@Z");
+        if (pLoadPlugins) {
+            pLoadPlugins("Data\\G3SE\\Plugins");
+            OutputDebugStringA("[Gothic3Optima] G3SE Plugin Extender successfully loaded.\n");
+        }
+    }
+
     OutputDebugStringA("[Gothic3Optima] All core engine subsystems initialized successfully!\n");
     return 0;
 }
@@ -93,6 +107,15 @@ static void InitializeOptima() {
 
 static void ShutdownOptima() {
     OutputDebugStringA("[Gothic3Optima] Shutting down...\n");
+    HMODULE hG3SE = GetModuleHandleA("G3SDK.dll");
+    if (!hG3SE) hG3SE = GetModuleHandleA("G3SE.dll");
+    if (hG3SE) {
+        typedef void (*UnloadAll_t)();
+        UnloadAll_t pUnload = (UnloadAll_t)GetProcAddress(hG3SE, "?UnloadAllPlugins@G3SDK@@YAXXZ");
+        if (pUnload) {
+            pUnload();
+        }
+    }
     ShutdownCombatGuard();
     ShutdownMulticoreManager();
     // ShutdownPhysicsStabilizer();
