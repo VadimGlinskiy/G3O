@@ -26,6 +26,7 @@ static BYTE  s_samplerStateValid[MAX_SAMPLERS][MAX_SAMPLER_STATES] = { { 0 } };
 static volatile DWORD g_filteredRenderStates = 0;
 static volatile DWORD g_filteredStageStates = 0;
 static volatile DWORD g_filteredSamplerStates = 0;
+static volatile DWORD g_tunedDepthBiasCalls = 0;
 
 void GetD3D9FilterStatistics(DWORD* pFilteredRenderStates, DWORD* pFilteredStageStates, DWORD* pFilteredSamplerStates) {
     if (pFilteredRenderStates) *pFilteredRenderStates = g_filteredRenderStates;
@@ -85,6 +86,26 @@ static void InvalidateStateCaches() {
 }
 
 static HRESULT STDMETHODCALLTYPE Hooked_SetRenderState(IDirect3DDevice9* This, D3DRENDERSTATETYPE State, DWORD Value) {
+    // Phase 17.2: Shadow Acne & Depth Bias Tuning
+    // Compensate self-shadowing artifacts on faces, cliffs, terrain, and foliage
+    if (State == D3DRS_DEPTHBIAS) {
+        float fBias = *reinterpret_cast<float*>(&Value);
+        if (fBias != 0.0f) {
+            // Apply 1.35x bias scaling to cleanly separate shadow receiver from occluder
+            fBias *= 1.35f;
+            Value = *reinterpret_cast<DWORD*>(&fBias);
+            InterlockedIncrement((volatile LONG*)&g_tunedDepthBiasCalls);
+        }
+    } else if (State == D3DRS_SLOPESCALEDEPTHBIAS) {
+        float fSlope = *reinterpret_cast<float*>(&Value);
+        if (fSlope != 0.0f) {
+            // Amplify slope-dependent bias by 1.50x to eliminate zebra-striping on grazing angles
+            fSlope *= 1.50f;
+            Value = *reinterpret_cast<DWORD*>(&fSlope);
+            InterlockedIncrement((volatile LONG*)&g_tunedDepthBiasCalls);
+        }
+    }
+
     if ((DWORD)State < MAX_RENDER_STATES) {
         if (s_renderStateValid[State] && s_renderStateCache[State] == Value) {
             InterlockedIncrement((volatile LONG*)&g_filteredRenderStates);
@@ -130,8 +151,8 @@ static HRESULT STDMETHODCALLTYPE Hooked_Present(IDirect3DDevice9* This, const RE
     s_presentFrame++;
     if ((s_presentFrame % 3600) == 0) {
         char buf[256];
-        sprintf_s(buf, "[Gothic3Optima] State Filter: Redundant calls eliminated - RS: %u, TSS: %u, SS: %u\n",
-            g_filteredRenderStates, g_filteredStageStates, g_filteredSamplerStates);
+        sprintf_s(buf, "[Gothic3Optima] D3D9 Filter: RS: %u, TSS: %u, SS: %u | Shadow Depth Bias Tuned: %u\n",
+            g_filteredRenderStates, g_filteredStageStates, g_filteredSamplerStates, g_tunedDepthBiasCalls);
         OutputDebugStringA(buf);
     }
     return Real_Present(This, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
