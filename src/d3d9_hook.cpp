@@ -389,6 +389,9 @@ static HRESULT STDMETHODCALLTYPE Hooked_CreateDevice(
         }
     }
 
+    // Phase 20: Ensure multithreaded device access for background thread pool resource generation
+    BehaviorFlags |= D3DCREATE_MULTITHREADED;
+
     HRESULT hr = Real_CreateDevice(This, Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
     if (SUCCEEDED(hr) && ppReturnedDeviceInterface && *ppReturnedDeviceInterface) {
         s_pActiveDevice = *ppReturnedDeviceInterface;

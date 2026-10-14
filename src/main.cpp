@@ -15,6 +15,7 @@
 #include "high_memory_cache.h"
 #include "physics_stabilizer.h"
 #include "combat_guard.h"
+#include "multicore_manager.h"
 #include <minhook.h>
 
 static DWORD WINAPI OptimaInitThread(LPVOID) {
@@ -48,7 +49,10 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 8. Initialize D3D9 hooks (PureDevice enforcer, State Redundancy Filter, D3DX mipmaps)
     InstallD3D9Hooks();
 
-    // 9. Initialize In-Memory Archive Streaming, ThreadPool Expander & Cache Anti-Thrashing
+    // 9. Initialize Multicore Threading Engine (Phase 20)
+    InitializeMulticoreManager();
+
+    // 10. Initialize In-Memory Archive Streaming, ThreadPool Expander & Cache Anti-Thrashing
     InitializeStreamingOptimizer();
 
     // 10. Initialize hardware decompression (libdeflate), string hashing, FMOD tuning & precision timer
@@ -90,6 +94,7 @@ static void InitializeOptima() {
 static void ShutdownOptima() {
     OutputDebugStringA("[Gothic3Optima] Shutting down...\n");
     ShutdownCombatGuard();
+    ShutdownMulticoreManager();
     ShutdownPhysicsStabilizer();
     LRUCacheManager::Shutdown();
     ShutdownFallGuard();

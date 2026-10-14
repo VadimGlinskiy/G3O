@@ -62,6 +62,8 @@ add_library(dinput8 SHARED
     src/physics_stabilizer.h
     src/combat_guard.cpp
     src/combat_guard.h
+    src/multicore_manager.cpp
+    src/multicore_manager.h
 )
 
 target_include_directories(dinput8 PRIVATE

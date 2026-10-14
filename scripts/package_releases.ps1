@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "v1.1.0"
+    [string]$Version = "v1.2.0"
 )
 
 # ==============================================================================
@@ -39,6 +39,7 @@ GOTHIC 3 OPTIMA - CORE OPTIMIZATION & STABILITY SUITE ($Version)
 ================================================================================
 
 FEATURES INCLUDED:
+- Multicore Threading Engine (eCThreadPool Expander, Priority Scheduler & Task Offloader)
 - Complete Replacement of Genome Engine Memory Allocator (HeapAlloc & VirtualAlloc)
 - 128-Byte Cache-Line Aligned Allocations (Eliminates False Sharing)
 - Dynamic Large Page Aware / Low-Fragmentation Virtual Sizing
@@ -138,7 +139,7 @@ INCLUDED FILES:
 INSTALLATION:
 1. Extract all files from this archive directly into your Gothic 3 game folder
    (where 'Gothic3.exe' is located).
-2. Ensure you have installed 'Gothic3Optima-v1.0.0-Core.zip' (dinput8.dll) as well.
+2. Ensure you have installed 'Gothic3Optima-$Version-Core.zip' (dinput8.dll) as well.
 3. Launch Gothic 3!
 ================================================================================
 "@

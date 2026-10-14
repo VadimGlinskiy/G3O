@@ -67,7 +67,7 @@ graph TD
 ### Steps:
 
 1. **Download the Core mod:**
-   - Grab `Gothic3Optima-v1.1.0-Core.zip` from the release page.
+   - Grab `Gothic3Optima-v1.2.0-Core.zip` from the release page.
    - Copy `dinput8.dll` into your Gothic 3 game directory (next to `Gothic3.exe`).
 2. **Download the DXVK package for your GPU:**
    - Pick the appropriate DXVK archive from the table below on the same release page.
@@ -83,7 +83,7 @@ All archives are attached to the same release on GitHub:
 ### 1. Core Mod (Required)
 | Package | Size | Description |
 | :--- | :--- | :--- |
-| **`Gothic3Optima-v1.1.0-Core.zip`** | ~119 KB | Core mod (`dinput8.dll`). Includes mimalloc allocator replacement, SaveGame Guard, SIMD geometry acceleration, worker thread pool expansion, Multi-Ray Footprint, Combatant Culling Bypass, and exception handler. Works on native D3D9 or with any DXVK build. |
+| **`Gothic3Optima-v1.2.0-Core.zip`** | ~120 KB | Core mod (`dinput8.dll`). Includes Multicore Threading Engine (eCThreadPool pool scaling to 4-8 workers, priority scheduler), mimalloc allocator replacement, SaveGame Guard, SIMD geometry acceleration, Multi-Ray Footprint, Combatant Culling Bypass, and exception handler. Works on native D3D9 or with any DXVK build. |
 
 ### 2. DXVK Variants (Pick one)
 | Package | Version | Recommendation |
@@ -95,7 +95,7 @@ All archives are attached to the same release on GitHub:
 | **`DXVK-1.10.1-Async.zip`** | DXVK 1.10.1 Async | For Intel HD/UHD integrated graphics or legacy hardware. |
 
 > [!TIP]
-> For standard gaming PCs, use: **`Gothic3Optima-v1.1.0-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
+> For standard gaming PCs, use: **`Gothic3Optima-v1.2.0-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
 
 ---
 
@@ -109,7 +109,7 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | **Memory** | Engine `bCMemoryAdmin`, `_new@8` with `MemHeap::s_cLock` spinlock, CRT `HeapAlloc` | x86 address space fragmentation, lock stalls, OOM crashes ("Where is the guru?") | Complete swap of `bCMemoryAdmin`, `_new@8`, `MemHeap`, and IAT `HeapAlloc` with **mimalloc** using three isolated pools (Engine, MemHeap, ShortUsage) + LFH | External heap fragmentation eliminated, no lock contention, memory crashes resolved |
 | **Graphics** | D3D9 without `D3DCREATE_PUREDEVICE`, textures kept in system RAM | High RAM usage, CPU validation overhead in driver | **DXVK** + forced `D3DCREATE_PUREDEVICE` flag | Textures offloaded to VRAM, freeing ~1 GB system RAM |
 | **D3D9 States** | Engine emits thousands of redundant `SetRenderState` calls per frame | CPU draw call bottleneck | **State Filter:** shadow table filters duplicate calls | Reduced driver overhead, improved 1% low frametimes |
-| **Streaming Threads** | `eCThreadPool` (`0x101f4010`) only runs 1-2 workers | Visible hitching when entering new world sectors | Hooked `eCThreadPool::Create`, scales to 4-8 workers | Parallel decompression utilizing multicore processors |
+| **Multicore Threading** | Main game loop, AI logic, PhysX, D3D9 call submission, and asset streaming in vanilla are locked to a single thread (eCThreadPool hardcoded to 1 or 0 workers), D3D9 is synchronous | 100% saturation on core 0, stuttering during asset decompression, severe underutilization of 6-16 core CPUs | **Multicore Threading Engine (Phase 20):** hooked eCBaseCache::SetNumThreadsAndCreate (RVA `0x1EF8F0`) and eCThreadPool::Create (RVA `0x1F4010`) scaling pools to 4-8 workers per cache, eCThreadPool::EnableAllThreads(true), bypass of eCMainCache::AccessDisableThreading, D3DCREATE_MULTITHREADED in D3D9, elevated main thread priority to THREAD_PRIORITY_ABOVE_NORMAL, and multithreaded PhysX 2.4.1 (4 workers) | Parallel loading and decompression of geometry, textures, audio, and animations across all available CPU cores, asynchronous CSMT rendering via DXVK, full utilization of modern multicore architectures |
 | **Resource Cache & GC** | Aggressive resource eviction or unbounded asset buildup in long play sessions | Stutter when looking around, memory leaks when traveling between biomes (Myrtana/Varant/Nordmar) | **Adaptive LRU Cache Eviction (`eCMainCache`):** fresh assets (<300s) retained when memory is free, stale assets (>300s) evicted, VRAM flush and background watchdog | Zero camera turnaround stutters, memory automatically reclaimed on regional transitions and teleports |
 | **Decompression** | Scalar `zlib 1.2.5` in `FileSystem.dll` | Traversal CPU spikes decompressing `.pak` chunks | Integrated **libdeflate** with AVX2 / SSE4.2 SIMD (hook at RVA `0xA430`) | 3-4x faster archive decompression |
 | **File I/O** | Synchronous `SetFilePointer` and small-buffer `ReadFile` calls | Disk seek latency, repeated kernel transitions | **Memory-Mapped Files (`MapViewOfFile`):** direct file mappings (750 MB budget) | In-memory archive access without disk stalls |
