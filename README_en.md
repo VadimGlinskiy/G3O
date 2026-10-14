@@ -67,7 +67,7 @@ graph TD
 ### Steps:
 
 1. **Download the Core mod:**
-   - Grab `Gothic3Optima-v1.2.1-Core.zip` from the release page.
+   - Grab `Gothic3Optima-v1.2.2-Core.zip` from the release page.
    - Copy `dinput8.dll` into your Gothic 3 game directory (next to `Gothic3.exe`).
 2. **Download the DXVK package for your GPU:**
    - Pick the appropriate DXVK archive from the table below on the same release page.
@@ -83,7 +83,7 @@ All archives are attached to the same release on GitHub:
 ### 1. Core Mod (Required)
 | Package | Size | Description |
 | :--- | :--- | :--- |
-| **`Gothic3Optima-v1.2.1-Core.zip`** | ~120 KB | Core mod (`dinput8.dll`). Includes Multicore Threading Engine (eCThreadPool pool scaling to 4-8 workers, priority scheduler), mimalloc allocator replacement, SaveGame Guard, SIMD geometry acceleration, Multi-Ray Footprint, Combatant Culling Bypass, and exception handler. Works on native D3D9 or with any DXVK build. |
+| **`Gothic3Optima-v1.2.2-Core.zip`** | ~120 KB | Core mod (`dinput8.dll`). Includes Multicore Threading Engine (eCThreadPool pool scaling to 2-8 workers, priority scheduler), mimalloc allocator replacement, SaveGame Guard, SIMD geometry acceleration, Combatant Culling Bypass, and exception handler. Works on native D3D9 or with any DXVK build. |
 
 ### 2. DXVK Variants (Pick one)
 | Package | Version | Recommendation |
@@ -95,7 +95,7 @@ All archives are attached to the same release on GitHub:
 | **`DXVK-1.10.1-Async.zip`** | DXVK 1.10.1 Async | For Intel HD/UHD integrated graphics or legacy hardware. |
 
 > [!TIP]
-> For standard gaming PCs, use: **`Gothic3Optima-v1.2.1-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
+> For standard gaming PCs, use: **`Gothic3Optima-v1.2.2-Core.zip`** + **`DXVK-2.4.1-Stable.zip`**.
 
 ---
 
@@ -115,10 +115,10 @@ Comparison between stock Gothic 3 (CP 1.75.14) and the mod:
 | **File I/O** | Synchronous `SetFilePointer` and small-buffer `ReadFile` calls | Disk seek latency, repeated kernel transitions | **Memory-Mapped Files (`MapViewOfFile`):** direct file mappings (750 MB budget) | In-memory archive access without disk stalls |
 | **Sector Streaming** | Static radial sphere around hero in `eCPVSPrefetcher3` | Micro-stutters (50-200 ms) when crossing sector boundaries | **Motion Vector Prefetch:** sphere projected 10-30m ahead along motion vector | Seamless streaming: sector cells loaded before hero arrives |
 | **Math & Physics** | Calculations use legacy x87 FPU (`fld`, `fmul`, `fstp`) in `SharedBase.dll` | Slow Frustum Culling and bounding volume checks | Replaced culling and matrix math with SSE intrinsics | Faster visibility calculations |
-| **Fall-Through & GeoData Guard** | Single raycast slips through polygon seams in terrain meshes, spurious fall detection | Hero clipping through terrain into the void, slipping into geometry seams, lethal fall damage | **Multi-Ray Footprint & Ground Recovery Fall Guard:** 5-ray cross footprint cluster under character feet (0.25m radius) via `TraceRayNearestHit` hook in `Engine.dll`, lateral hit centering, abnormal vertical drop detector ($>6$m) restoring safe ground and resetting fall velocity | Hero never clips through geometry cracks, rock-solid footing on slopes and seams, zero fall damage from glitches |
+| **Fall-Through & GeoData Guard** | Single raycast slips through polygon seams in terrain meshes, spurious fall detection | Hero clipping through terrain into the void, slipping into geometry seams, lethal fall damage | **Multi-Ray Footprint & Ground Recovery Fall Guard:** 5-ray footprint cluster under feet (disabled in v1.2.2 to preserve smooth locomotion without vertical jitter) | Native smooth character movement without vertical jerking or false jumping |
 | **String Hashing** | Byte-by-byte loop in `g_GetHashValue<bCString>` | Map lookup delays during NPC spawning | Vectorized string hash routine | Faster object and dialogue map lookups |
 | **CPU Topology** | Threads randomly scheduled onto slow E-cores | Frame drops on Intel 12-14th Gen and AMD Hybrid chips | Game threads bound to Performance cores (P-cores) | Consistent framerate on hybrid processors |
-| **PhysX Physics & Ragdolls** | Variable PhysX 2.4.1 timestep, zero bone damping, unbounded velocity accumulation on collision geometry clipping | Ragdoll corpses launching into the stratosphere, limbs stretching into spaghetti, micro-stutters at >60 / 144 Hz | **Fixed Physics Substep & Bone Velocity Clamp:** enforced 16.6 ms (1/60s, `NX_TIMESTEP_FIXED`), bone linear/angular damping (0.20/0.25), clamping of anomalous velocities ($\le 20$ m/s, $\le 12$ rad/s), and NaN spike suppression | Natural ragdoll settling without flying corpses or limb stretching, smooth simulation at 144+ Hz |
+| **PhysX Physics & Ragdolls** | Variable PhysX 2.4.1 timestep, zero bone damping | Ragdoll corpses launching into the stratosphere, limbs stretching into spaghetti | **Fixed Physics Substep & Bone Velocity Clamp:** PhysX step locking (disabled in v1.2.2 to prevent collision micro-stutters) | Vanilla PhysX behavior without animation or ragdoll desynchronization |
 | **Frame Pacing** | Stock Windows timer resolution defaults to 15.6 ms | Jittery frame delivery even at 60 / 120 FPS | Forced `timeBeginPeriod(1)` for 1.0 ms precision | Consistent frame pacing |
 | **FMOD Audio** | Small DSP buffer in `fmodex.dll` (512 samples, 10.6 ms), 16 KB file buffer | Audio clicks, crackles, background music stopping in cities | Hooked `FMOD::System::init`: 2048x4 samples DSP buffer (170.6 ms), 64 channels, 64 KB stream buffer | Clean audio without crackles, uninterrupted music under load |
 | **Address Space** | 32-bit limit (4 GB virtual memory space) | Insufficient virtual space for massive archives (`_compiledImage.pak`, `_compiledMesh.pak`) | **High Memory Shadow Cache (> 4 GB):** 64-bit shadow pool (2 GB) via Heaven's Gate (`AllocateHighMemory`, `ReadHighMemory`) | Massive archives cached directly in 64-bit RAM, eliminating 32-bit memory pressure |

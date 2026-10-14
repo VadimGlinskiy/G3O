@@ -67,14 +67,14 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // 13. Hook Main Menu version watermark (displays "G3O v1.0.0" in main menu)
     InitializeVersionHook();
 
-    // 14. Initialize Ground Recovery Fall Guard (Phase 12.2)
-    InitializeFallGuard();
+    // 14. Ground Recovery Fall Guard (Phase 12.2) - Disabled to preserve smooth character locomotion
+    // InitializeFallGuard();
 
     // 15. Initialize Adaptive LRU Cache Eviction (Phase 13.2)
     LRUCacheManager::Initialize();
 
-    // 16. Initialize PhysX Fixed Physics Substepping (Phase 15.1)
-    InitializePhysicsStabilizer();
+    // 16. PhysX Fixed Physics Substepping (Phase 15.1) - Disabled to prevent ragdoll and movement jitter
+    // InitializePhysicsStabilizer();
 
     // 17. Initialize Combatant Frustum Culling Exclusion (Phase 19.1)
     InitializeCombatGuard();
@@ -95,9 +95,9 @@ static void ShutdownOptima() {
     OutputDebugStringA("[Gothic3Optima] Shutting down...\n");
     ShutdownCombatGuard();
     ShutdownMulticoreManager();
-    ShutdownPhysicsStabilizer();
+    // ShutdownPhysicsStabilizer();
     LRUCacheManager::Shutdown();
-    ShutdownFallGuard();
+    // ShutdownFallGuard();
     ShutdownSaveGameGuard();
     ShutdownMediaOptimizer();
     ShutdownStreamingOptimizer();

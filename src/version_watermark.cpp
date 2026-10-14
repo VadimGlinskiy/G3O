@@ -22,7 +22,7 @@ static void __fastcall Hooked_SetWindowTextA(void* pThis, void* /*edx*/, void* p
             if (wstr[0] != L'\0' && !wcsstr(wstr, L"G3O")) {
                 if ((iswdigit(wstr[0]) && wcsstr(wstr, L"1.")) || wcsstr(wstr, L"CP ") || wcsstr(wstr, L"1.75")) {
                     wchar_t newBuf[256];
-                    swprintf_s(newBuf, L"%s | G3O v1.2.1", wstr);
+                    swprintf_s(newBuf, L"%s | G3O v1.2.2", wstr);
                     Real_bCUnicodeString_Assign(pUnicodeStr, nullptr, newBuf);
                     OutputDebugStringW(L"[Gothic3Optima] Main menu version watermark injected via SetWindowTextA: ");
                     OutputDebugStringW(newBuf);
@@ -51,7 +51,7 @@ static void* __fastcall Hooked_GetApplicationVersionString(void* pThis, void* /*
             const char* orig = *ppStr;
             if (orig[0] != '\0' && !strstr(orig, "G3O")) {
                 char buf[256];
-                sprintf_s(buf, "%s | G3O v1.2.1", orig);
+                sprintf_s(buf, "%s | G3O v1.2.2", orig);
                 Real_bCString_Assign(pOutString, nullptr, buf);
                 OutputDebugStringA("[Gothic3Optima] Version string injected via GetApplicationVersionString: ");
                 OutputDebugStringA(buf);
