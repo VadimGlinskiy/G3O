@@ -198,6 +198,11 @@ static std::string Resolve(DWORD eip, std::string& moduleOut) {
         return buf;
     }
     --it;
+    if (rva - it->rva > 0x800) {
+        // If more than 2KB past the export, it is an unexported internal function; keep module+RVA
+        snprintf(buf, sizeof(buf), "%s+0x%X", moduleOut.c_str(), rva);
+        return buf;
+    }
     snprintf(buf, sizeof(buf), "%s!%s+0x%X", moduleOut.c_str(), it->name.c_str(), rva - it->rva);
     return buf;
 }

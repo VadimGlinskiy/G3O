@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima VERSION 1.4.0 LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,6 +49,8 @@ add_library(dinput8 SHARED
     src/vegetation_optimizer.h
     src/fast_pak_decompressor.cpp
     src/fast_pak_decompressor.h
+    src/property_cache_optimizer.cpp
+    src/property_cache_optimizer.h
 )
 
 target_include_directories(dinput8 PRIVATE

@@ -35,6 +35,7 @@ struct Config {
     // [Performance]
     bool enableSIMDFrustumCulling = true;
     bool enableFastPakDecompressor = true;
+    bool enablePropertyCache = true;
     bool enableD3D9StateFilter = false;
     bool enableFastTextureLoader = true;
     bool enableVegetationOptimizer = true;

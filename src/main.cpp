@@ -14,6 +14,7 @@
 #include "cpu_topology.h"
 #include "vegetation_optimizer.h"
 #include "fast_pak_decompressor.h"
+#include "property_cache_optimizer.h"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -49,7 +50,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
 
     // Wait for engine libraries before installing engine-level hooks
     int maxWaitMs = 5000;
-    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("GFC.dll") || !GetModuleHandleA("FileSystem.dll")) && maxWaitMs > 0) {
+    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("GFC.dll") || !GetModuleHandleA("FileSystem.dll") || !GetModuleHandleA("Game.dll")) && maxWaitMs > 0) {
         Sleep(2);
         maxWaitMs -= 2;
     }
@@ -62,9 +63,14 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::HookLoggingFunctions();
     }
 
-    // Fast Pak Decompressor: SIMD libdeflate zlib decompression for .pak archives
+    // Fast Pak Decompressor: SIMD libdeflate zlib decompression for .pak archives & savegames
     if (cfg.enableFastPakDecompressor) {
         G3O::InitializeFastPakDecompressor();
+    }
+
+    // Property Cache Optimizer: O(1) hash cache for entity property resolution during save loading
+    if (cfg.enablePropertyCache) {
+        G3O::InitializePropertyCacheOptimizer();
     }
 
     // Hardware SIMD Frustum Culling & Math optimization for extreme draw distances
@@ -127,6 +133,7 @@ static void ShutdownOptima() {
     G3O::ShutdownMathSIMDOptimizer();
     G3O::ShutdownVegetationOptimizer();
     G3O::ShutdownFastPakDecompressor();
+    G3O::ShutdownPropertyCacheOptimizer();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();
     G3O::ShutdownCameraController();

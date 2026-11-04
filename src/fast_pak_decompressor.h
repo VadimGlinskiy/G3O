@@ -2,9 +2,10 @@
 
 namespace G3O {
 
-// Hooks FileSystem.dll internal zlib decompressor (RVA 0xA2D0) with SIMD-accelerated libdeflate.
-// Accelerates .pak archive decompression by 15x-25x (1.5 GB/s vs 88 MB/s),
-// drastically reducing savegame loading time and world cell streaming hitches.
+// Hooks FileSystem.dll internal zlib decompressor (RVA 0xA2D0) and
+// Game.dll savegame decompressor (0x101D4900) with SIMD-accelerated libdeflate.
+// Accelerates .pak virtual archives and .g3savcpxdat savegame decompression by 15x-25x,
+// drastically reducing savegame loading time and world streaming hitches.
 bool InitializeFastPakDecompressor();
 void ShutdownFastPakDecompressor();
 

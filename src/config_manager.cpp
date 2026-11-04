@@ -222,6 +222,10 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Аппаратный SIMD Frustum Culling (SSE2-векторизация отсечения невидимой геометрии)\n"
         << "; Значительно поднимает FPS при экстремальной дальности прорисовки\n"
         << "EnableSIMDFrustumCulling=true\n\n"
+        << "; SIMD-ускоритель декомпрессии архивов .pak и сохранений (libdeflate)\n"
+        << "EnableFastPakDecompressor=true\n\n"
+        << "; O(1) хэш-кэш свойств сущностей для ускорения загрузки сохранений\n"
+        << "EnablePropertyCache=true\n\n"
         << "; Аппаратная фильтрация избыточных вызовов состояний Direct3D 9 (SetRenderState/SetSamplerState)\n"
         << "EnableD3D9StateFilter=true\n\n"
         << "; Fast Texture Loader (d3dx9_40.dll)\n"
@@ -319,12 +323,13 @@ void LoadConfig() {
 
     // [Performance]
     s_config.enableSIMDFrustumCulling = ReadIniBool("Performance", "EnableSIMDFrustumCulling", true, path);
+    s_config.enableFastPakDecompressor = ReadIniBool("Performance", "EnableFastPakDecompressor", true, path);
+    s_config.enablePropertyCache = ReadIniBool("Performance", "EnablePropertyCache", true, path);
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", false, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);
     s_config.enableVegetationOptimizer = ReadIniBool("Performance", "EnableVegetationOptimizer", true, path);
     s_config.treeShadowDistance = ReadIniFloat("Performance", "TreeShadowDistance", 6500.0f, path);
     s_config.vegetationGridRangeClamp = ReadIniFloat("Performance", "VegetationGridRangeClamp", 7500.0f, path);
-    s_config.enableFastPakDecompressor = ReadIniBool("Performance", "EnableFastPakDecompressor", true, path);
     s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
     s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
     s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);
@@ -344,8 +349,8 @@ void LoadConfig() {
         KeyCodeToString(s_config.decreaseFOVKey).c_str(), KeyCodeToString(s_config.increaseFOVKey).c_str(), s_config.fovStep);
     Log("G3O", "  [Crash]   Enable=%d, Dialog=%d, Dump=%d, Log=%d",
         (int)s_config.enableCrashInvestigator, (int)s_config.showCrashDialog, (int)s_config.writeCrashDump, (int)s_config.writeCrashLog);
-    Log("G3O", "  [Perform] SIMDFrustum=%d, FastPak=%d, D3D9Filter=%d, FastTexLoader=%d, VegOpt=%d (Shadow: %.1f, VegClamp: %.1f), 1msTimer=%d, HighPriority=%d, CPUTopology=%d",
-        (int)s_config.enableSIMDFrustumCulling, (int)s_config.enableFastPakDecompressor, (int)s_config.enableD3D9StateFilter, (int)s_config.enableFastTextureLoader,
+    Log("G3O", "  [Perform] SIMDFrustum=%d, FastPak=%d, PropCache=%d, D3D9Filter=%d, FastTexLoader=%d, VegOpt=%d (Shadow: %.1f, VegClamp: %.1f), 1msTimer=%d, HighPriority=%d, CPUTopology=%d",
+        (int)s_config.enableSIMDFrustumCulling, (int)s_config.enableFastPakDecompressor, (int)s_config.enablePropertyCache, (int)s_config.enableD3D9StateFilter, (int)s_config.enableFastTextureLoader,
         (int)s_config.enableVegetationOptimizer, s_config.treeShadowDistance, s_config.vegetationGridRangeClamp, (int)s_config.enableHighPrecisionTimer,
         (int)s_config.enableHighProcessPriority, (int)s_config.enableCPUTopologyAffinity);
 }
