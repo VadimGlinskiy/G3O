@@ -255,4 +255,16 @@ void ShutdownPropertyCacheOptimizer() {
         s_stringHits, s_stringMisses, s_idHits, s_idMisses);
 }
 
+LONG GetPropertyCacheStringHits() { return s_stringHits; }
+LONG GetPropertyCacheStringMisses() { return s_stringMisses; }
+LONG GetPropertyCacheIdHits() { return s_idHits; }
+LONG GetPropertyCacheIdMisses() { return s_idMisses; }
+
+void ResetPropertyCacheTelemetry() {
+    InterlockedExchange(&s_stringHits, 0);
+    InterlockedExchange(&s_stringMisses, 0);
+    InterlockedExchange(&s_idHits, 0);
+    InterlockedExchange(&s_idMisses, 0);
+}
+
 } // namespace G3O

@@ -15,6 +15,8 @@
 #include "vegetation_optimizer.h"
 #include "fast_pak_decompressor.h"
 #include "property_cache_optimizer.h"
+#include "vfs_cache_optimizer.h"
+#include "savegame_profiler.h"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -50,7 +52,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
 
     // Wait for engine libraries before installing engine-level hooks
     int maxWaitMs = 5000;
-    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("GFC.dll") || !GetModuleHandleA("FileSystem.dll") || !GetModuleHandleA("Game.dll")) && maxWaitMs > 0) {
+    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("GFC.dll") || !GetModuleHandleA("FileSystem.dll") || !GetModuleHandleA("Game.dll") || !GetModuleHandleA("Engine.dll")) && maxWaitMs > 0) {
         Sleep(2);
         maxWaitMs -= 2;
     }
@@ -72,6 +74,12 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     if (cfg.enablePropertyCache) {
         G3O::InitializePropertyCacheOptimizer();
     }
+
+    // VFS Cache Optimizer: O(1) hash cache for virtual file system directory lookups across 395 mod archives
+    G3O::InitializeVFSCacheOptimizer();
+
+    // Savegame Profiler: High-resolution telemetry for savegame loading phases
+    G3O::InitializeSavegameProfiler();
 
     // Hardware SIMD Frustum Culling & Math optimization for extreme draw distances
     if (cfg.enableSIMDFrustumCulling) {
@@ -134,6 +142,8 @@ static void ShutdownOptima() {
     G3O::ShutdownVegetationOptimizer();
     G3O::ShutdownFastPakDecompressor();
     G3O::ShutdownPropertyCacheOptimizer();
+    G3O::ShutdownVFSCacheOptimizer();
+    G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();
     G3O::ShutdownCameraController();
@@ -190,7 +200,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD reason, LPVOID reserved) {
         break;
     }
     case DLL_PROCESS_DETACH:
-        if (!reserved) ShutdownOptima();
+        ShutdownOptima();
         break;
     }
     return TRUE;

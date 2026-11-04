@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
-    add_compile_options(/O2 /Oi /Oy /W3 /EHsc /Zi /utf-8)
+    add_compile_options(/O2 /Oi /Oy /W3 /EHsc /Zi /utf-8 /arch:AVX2)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /MAP:dinput8.map /DEBUG")
 endif()
@@ -51,6 +51,10 @@ add_library(dinput8 SHARED
     src/fast_pak_decompressor.h
     src/property_cache_optimizer.cpp
     src/property_cache_optimizer.h
+    src/savegame_profiler.cpp
+    src/savegame_profiler.h
+    src/vfs_cache_optimizer.cpp
+    src/vfs_cache_optimizer.h
 )
 
 target_include_directories(dinput8 PRIVATE
