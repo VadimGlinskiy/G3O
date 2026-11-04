@@ -1,6 +1,7 @@
 #include "profiler.h"
 #include "diagnostic_logger.h"
 #include "d3d9_hook.h"
+#include "config_manager.h"
 #include <minhook.h>
 #include <d3d9.h>
 #include <tlhelp32.h>
@@ -24,7 +25,12 @@ static volatile LONG64 s_readBytes = 0;
 static volatile LONG64 s_readUs = 0;
 static volatile LONG   s_busyTid = 0;
 
-static LARGE_INTEGER s_freq;
+static LARGE_INTEGER s_freq = []() {
+    LARGE_INTEGER li;
+    QueryPerformanceFrequency(&li);
+    if (li.QuadPart <= 0) li.QuadPart = 10000000LL;
+    return li;
+}();
 static LARGE_INTEGER s_lastFrame = {};
 static volatile bool s_stop = false;
 static FILE* s_file = NULL;
@@ -46,7 +52,9 @@ static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead,
     QueryPerformanceCounter(&t1);
     InterlockedIncrement(&s_readCalls);
     InterlockedExchangeAdd64(&s_readBytes, (LONG64)((pRead && r) ? *pRead : 0));
-    InterlockedExchangeAdd64(&s_readUs, (t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart);
+    if (s_freq.QuadPart > 0) {
+        InterlockedExchangeAdd64(&s_readUs, (t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart);
+    }
     return r;
 }
 
@@ -66,7 +74,7 @@ static void __fastcall Hooked_RemoveFromDirCache(void* pThis, void*, const void*
     QueryPerformanceCounter(&t0);
     Real_RemoveFromDirCache(pThis, name, a, b);
     QueryPerformanceCounter(&t1);
-    LONG64 us = (t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart;
+    LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
     InterlockedIncrement(&s_rfdCalls);
     InterlockedExchangeAdd64(&s_rfdUs, us);
     LONG entries = *(LONG*)((BYTE*)pThis + 0x38); // element count of the dir cache map
@@ -91,15 +99,17 @@ static Present_t Real_Present = NULL;
 
 static HRESULT STDMETHODCALLTYPE Hooked_Present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND w, const RGNDATA* d) {
     InvalidateD3D9StateCaches();
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    if (s_lastFrame.QuadPart) {
-        LONG us = (LONG)((now.QuadPart - s_lastFrame.QuadPart) * 1000000LL / s_freq.QuadPart);
-        if (us > s_maxFrameUs) s_maxFrameUs = us;
-        if (us > 33333) InterlockedIncrement(&s_slowFrames);
+    if (GetConfig().enableProfiler && s_freq.QuadPart > 0) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        if (s_lastFrame.QuadPart) {
+            LONG us = (LONG)((now.QuadPart - s_lastFrame.QuadPart) * 1000000LL / s_freq.QuadPart);
+            if (us > s_maxFrameUs) s_maxFrameUs = us;
+            if (us > 33333) InterlockedIncrement(&s_slowFrames);
+        }
+        s_lastFrame = now;
+        InterlockedIncrement(&s_frames);
     }
-    s_lastFrame = now;
-    InterlockedIncrement(&s_frames);
     return Real_Present(dev, a, b, w, d);
 }
 
