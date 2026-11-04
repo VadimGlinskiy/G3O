@@ -145,6 +145,47 @@ INSTALLATION:
 
 Write-Host ""
 Write-Host "========================================================================"
-Write-Host "All 6 release packages successfully created in: $packagesDir"
+$reshadeDir = Join-Path $root "resources\reshade"
+if (Test-Path $reshadeDir) {
+    Write-Host ">>> Packaging ReShade-RTGI-Gothic3.zip..."
+    $stageReShade = Join-Path $dist "stage_reshade"
+    if (Test-Path $stageReShade) { Remove-Item $stageReShade -Recurse -Force }
+    New-Item -ItemType Directory -Path $stageReShade -Force | Out-Null
+
+    Copy-Item (Join-Path $reshadeDir "*") $stageReShade -Recurse -Force
+
+    $readmeReShade = @"
+================================================================================
+Gothic 3 - ReShade 6.8 + RTGI (Ray Traced Global Illumination) Addon
+================================================================================
+
+DESCRIPTION:
+Optional visual enhancement pack providing ray tracing effects, indirect
+lighting, ambient occlusion (qUINT MXAO), and screen-space reflections.
+
+INCLUDED FILES:
+- ReShade32.dll    (ReShade 6.8.0 32-bit runtime)
+- ReShade.ini      (Pre-configured with Home key overlay and depth buffer settings)
+- reshade-shaders/ (Curated RTGI, MXAO, SSR, bloom and color grading shaders)
+
+INSTALLATION:
+1. Extract all contents of this archive directly into your Gothic 3 game folder
+   (where 'Gothic3.exe' is located).
+2. Launch Gothic 3.
+3. Press 'Home' on your keyboard to open the ReShade configuration overlay.
+
+NOTE:
+ReShade is completely optional and separate from Gothic 3 Optima (G3O) and DXVK.
+================================================================================
+"@
+    Set-Content -Path (Join-Path $stageReShade "README_RESHADE.txt") -Value $readmeReShade -Encoding UTF8
+
+    $reshadeZip = Join-Path $packagesDir "ReShade-RTGI-Gothic3.zip"
+    Compress-Archive -Path "$stageReShade\*" -DestinationPath $reshadeZip -Force
+    Remove-Item $stageReShade -Recurse -Force
+    Write-Host "[OK] Created: ReShade-RTGI-Gothic3.zip"
+}
+
+Write-Host "All release packages successfully created in: $packagesDir"
 Get-ChildItem -Path $packagesDir | Select-Object Name, Length
 Write-Host "========================================================================"
