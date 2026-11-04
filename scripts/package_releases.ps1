@@ -75,32 +75,32 @@ $dxvkVariants = @(
     @{
         Folder = "1.10.1-async";
         ZipName = "DXVK-1.10.1-Async.zip";
-        Title = "DXVK 1.10.1 - Async (Legacy Intel & Fallback)";
-        Desc = "Older async DXVK build. Recommended if you have an older Intel GPU or newer DXVK versions experience crashes/driver timeouts."
+        Title = "DXVK 1.10.1 - Async (Experimental)";
+        Desc = "Older DXVK build with asynchronous compilation enabled. In-game compatibility is not verified."
     },
     @{
         Folder = "1.10.3-async";
         ZipName = "DXVK-1.10.3-Async.zip";
-        Title = "DXVK 1.10.3 - Async (Pre-Vulkan 1.3 Legacy GPU)";
-        Desc = "Async build for GPUs lacking Vulkan 1.3 support or facing stability issues on DXVK 2.x+."
+        Title = "DXVK 1.10.3 - Async (Experimental)";
+        Desc = "Older DXVK build with asynchronous compilation enabled. In-game compatibility is not verified."
     },
     @{
         Folder = "2.4.1";
         ZipName = "DXVK-2.4.1-Stable.zip";
-        Title = "DXVK 2.4.1 - Stable (Recommended)";
-        Desc = "Rock-solid DXVK release. Highly recommended for AMD Polaris/Vega/RDNA & NVIDIA Pascal/Turing/Ampere/Ada."
+        Title = "DXVK 2.4.1 - Stable (Defaults)";
+        Desc = "DXVK 2.4.1 with upstream defaults. In-game compatibility is not verified."
     },
     @{
         Folder = "3.0.1";
         ZipName = "DXVK-3.0.1.zip";
-        Title = "DXVK 3.0.1 (Current Vulkan 1.4)";
-        Desc = "Latest generation DXVK translation layer. Requires modern GPU drivers supporting Vulkan 1.4."
+        Title = "DXVK 3.0.1 (Defaults)";
+        Desc = "DXVK 3.0.1 with upstream defaults. In-game compatibility is not verified."
     },
     @{
         Folder = "3.0.1-hdr";
         ZipName = "DXVK-3.0.1-HDR.zip";
-        Title = "DXVK 3.0.1 - HDR (High Dynamic Range Output)";
-        Desc = "DXVK 3.0.1 with true HDR color pipeline. Use if you have an HDR monitor and Windows HDR is enabled."
+        Title = "DXVK 3.0.1 - Legacy HDR-labelled archive (SDR for Gothic 3)";
+        Desc = "Gothic 3 uses D3D9; this legacy archive does not enable HDR. Use the standard DXVK 3.0.1 archive instead."
     }
 )
 
@@ -125,7 +125,7 @@ $($v.Desc)
 INCLUDED FILES:
 - d3d9.dll   (DirectX 9 to Vulkan translation layer)
 - dxgi.dll   (DXGI interface)
-- dxvk.conf  (Tuned configuration for Gothic 3: async compile, VRAM limits)
+- dxvk.conf  (Upstream defaults; only async archives enable async compilation)
 
 INSTALLATION:
 1. Extract all files from this archive directly into your Gothic 3 game folder

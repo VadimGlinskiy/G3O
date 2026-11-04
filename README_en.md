@@ -43,6 +43,8 @@ The local v1.1.1 `Parallel Universe Patch/Changelog_en.txt` describes PUP's own 
 
 `resources/dxvk/` contains third-party DXVK builds. `scripts/package_releases.ps1` creates one core archive (`dinput8.dll`, `README_INSTALL.txt`) and five separate DXVK archives (`d3d9.dll`, `dxgi.dll`, `dxvk.conf`, `README_DXVK.txt`). DXVK is not embedded in the core or implemented by G3O code. Packaging does not run or test the game.
 
+DXVK configs do not force texture filtering, depth formats, frame latency, or HDR. Only `1.10.1-async` and `1.10.3-async` enable experimental asynchronous compilation. The `3.0.1-hdr` archive retains its legacy name but uses SDR defaults for Gothic 3: a DXGI HDR setting cannot enable HDR in a D3D9 game. Repository changes do not update an existing `dxvk.conf` in the game folder; in-game behavior has not been tested.
+
 ## Build and test installation
 
 ```cmd
