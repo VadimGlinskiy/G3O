@@ -1,15 +1,9 @@
 #pragma once
 #include <windows.h>
-#include <d3d9.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+namespace G3O {
 
-void InstallD3D9Hooks();
-void GetD3D9FilterStatistics(DWORD* pFilteredRenderStates, DWORD* pFilteredStageStates, DWORD* pFilteredSamplerStates);
-void EvictD3D9Resources();
+void InitializeD3D9Optimizer();
+void ShutdownD3D9Optimizer();
 
-#ifdef __cplusplus
-}
-#endif
+} // namespace G3O

@@ -9,6 +9,7 @@
 #include "borderless_window.h"
 #include "camera_controller.h"
 #include "math_simd_optimizer.h"
+#include "d3d9_hook.h"
 #include "cpu_topology.h"
 
 #pragma comment(lib, "winmm.lib")
@@ -63,6 +64,11 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeMathSIMDOptimizer();
     }
 
+    // Direct3D 9 State Redundancy Filter
+    if (cfg.enableD3D9StateFilter) {
+        G3O::InitializeD3D9Optimizer();
+    }
+
     // Hook camera controller for dynamic widescreen FOV
     if (cfg.enableDynamicFOV) {
         G3O::InitializeCameraController();
@@ -102,6 +108,7 @@ static void ShutdownOptima() {
         if (unload) unload();
     }
     G3O::ShutdownMathSIMDOptimizer();
+    G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownCameraController();
     G3O::ShutdownBorderlessWindow();
     G3O::ShutdownCrashHandler();

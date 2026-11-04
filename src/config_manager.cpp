@@ -222,6 +222,8 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Аппаратный SIMD Frustum Culling (SSE2-векторизация отсечения невидимой геометрии)\n"
         << "; Значительно поднимает FPS при экстремальной дальности прорисовки\n"
         << "EnableSIMDFrustumCulling=true\n\n"
+        << "; Аппаратная фильтрация избыточных вызовов состояний Direct3D 9 (SetRenderState/SetSamplerState)\n"
+        << "EnableD3D9StateFilter=true\n\n"
         << "; Высокоточный мультимедийный таймер Windows (квант 1 мс) для устранения микрофризов\n"
         << "EnableHighPrecisionTimer=true\n\n"
         << "; Назначить высокий приоритет процессу (HIGH_PRIORITY_CLASS) для защиты от фоновых служб\n"
@@ -309,6 +311,7 @@ void LoadConfig() {
 
     // [Performance]
     s_config.enableSIMDFrustumCulling = ReadIniBool("Performance", "EnableSIMDFrustumCulling", true, path);
+    s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);
     s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
     s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
     s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);
@@ -327,8 +330,8 @@ void LoadConfig() {
         KeyCodeToString(s_config.decreaseFOVKey).c_str(), KeyCodeToString(s_config.increaseFOVKey).c_str(), s_config.fovStep);
     Log("G3O", "  [Crash]   Enable=%d, Dialog=%d, Dump=%d, Log=%d",
         (int)s_config.enableCrashInvestigator, (int)s_config.showCrashDialog, (int)s_config.writeCrashDump, (int)s_config.writeCrashLog);
-    Log("G3O", "  [Perform] SIMDFrustum=%d, 1msTimer=%d, HighPriority=%d, CPUTopology=%d",
-        (int)s_config.enableSIMDFrustumCulling, (int)s_config.enableHighPrecisionTimer,
+    Log("G3O", "  [Perform] SIMDFrustum=%d, D3D9Filter=%d, 1msTimer=%d, HighPriority=%d, CPUTopology=%d",
+        (int)s_config.enableSIMDFrustumCulling, (int)s_config.enableD3D9StateFilter, (int)s_config.enableHighPrecisionTimer,
         (int)s_config.enableHighProcessPriority, (int)s_config.enableCPUTopologyAffinity);
 }
 

@@ -175,7 +175,10 @@ static void WINAPI HookedOutputDebugStringA(LPCSTR lpOutputString) {
             Log("DebugOut", "%s", clean);
         }
     }
-    if (s_origOutputDebugStringA) {
+    // Only forward to Windows kernel if a real debugger is attached.
+    // In normal execution, calling OutputDebugStringA forces Windows kernel
+    // exception dispatch (DBG_PRINTEXCEPTION_C) and LPC messaging, causing severe disk/thread stalls.
+    if (s_origOutputDebugStringA && IsDebuggerPresent()) {
         s_origOutputDebugStringA(lpOutputString);
     }
 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima VERSION 1.3.3 LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.3.5 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,8 @@ add_library(dinput8 SHARED
     src/config_manager.h
     src/math_simd_optimizer.cpp
     src/math_simd_optimizer.h
+    src/d3d9_hook.cpp
+    src/d3d9_hook.h
     src/cpu_topology.cpp
     src/cpu_topology.h
 )

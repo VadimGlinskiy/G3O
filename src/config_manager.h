@@ -34,6 +34,7 @@ struct Config {
 
     // [Performance]
     bool enableSIMDFrustumCulling = true;
+    bool enableD3D9StateFilter = true;
     bool enableHighPrecisionTimer = true;
     bool enableHighProcessPriority = true;
     bool enableCPUTopologyAffinity = true;
