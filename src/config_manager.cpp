@@ -345,7 +345,7 @@ void LoadConfig() {
     s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
     s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
     s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);
-    s_config.enableVFSCache = ReadIniBool("Performance", "EnableVFSCache", true, path);
+    s_config.enableVFSCache = ReadIniBool("Performance", "EnableVFSCache", false, path);
     s_config.cpuCores = ReadIniInt("Performance", "CPUCores", 0, path);
     s_config.cpuThreads = ReadIniInt("Performance", "CPUThreads", 0, path);
     s_config.cpuAffinityMask = ReadIniHex("Performance", "CPUAffinityMask", 0, path);

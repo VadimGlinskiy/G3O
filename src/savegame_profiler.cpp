@@ -44,9 +44,16 @@ static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead,
 }
 
 // -----------------------------------------------------------------------------
-// Phase Timers
+// Detailed Phase Timers
 // -----------------------------------------------------------------------------
+static LARGE_INTEGER s_tHUDStart = {};
+static LARGE_INTEGER s_tWorldStart = {};
+static LARGE_INTEGER s_tWorldEnd = {};
+
+static double s_preWorldSec = 0.0;
 static double s_loadGameWorldSec = 0.0;
+static double s_sessionStartSec = 0.0;
+static double s_sessionStopSec = 0.0;
 static double s_worldActivateSec = 0.0;
 static volatile LONG   s_cellsProcessed = 0;
 static volatile LONG64 s_hierarchyTimeUs = 0;
@@ -73,61 +80,61 @@ static void LogLoadReport(double totalSec) {
     LONG totalProps = strHits + strMiss + idHits + idMiss;
     double propHitRate = totalProps ? (100.0 * (strHits + idHits) / totalProps) : 0.0;
 
-    LONG vfsHits = GetVFSCacheHits();
-    LONG vfsMiss = GetVFSCacheMisses();
-    LONG totalVfs = vfsHits + vfsMiss;
-    double vfsHitRate = totalVfs ? (100.0 * vfsHits / totalVfs) : 0.0;
-
-    LONG decompHits = GetDecompCacheHits();
-    double decompSavedMb = (double)GetDecompCacheBytesSaved() / (1024.0 * 1024.0);
-
     LONG cells = s_cellsProcessed;
     double hierSec = (double)s_hierarchyTimeUs / 1000000.0;
 
-    // Log to diagnostic log
+    double preSec = s_preWorldSec;
+    double worldSec = s_loadGameWorldSec;
+    double startSec = s_sessionStartSec;
+    double otherPostSec = totalSec - (preSec + worldSec + startSec);
+    if (otherPostSec < 0.0) otherPostSec = 0.0;
+
     Log("G3O", "================================================================================");
     Log("G3O", "[LoadProfile] === SAVEGAME LOAD BENCHMARK (Total: %.3f s) ===", totalSec);
     Log("G3O", "  Major Engine Phases:");
-    Log("G3O", "    - gCWorld::LoadGameWorld:       %6.3f s (%5.1f%%)", s_loadGameWorldSec, totalSec > 0 ? (s_loadGameWorldSec * 100.0 / totalSec) : 0);
-    Log("G3O", "    - gCSession::WorldActivate:     %6.3f s (%5.1f%%)", s_worldActivateSec, totalSec > 0 ? (s_worldActivateSec * 100.0 / totalSec) : 0);
-    Log("G3O", "        * Cell Hierarchy Build:     %6.3f s (%5.1f%%) [%ld cells processed]", hierSec, totalSec > 0 ? (hierSec * 100.0 / totalSec) : 0, cells);
-    double otherSec = totalSec - (s_loadGameWorldSec + s_worldActivateSec);
-    if (otherSec < 0) otherSec = 0;
-    Log("G3O", "    - Other Load Phases / Overhead: %6.3f s (%5.1f%%)", otherSec, totalSec > 0 ? (otherSec * 100.0 / totalSec) : 0);
+    Log("G3O", "    1. Pre-Load Preparation:        %6.3f s (%5.1f%%) [gCSession::Stop: %.3f s]",
+        preSec, totalSec > 0 ? (preSec * 100.0 / totalSec) : 0, s_sessionStopSec);
+    Log("G3O", "    2. gCWorld::LoadGameWorld:      %6.3f s (%5.1f%%)",
+        worldSec, totalSec > 0 ? (worldSec * 100.0 / totalSec) : 0);
+    Log("G3O", "    3. gCSession::Start (World):    %6.3f s (%5.1f%%)",
+        startSec, totalSec > 0 ? (startSec * 100.0 / totalSec) : 0);
+    Log("G3O", "    4. Other Post-Processing:       %6.3f s (%5.1f%%)",
+        otherPostSec, totalSec > 0 ? (otherPostSec * 100.0 / totalSec) : 0);
+    Log("G3O", "         * Cell Hierarchy Build:    %6.3f s [%ld cells processed]", hierSec, cells);
     Log("G3O", "  Subsystem Activity:");
     Log("G3O", "    - Disk ReadFile I/O:            %6.3f s (%5.1f%%) [%ld calls, %.2f MB read, avg speed %.1f MB/s]",
         rSec, totalSec > 0 ? (rSec * 100.0 / totalSec) : 0, rc, rbMb, rSec > 0 ? (rbMb / rSec) : 0.0);
-    Log("G3O", "    - Pak Decompress (libdeflate):  %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB] [Cache: %ld hits, %.2f MB saved]",
-        pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0, pakCount, pakInMb, pakOutMb, decompHits, decompSavedMb);
+    Log("G3O", "    - Pak Decompress (libdeflate):  %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB]",
+        pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0, pakCount, pakInMb, pakOutMb);
     Log("G3O", "    - Save Decompress (libdeflate): %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]",
         saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0, saveCount, saveInMb, saveOutMb);
-    Log("G3O", "    - VFS Directory Cache (O(1)):   %ld queries (%ld hits, %ld misses, %.1f%% hit rate)",
-        totalVfs, vfsHits, vfsMiss, vfsHitRate);
     Log("G3O", "    - Property Resolution Cache:    %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
         totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
     Log("G3O", "================================================================================");
 
-    // Also write to dedicated log file
     FILE* fp = fopen("G3O_LoadProfiler.log", "w");
     if (fp) {
         fprintf(fp, "================================================================================\n");
         fprintf(fp, "[LoadProfile] === SAVEGAME LOAD BENCHMARK (Total: %.3f s) ===\n", totalSec);
         fprintf(fp, "--------------------------------------------------------------------------------\n");
         fprintf(fp, "Phase Breakdown:\n");
-        fprintf(fp, "  1. gCWorld::LoadGameWorld:       %6.3f s (%5.1f%%)\n", s_loadGameWorldSec, totalSec > 0 ? (s_loadGameWorldSec * 100.0 / totalSec) : 0);
-        fprintf(fp, "  2. gCSession::WorldActivate:     %6.3f s (%5.1f%%)\n", s_worldActivateSec, totalSec > 0 ? (s_worldActivateSec * 100.0 / totalSec) : 0);
-        fprintf(fp, "       * Cell Hierarchy Build:     %6.3f s (%5.1f%%) [%ld cells processed]\n", hierSec, totalSec > 0 ? (hierSec * 100.0 / totalSec) : 0, cells);
-        fprintf(fp, "  3. Other Engine Post-Processing: %6.3f s (%5.1f%%)\n", otherSec, totalSec > 0 ? (otherSec * 100.0 / totalSec) : 0);
+        fprintf(fp, "  1. Pre-Load Preparation:        %6.3f s (%5.1f%%) [gCSession::Stop: %.3f s]\n",
+            preSec, totalSec > 0 ? (preSec * 100.0 / totalSec) : 0, s_sessionStopSec);
+        fprintf(fp, "  2. gCWorld::LoadGameWorld:      %6.3f s (%5.1f%%)\n",
+            worldSec, totalSec > 0 ? (worldSec * 100.0 / totalSec) : 0);
+        fprintf(fp, "  3. gCSession::Start (World):    %6.3f s (%5.1f%%)\n",
+            startSec, totalSec > 0 ? (startSec * 100.0 / totalSec) : 0);
+        fprintf(fp, "  4. Other Post-Processing:       %6.3f s (%5.1f%%)\n",
+            otherPostSec, totalSec > 0 ? (otherPostSec * 100.0 / totalSec) : 0);
+        fprintf(fp, "       * Cell Hierarchy Build:    %6.3f s [%ld cells processed]\n", hierSec, cells);
         fprintf(fp, "--------------------------------------------------------------------------------\n");
         fprintf(fp, "Subsystem Activity:\n");
         fprintf(fp, "  - Disk ReadFile I/O:             %6.3f s (%5.1f%%) [%ld calls, %.2f MB read, speed %.1f MB/s]\n",
             rSec, totalSec > 0 ? (rSec * 100.0 / totalSec) : 0, rc, rbMb, rSec > 0 ? (rbMb / rSec) : 0.0);
-        fprintf(fp, "  - Pak Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB] [Cache: %ld hits, %.2f MB saved]\n",
-            pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0, pakCount, pakInMb, pakOutMb, decompHits, decompSavedMb);
+        fprintf(fp, "  - Pak Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB]\n",
+            pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0, pakCount, pakInMb, pakOutMb);
         fprintf(fp, "  - Save Decompress (libdeflate):  %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]\n",
             saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0, saveCount, saveInMb, saveOutMb);
-        fprintf(fp, "  - VFS Directory Cache (O(1)):    %ld queries (%ld hits, %ld misses, %.1f%% hit rate)\n",
-            totalVfs, vfsHits, vfsMiss, vfsHitRate);
         fprintf(fp, "  - Property Resolution Cache:     %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
             totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
         fprintf(fp, "================================================================================\n");
@@ -143,8 +150,7 @@ static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 
 static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, void* b) {
     s_isLoadActive = true;
-    LARGE_INTEGER t0, t1;
-    QueryPerformanceCounter(&t0);
+    QueryPerformanceCounter(&s_tHUDStart);
     Log("G3O", "================================================================================");
     Log("G3O", "[LoadProfile] >>> SAVEGAME LOAD INITIATED (gCHUDFileManager::LoadGame) >>>");
 
@@ -156,14 +162,18 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     InterlockedExchange64(&s_readTimeUs, 0);
     InterlockedExchange(&s_cellsProcessed, 0);
     InterlockedExchange64(&s_hierarchyTimeUs, 0);
+    s_preWorldSec = 0.0;
     s_loadGameWorldSec = 0.0;
+    s_sessionStartSec = 0.0;
+    s_sessionStopSec = 0.0;
     s_worldActivateSec = 0.0;
 
     bool r = Real_HUDLoadGame(pThis, a, b);
 
+    LARGE_INTEGER t1;
     QueryPerformanceCounter(&t1);
     s_isLoadActive = false;
-    double totalSec = (double)(t1.QuadPart - t0.QuadPart) / (double)s_freq.QuadPart;
+    double totalSec = (double)(t1.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
 
     LogLoadReport(totalSec);
     return r;
@@ -187,22 +197,69 @@ static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const vo
         InterlockedExchange64(&s_readTimeUs, 0);
         InterlockedExchange(&s_cellsProcessed, 0);
         InterlockedExchange64(&s_hierarchyTimeUs, 0);
+        s_preWorldSec = 0.0;
         s_loadGameWorldSec = 0.0;
+        s_sessionStartSec = 0.0;
+        s_sessionStopSec = 0.0;
         s_worldActivateSec = 0.0;
+        QueryPerformanceCounter(&s_tHUDStart);
         Log("G3O", "================================================================================");
         Log("G3O", "[LoadProfile] >>> SAVEGAME LOAD INITIATED (gCWorld::LoadGameWorld) >>>");
     }
 
-    LARGE_INTEGER t0, t1;
-    QueryPerformanceCounter(&t0);
-    Log("G3O", "[LoadProfile] -> gCWorld::LoadGameWorld START");
+    QueryPerformanceCounter(&s_tWorldStart);
+    if (s_tHUDStart.QuadPart > 0) {
+        s_preWorldSec = (double)(s_tWorldStart.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
+    }
+    Log("G3O", "[LoadProfile] -> gCWorld::LoadGameWorld START (pre-world: %.3f s)", s_preWorldSec);
 
     bool r = Real_LoadGameWorld(pThis, pSaveName, isNewGame);
 
-    QueryPerformanceCounter(&t1);
-    s_loadGameWorldSec = (double)(t1.QuadPart - t0.QuadPart) / (double)s_freq.QuadPart;
+    QueryPerformanceCounter(&s_tWorldEnd);
+    s_loadGameWorldSec = (double)(s_tWorldEnd.QuadPart - s_tWorldStart.QuadPart) / (double)s_freq.QuadPart;
     Log("G3O", "[LoadProfile] <- gCWorld::LoadGameWorld FINISHED in %.3f s (result=%d)", s_loadGameWorldSec, (int)r);
     return r;
+}
+
+typedef void (__thiscall* SessionStop_t)(void* pThis);
+static SessionStop_t Real_SessionStop = nullptr;
+
+static void __fastcall Hooked_SessionStop(void* pThis, void* /*edx*/) {
+    if (!s_isLoadActive) {
+        Real_SessionStop(pThis);
+        return;
+    }
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    Real_SessionStop(pThis);
+    QueryPerformanceCounter(&t1);
+    s_sessionStopSec = (double)(t1.QuadPart - t0.QuadPart) / (double)s_freq.QuadPart;
+    Log("G3O", "[LoadProfile] gCSession::Stop took %.3f s", s_sessionStopSec);
+}
+
+typedef void (__thiscall* SessionStart_t)(void* pThis, int mode);
+static SessionStart_t Real_SessionStart = nullptr;
+
+static void __fastcall Hooked_SessionStart(void* pThis, void* /*edx*/, int mode) {
+    if (!s_isLoadActive) {
+        Real_SessionStart(pThis, mode);
+        return;
+    }
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    Log("G3O", "[LoadProfile] -> gCSession::Start (mode=%d) START", mode);
+
+    Real_SessionStart(pThis, mode);
+
+    QueryPerformanceCounter(&t1);
+    s_sessionStartSec = (double)(t1.QuadPart - t0.QuadPart) / (double)s_freq.QuadPart;
+    Log("G3O", "[LoadProfile] <- gCSession::Start FINISHED in %.3f s", s_sessionStartSec);
+
+    if (s_standaloneLoadWorld) {
+        s_standaloneLoadWorld = false;
+        s_isLoadActive = false;
+        LogLoadReport(s_preWorldSec + s_loadGameWorldSec + s_sessionStartSec);
+    }
 }
 
 typedef int (__thiscall* WorldActivate_t)(void* pThis);
@@ -211,20 +268,11 @@ static WorldActivate_t Real_WorldActivate = nullptr;
 static int __fastcall Hooked_WorldActivate(void* pThis, void* /*edx*/) {
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
-    Log("G3O", "[LoadProfile] -> gCSession::WorldActivate START");
 
     int r = Real_WorldActivate(pThis);
 
     QueryPerformanceCounter(&t1);
     s_worldActivateSec = (double)(t1.QuadPart - t0.QuadPart) / (double)s_freq.QuadPart;
-    Log("G3O", "[LoadProfile] <- gCSession::WorldActivate FINISHED in %.3f s (result=%d)", s_worldActivateSec, r);
-
-    if (s_standaloneLoadWorld) {
-        s_standaloneLoadWorld = false;
-        s_isLoadActive = false;
-        LogLoadReport(s_loadGameWorldSec + s_worldActivateSec);
-    }
-
     return r;
 }
 
@@ -283,6 +331,8 @@ static void* FindHUDLoadGameTarget(HMODULE hGame) {
 static void* s_targetReadFile = nullptr;
 static void* s_targetHUDLoadGame = nullptr;
 static void* s_targetLoadGameWorld = nullptr;
+static void* s_targetSessionStop = nullptr;
+static void* s_targetSessionStart = nullptr;
 static void* s_targetWorldActivate = nullptr;
 static void* s_targetBuildStatic = nullptr;
 
@@ -315,6 +365,22 @@ bool InitializeSavegameProfiler() {
             Log("G3O", "Savegame Profiler: Hooked gCWorld::LoadGameWorld (0x%p)", pWorld);
         }
 
+        void* pStop = (void*)GetProcAddress(hGame, "?Stop@gCSession@@QAEXXZ");
+        if (pStop) {
+            s_targetSessionStop = pStop;
+            MH_CreateHook(pStop, (LPVOID)Hooked_SessionStop, (LPVOID*)&Real_SessionStop);
+            MH_EnableHook(pStop);
+            Log("G3O", "Savegame Profiler: Hooked gCSession::Stop (0x%p)", pStop);
+        }
+
+        void* pStart = (void*)GetProcAddress(hGame, "?Start@gCSession@@QAEXW4gESession_StartMode@@@Z");
+        if (pStart) {
+            s_targetSessionStart = pStart;
+            MH_CreateHook(pStart, (LPVOID)Hooked_SessionStart, (LPVOID*)&Real_SessionStart);
+            MH_EnableHook(pStart);
+            Log("G3O", "Savegame Profiler: Hooked gCSession::Start (0x%p)", pStart);
+        }
+
         void* pAct = (void*)GetProcAddress(hGame, "?WorldActivate@gCSession@@UAE?AW4bEResult@@XZ");
         if (pAct) {
             s_targetWorldActivate = pAct;
@@ -343,6 +409,8 @@ void ShutdownSavegameProfiler() {
     if (s_targetReadFile) MH_DisableHook(s_targetReadFile);
     if (s_targetHUDLoadGame) MH_DisableHook(s_targetHUDLoadGame);
     if (s_targetLoadGameWorld) MH_DisableHook(s_targetLoadGameWorld);
+    if (s_targetSessionStop) MH_DisableHook(s_targetSessionStop);
+    if (s_targetSessionStart) MH_DisableHook(s_targetSessionStart);
     if (s_targetWorldActivate) MH_DisableHook(s_targetWorldActivate);
     if (s_targetBuildStatic) MH_DisableHook(s_targetBuildStatic);
 }

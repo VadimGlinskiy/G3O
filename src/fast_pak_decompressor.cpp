@@ -57,82 +57,11 @@ static struct libdeflate_decompressor* GetThreadDecompressor() {
 }
 
 // -----------------------------------------------------------------------------
-// Decompression Cache (LRU in-memory cache for repeated assets)
+// Decompression Cache Stub (kept for API compatibility)
 // -----------------------------------------------------------------------------
-static volatile LONG   s_decompCacheHits = 0;
-static volatile LONG64 s_decompCacheBytesSaved = 0;
-
-LONG GetDecompCacheHits() { return s_decompCacheHits; }
-LONG64 GetDecompCacheBytesSaved() { return s_decompCacheBytesSaved; }
-
-static const DWORD  MAX_CACHE_BLOCK_SIZE = 1024 * 1024;       // 1 MB max per chunk
-static const size_t MAX_CACHE_TOTAL_MEM  = 256 * 1024 * 1024; // 256 MB RAM limit
-
-struct DecompCacheNode {
-    uint64_t hash;
-    DWORD inSize;
-    DWORD outSize;
-    BYTE* data;
-    DecompCacheNode* bucketNext;
-    DecompCacheNode* lruPrev;
-    DecompCacheNode* lruNext;
-};
-
-static const size_t DECOMP_BUCKET_COUNT = 4096;
-static DecompCacheNode* s_decompBuckets[DECOMP_BUCKET_COUNT] = {};
-static DecompCacheNode* s_lruHead = nullptr; // MRU
-static DecompCacheNode* s_lruTail = nullptr; // LRU
-static size_t s_currentCacheMem = 0;
-static SRWLOCK s_decompCacheLock = SRWLOCK_INIT;
-
-static inline uint64_t HashCompressedChunk(const void* inBuffer, DWORD inSize, DWORD outCap) {
-    uint64_t h = 14695981039346656037ULL ^ (uint64_t)inSize ^ ((uint64_t)outCap << 32);
-    const BYTE* p = (const BYTE*)inBuffer;
-    for (DWORD i = 0; i < inSize; ++i) {
-        h ^= (uint64_t)p[i];
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
-static void EvictLRUTail_Locked() {
-    while (s_lruTail && s_currentCacheMem > MAX_CACHE_TOTAL_MEM) {
-        DecompCacheNode* victim = s_lruTail;
-        s_lruTail = victim->lruPrev;
-        if (s_lruTail) s_lruTail->lruNext = nullptr;
-        else s_lruHead = nullptr;
-
-        size_t bIdx = (size_t)(victim->hash % DECOMP_BUCKET_COUNT);
-        DecompCacheNode** pp = &s_decompBuckets[bIdx];
-        while (*pp) {
-            if (*pp == victim) {
-                *pp = victim->bucketNext;
-                break;
-            }
-            pp = &((*pp)->bucketNext);
-        }
-
-        s_currentCacheMem -= victim->outSize;
-        if (victim->data) free(victim->data);
-        delete victim;
-    }
-}
-
-void ClearDecompCache() {
-    AcquireSRWLockExclusive(&s_decompCacheLock);
-    DecompCacheNode* curr = s_lruHead;
-    while (curr) {
-        DecompCacheNode* next = curr->lruNext;
-        if (curr->data) free(curr->data);
-        delete curr;
-        curr = next;
-    }
-    memset(s_decompBuckets, 0, sizeof(s_decompBuckets));
-    s_lruHead = nullptr;
-    s_lruTail = nullptr;
-    s_currentCacheMem = 0;
-    ReleaseSRWLockExclusive(&s_decompCacheLock);
-}
+LONG GetDecompCacheHits() { return 0; }
+LONG64 GetDecompCacheBytesSaved() { return 0; }
+void ClearDecompCache() {}
 
 static int __stdcall Hooked_ZlibDecompress(
     void* context,
@@ -143,23 +72,6 @@ static int __stdcall Hooked_ZlibDecompress(
     DWORD* pOutWritten
 ) {
     if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0) {
-        uint64_t chunkHash = HashCompressedChunk(inBuffer, inSize, outCapacity);
-        size_t bIdx = (size_t)(chunkHash % DECOMP_BUCKET_COUNT);
-
-        // Check if block was already decompressed and cached
-        AcquireSRWLockShared(&s_decompCacheLock);
-        for (DecompCacheNode* n = s_decompBuckets[bIdx]; n; n = n->bucketNext) {
-            if (n->hash == chunkHash && n->inSize == inSize && n->outSize <= outCapacity) {
-                memcpy(outBuffer, n->data, n->outSize);
-                if (pOutWritten) *pOutWritten = n->outSize;
-                InterlockedIncrement(&s_decompCacheHits);
-                InterlockedExchangeAdd64(&s_decompCacheBytesSaved, (LONG64)n->outSize);
-                ReleaseSRWLockShared(&s_decompCacheLock);
-                return 0; // Instant cache hit
-            }
-        }
-        ReleaseSRWLockShared(&s_decompCacheLock);
-
         struct libdeflate_decompressor* dec = GetThreadDecompressor();
         if (dec) {
             LARGE_INTEGER t0, t1;
@@ -199,33 +111,6 @@ static int __stdcall Hooked_ZlibDecompress(
                 InterlockedIncrement(&s_decompCount);
                 InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
                 InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)actual_out);
-
-                // Insert into Decompression Cache if within cacheable size
-                if (actual_out <= MAX_CACHE_BLOCK_SIZE) {
-                    BYTE* copy = (BYTE*)malloc(actual_out);
-                    if (copy) {
-                        memcpy(copy, outBuffer, actual_out);
-                        AcquireSRWLockExclusive(&s_decompCacheLock);
-                        DecompCacheNode* node = new DecompCacheNode();
-                        node->hash = chunkHash;
-                        node->inSize = inSize;
-                        node->outSize = (DWORD)actual_out;
-                        node->data = copy;
-                        node->bucketNext = s_decompBuckets[bIdx];
-                        s_decompBuckets[bIdx] = node;
-
-                        node->lruPrev = nullptr;
-                        node->lruNext = s_lruHead;
-                        if (s_lruHead) s_lruHead->lruPrev = node;
-                        s_lruHead = node;
-                        if (!s_lruTail) s_lruTail = node;
-
-                        s_currentCacheMem += actual_out;
-                        EvictLRUTail_Locked();
-                        ReleaseSRWLockExclusive(&s_decompCacheLock);
-                    }
-                }
-
                 return 0; // Success
             }
         }
@@ -458,12 +343,11 @@ void ShutdownFastPakDecompressor() {
         s_targetGameDecompressor = nullptr;
     }
     ClearDecompCache();
-    Log("G3O", "Decompressor stats: Pak files: %ld blocks (in: %.2f MB, out: %.2f MB, time: %.2f ms, cache hits: %ld) | Savegame: %ld chunks (in: %.2f MB, out: %.2f MB, time: %.2f ms)",
+    Log("G3O", "Decompressor stats: Pak files: %ld blocks (in: %.2f MB, out: %.2f MB, time: %.2f ms) | Savegame: %ld chunks (in: %.2f MB, out: %.2f MB, time: %.2f ms)",
         s_decompCount,
         (double)s_decompInBytes / (1024.0 * 1024.0),
         (double)s_decompOutBytes / (1024.0 * 1024.0),
         (double)s_decompTimeUs / 1000.0,
-        s_decompCacheHits,
         s_savegameDecompCount,
         (double)s_savegameDecompInBytes / (1024.0 * 1024.0),
         (double)s_savegameDecompOutBytes / (1024.0 * 1024.0),
@@ -490,9 +374,6 @@ void ResetDecompTelemetry() {
     InterlockedExchange64(&s_savegameDecompInBytes, 0);
     InterlockedExchange64(&s_savegameDecompOutBytes, 0);
     InterlockedExchange64(&s_savegameDecompTimeUs, 0);
-
-    InterlockedExchange(&s_decompCacheHits, 0);
-    InterlockedExchange64(&s_decompCacheBytesSaved, 0);
 }
 
 } // namespace G3O

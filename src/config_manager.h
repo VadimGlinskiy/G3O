@@ -44,7 +44,7 @@ struct Config {
     bool enableHighPrecisionTimer = true;
     bool enableHighProcessPriority = true;
     bool enableCPUTopologyAffinity = true;
-    bool enableVFSCache = true;
+    bool enableVFSCache = false;
     int cpuCores = 0;                  // 0 = Auto-detect
     int cpuThreads = 0;                // 0 = Auto-detect
     DWORD_PTR cpuAffinityMask = 0;     // 0 = Auto-detect
