@@ -1,51 +1,66 @@
-# Gothic 3 Optima (G3O) — actual source state 1.3.1
+# Gothic 3 Optima (G3O)
 
 [Русский](README.md)
 
-**The current DLL is not an active engine-optimization suite.** It is an experimental `dinput8.dll` proxy; modules overlapping with Parallel Universe Patch (PUP) are excluded from the build. Building and packaging were checked; runtime compatibility with PUP **was not tested**.
+G3O currently builds a DirectInput `dinput8.dll` proxy. Only `src/dinput8_proxy.cpp`, `src/main.cpp`, and `src/version_watermark.cpp` are included: they attempt to show a menu version label and load G3SE plugins if `G3SDK.dll`/`G3SE.dll` is available. Other `src/*.cpp` files are excluded; `gothic3sdk` is not linked. G3O does not duplicate Parallel Universe Patch (PUP) engine tweaks. This G3O build has not been tested in-game with PUP.
 
-## What is actually built into the DLL
+## DXVK and GPUs
 
-| Source | Actual code behavior | Verification |
-| --- | --- | --- |
-| `src/dinput8_proxy.cpp` | Exports `DirectInput8Create` and forwards it to the system `dinput8.dll`; returns `E_FAIL` if loading fails. | Export verified; not tested in game. |
-| `src/main.cpp` | Starts an initialization thread, initializes MinHook and attempts the optional actions below. | Builds; not tested in game. |
-| `src/version_watermark.cpp` | Attempts to hook `CFFGFCWnd::SetWindowTextA` and append `G3O v1.3.1` to a matching version string. No matching export or string means no label. | Builds; label not verified in game. |
+DXVK is a separate Direct3D 9-to-Vulkan layer. It does not add textures, shadows, or HDR; set textures, shadows, draw distance and anti-aliasing in the game. Every DXVK archive contains `d3d9.dll`, `dxgi.dll`, and `dxvk.conf`.
 
-`src/main.cpp` also tries to load a third-party `G3SDK.dll` or `G3SE.dll` and call its `LoadPlugins` export for `Data\\G3SE\\Plugins`. Neither DLL exists in the supplied game installation: plugin loading has not been demonstrated there. This is **not** integration with `E:\Projects\gothic3sdk`: its headers and libraries are not linked. MinHook is the only third-party library included in the build.
-
-## Present in the repository, but not active in the current DLL
-
-None of these files is in the `dinput8` target in `CMakeLists.txt` or called from the current `src/main.cpp`. Source files remaining in the tree do **not** make these features available:
-
-| Source | Subject of remaining code |
+| G3O package | Difference |
 | --- | --- |
-| `src/combat_guard.cpp` | Character culling. |
-| `src/cpu_topology.cpp` | Process-wide performance-core affinity. |
-| `src/d3d9_hook.cpp` | GPU capability checks. |
-| `src/fall_guard.cpp` | Fall recovery. |
-| `src/high_memory_cache.cpp` | Cache beyond the x86 address space. |
-| `src/lfh_enforcer.cpp` | LFH heap settings. |
-| `src/lru_cache_manager.cpp` | Resource-cache tracking and cleanup. |
-| `src/math_simd_optimizer.cpp` | Math/physics hooks. |
-| `src/media_optimizer.cpp` | Decompression, FMOD, timer, and video code. |
-| `src/memory_allocator.cpp` | Memory-allocator replacement. |
-| `src/multicore_manager.cpp` | Engine thread-pool changes. |
-| `src/physics_stabilizer.cpp` | PhysX changes. |
-| `src/savegame_guard.cpp` | Save backup and validation. |
-| `src/streaming_optimizer.cpp` | Sector prefetching. |
+| `1.10.1-async` | Older version for older drivers; async is experimental. |
+| `1.10.3-async` | Later 1.x version; the user reports it works with `samplerAnisotropy = -1`. |
+| `2.4.1` | Requires Vulkan 1.3; adds compilation and texture-sharpness options. |
+| `3.0.1` | Requires Vulkan 1.4 and the necessary driver features; some old options are gone. |
+| `3.0.1-hdr` | Legacy archive name: its DLLs match `3.0.1`; Gothic 3 does not gain HDR. |
 
-`heavens_gate/` and its test source are also excluded from the build. `mimalloc` and `libdeflate` remain in `.gitmodules` but are not linked to the DLL. G3O **does not accelerate** world loading, threading, decompression, rendering, or physics; it **does not protect saves** or move textures to VRAM.
+| GPU | Choice |
+| --- | --- |
+| AMD RX 570 8 GB on this PC | The log reports Vulkan 1.3.260: keep the working `1.10.3-async` or compare it separately with `2.4.1`. This driver does not meet `3.0.1`'s Vulkan requirement. |
+| NVIDIA | Choose by the DXVK log's Vulkan version: older drivers — 1.x, Vulkan 1.3 — 2.4.1, Vulkan 1.4 — 3.0.1. |
+| Intel | The same Vulkan rule applies; the vendor name alone does not call for a special config. |
 
-## PUP and separate DXVK packages
+On the RX 570, forcing `d3d9.samplerAnisotropy = 16` caused red noise. `-1` or omitting the line leaves filtering to the game and cleared the noise (user-reported). Back up a working config and change one option at a time.
 
-The local v1.1.1 `Parallel Universe Patch/Changelog_en.txt` describes PUP's own changes to resource threads, caches, prefetching, file system, FMOD, textures, and save writes. G3O therefore excludes the corresponding modules. This **does not prove** runtime compatibility.
+**Do not install the old `dist/packages/DXVK-1.10.3-Async.zip`:** another process has locked it, and it still contains `samplerAnisotropy = 16`. The verified archive with the safe config is `DXVK-1.10.3-Async-safe.zip`.
 
-`resources/dxvk/` contains third-party DXVK builds. `scripts/package_releases.ps1` creates one core archive (`dinput8.dll`, `README_INSTALL.txt`) and five separate DXVK archives (`d3d9.dll`, `dxgi.dll`, `dxvk.conf`, `README_DXVK.txt`). DXVK is not embedded in the core or implemented by G3O code. Packaging does not run or test the game.
+For the highest image quality, start with maximum in-game settings and compare `2.4.1` with the current version. On `2.4.1`, try `d3d9.samplerLodBias = -0.25` separately for sharper textures; remove it if it shimmers. Forced filtering, anti-aliasing, and HDR are not part of the safe preset.
 
-DXVK configs do not force texture filtering, depth formats, frame latency, or HDR. Only `1.10.1-async` and `1.10.3-async` enable experimental asynchronous compilation. The `3.0.1-hdr` archive retains its legacy name but uses SDR defaults for Gothic 3: a DXGI HDR setting cannot enable HDR in a D3D9 game. Repository changes do not update an existing `dxvk.conf` in the game folder; in-game behavior has not been tested.
+## `dxvk.conf` options
 
-## Build and test installation
+Place the file next to `Gothic3.exe`. G3O packages use DXVK defaults; only `-async` variants contain `dxvk.enableAsync = true`. This table covers options previously used in G3O and options that can change Gothic 3's image. **1** = 1.10.1/1.10.3, **2** = 2.4.1, **3** = 3.0.1. Omit a key to use the DXVK default.
+
+| Key | Versions | Meaning |
+| --- | --- | --- |
+| `d3d9.samplerAnisotropy` | 1/2/3 | Forces filtering on all textures; `-1` lets the game choose, `16` broke the image here. |
+| `d3d9.seamlessCubes` | 1.10.3/2/3 | Cube-map seams; change only if seams are visible. |
+| `d3d9.samplerLodBias` | 2/3 | Negative values sharpen textures but add shimmer. |
+| `d3d9.clampNegativeLodBias` | 2/3 | Prevents excessive texture sharpening; may reduce shimmer. |
+| `d3d9.forceSwapchainMSAA` | 1/2 | Forced anti-aliasing; may break post-processing; removed in 3. |
+| `d3d9.forceSampleRateShading` | 2/3 | Per-sample MSAA shading; expensive and may produce artifacts. |
+| `dxvk.enableAsync` | async 1.x forks only | Non-blocking compilation; no image-quality gain. |
+| `dxvk.numCompilerThreads` | 1/2/3 | Compiler threads; `0` selects automatically. |
+| `d3d9.maxFrameLatency` | 1/2/3 | Frame latency, not image quality. |
+| `d3d9.deferSurfaceCreation` | 1/2/3 | Workaround for a black window in some games. |
+| `d3d9.memoryTrackTest` | 1/2/3 | Memory-tracking test; does not add VRAM. |
+| `d3d9.tearFree` / `dxvk.tearFree` | 1 / 2,3 | Presentation: tearing and smoothness, not detail. |
+| `d3d9.supportD32` | 1 | Enables the D32 depth format; usually already enabled. |
+| `d3d9.useD32forD24` | 2/3 | Forces a depth-format substitution; not in 1.x, usually unnecessary on AMD. |
+| `d3d9.invariantPosition` | 1/2 | Reduces flicker between overlapping surfaces; removed in 3. |
+| `d3d9.floatEmulation` | 1/2/3 | Arithmetic accuracy; `Strict` may be slower. |
+| `dxvk.enableGraphicsPipelineLibrary` | 2/3 | Pipeline compilation; leave at the default `Auto`. |
+| `dxvk.trackPipelineLifetime` | 2/3 | Pipeline cleanup in a 32-bit game; no image-quality gain. |
+| `dxgi.enableHDR` | 2/3 | HDR for DXGI, not for D3D9-based Gothic 3. |
+| `dxvk.logLevel` | none | Invalid old key; use the `DXVK_LOG_LEVEL` environment variable. |
+| `dxvk.trackPipelines` | none | Invalid old G3O key; not `trackPipelineLifetime`. |
+| `dxvk.enableHDR` | none | Invalid old G3O key; does not enable HDR. |
+| `d3d9.enableHDR` | none | Invalid old G3O key; does not enable HDR. |
+
+Complete option lists: [1.10.1](https://github.com/doitsujin/dxvk/blob/v1.10.1/dxvk.conf), [1.10.3](https://github.com/doitsujin/dxvk/blob/v1.10.3/dxvk.conf), [2.4.1](https://github.com/doitsujin/dxvk/blob/v2.4.1/dxvk.conf), [3.0.1](https://github.com/doitsujin/dxvk/blob/v3.0.1/dxvk.conf). [Driver requirements](https://github.com/doitsujin/dxvk/wiki/Driver-support); [async fork](https://github.com/Sporif/dxvk-async).
+
+## Build
 
 ```cmd
 git submodule update --init third_party/minhook
@@ -53,8 +68,4 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
 cmake --build build --config Release
 ```
 
-Output: `build/Release/dinput8.dll`. Packaging: `powershell -ExecutionPolicy Bypass -File .\scripts\package_releases.ps1`, output in `dist/packages/`. The 1.3.1 core archive was checked for contents and for a DLL matching the build; this is **not** an in-game test.
-
-Before installing, identify and back up any `dinput8.dll` already present next to `Gothic3.exe`: replacing it may disable another mod. Game files were not changed here. Features described for older 1.3.0 releases do not apply to this build.
-
-Source license: [MIT](LICENSE). PUP, DXVK, and gothic3sdk are separate projects.
+DLL: `build/Release/dinput8.dll`; archives: `scripts/package_releases.ps1`. Identify and back up any existing game-folder `dinput8.dll` before replacing it: another mod may own it. Editing this repository does not change the installed game. Source license: [MIT](LICENSE).
