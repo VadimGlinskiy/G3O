@@ -2,7 +2,17 @@
 
 [Русский](README.md)
 
-G3O v1.3.1 is a `dinput8.dll` proxy with a version label in the menu. If G3SE is installed, it attempts to load its plugins. The v1.3.0 engine optimizations are absent to avoid overlap with Parallel Universe Patch (PUP). In-game compatibility with PUP has not been tested.
+G3O v1.3.1 is a `dinput8.dll` proxy with a version label in the menu, built-in **Crash Investigator**, and **Diagnostic Logger**. If G3SE is installed, it attempts to load its plugins. The v1.3.0 engine optimizations are absent to avoid overlap with Parallel Universe Patch (PUP). In-game compatibility with PUP has not been tested.
+
+## Diagnostic Features
+- **Crash Investigator:** Catches fatal crashes (Access Violations, Stack Overflows, etc.) before the legacy "Where is the guru?" prompt and accurately blames the faulting module:
+  - Script mods (`scripts\Script_*.dll`);
+  - Third-party overlays (Bandicam `bdcamvk32.dll`, RTSS `RTSSHooks.dll`, Discord, Steam);
+  - Graphics drivers and translation layers (`amdvlk32.dll`, `nvoglv32.dll`, DXVK `d3d9.dll`);
+  - Core engine faults and 32-bit virtual address space exhaustion (>3.6 GB).
+- **Stack Walking & Root-Cause Analysis:** Identifies when a script mod provoked an engine crash higher in the call stack.
+- **Detailed Reports & MiniDumps:** Generates `G3O_CrashReport.log`, a full `.dmp` minidump, and a clear error dialog with actionable recommendations.
+- **Diagnostic Logger:** Records `G3O_diagnostic.log`, capturing engine messages (`DiagOutput`) and system debug output (`OutputDebugStringA`).
 
 ## Install
 

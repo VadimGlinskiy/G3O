@@ -22,6 +22,10 @@ add_library(dinput8 SHARED
     src/dinput8.def
     src/version_watermark.cpp
     src/version_watermark.h
+    src/diagnostic_logger.cpp
+    src/diagnostic_logger.h
+    src/crash_handler.cpp
+    src/crash_handler.h
 )
 
 target_include_directories(dinput8 PRIVATE
@@ -31,6 +35,8 @@ target_include_directories(dinput8 PRIVATE
 
 target_link_libraries(dinput8 PRIVATE
     minhook
+    dbghelp
+    psapi
 )
 
 # Output name must be dinput8.dll
@@ -38,4 +44,3 @@ set_target_properties(dinput8 PROPERTIES
     OUTPUT_NAME "dinput8"
     PREFIX ""
 )
-
