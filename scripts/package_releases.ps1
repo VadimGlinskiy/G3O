@@ -125,7 +125,7 @@ $($v.Desc)
 INCLUDED FILES:
 - d3d9.dll   (DirectX 9 to Vulkan translation layer)
 - dxgi.dll   (DXGI interface)
-- dxvk.conf  (Upstream defaults; only async archives enable async compilation)
+- dxvk.conf  (Safe window/overlay creation enabled; async archives also enable async compilation)
 
 INSTALLATION:
 1. Extract all files from this archive directly into your Gothic 3 game folder

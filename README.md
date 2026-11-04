@@ -30,7 +30,7 @@ DXVK запускает графику Direct3D 9 через Vulkan. Новых 
 
 ## Настройка DXVK
 
-`dxvk.conf` лежит рядом с `Gothic3.exe`. В наших архивах только одна активная настройка: `dxvk.enableAsync = true` в версиях `-async`.
+`dxvk.conf` лежит рядом с `Gothic3.exe`. Во всех наших архивах по умолчанию включена безопасная инициализация окон и оверлеев `d3d9.deferSurfaceCreation = True`, а в версиях `-async` также активна фоновая компиляция `dxvk.enableAsync = true`.
 
 На RX 570 принудительная анизотропия `d3d9.samplerAnisotropy = 16` давала красную рябь. С `-1` она исчезла. В `3.0.1` не включайте `d3d9.supportCubeDepthFormats`: DXVK предупреждает о проблемах с Gothic 3.
 

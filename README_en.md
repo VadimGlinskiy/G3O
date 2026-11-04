@@ -30,7 +30,7 @@ DXVK runs the game's Direct3D 9 graphics through Vulkan; it does not add texture
 
 ## DXVK settings
 
-Put `dxvk.conf` next to `Gothic3.exe`. Our packages have just one active override: `dxvk.enableAsync = true` in the two `-async` versions.
+Put `dxvk.conf` next to `Gothic3.exe`. All of our packages enable safe window and overlay initialization via `d3d9.deferSurfaceCreation = True` by default; the `-async` versions also enable background shader compilation with `dxvk.enableAsync = true`.
 
 Forcing `d3d9.samplerAnisotropy = 16` caused red artifacts on an RX 570. Changing it to `-1` stopped them. Do not enable `d3d9.supportCubeDepthFormats` in `3.0.1`: DXVK warns about problems with Gothic 3.
 
