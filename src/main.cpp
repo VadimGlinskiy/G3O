@@ -4,6 +4,8 @@
 #include "version_watermark.h"
 #include "diagnostic_logger.h"
 #include "crash_handler.h"
+#include "borderless_window.h"
+#include "camera_controller.h"
 
 static DWORD WINAPI OptimaInitThread(LPVOID) {
     MH_STATUS status = MH_Initialize();
@@ -19,6 +21,15 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     G3O::InitializeCrashHandler();
     G3O::HookLoggingFunctions();
 
+    // Initialize Borderless Fullscreen manager
+    G3O::InitializeBorderlessWindow();
+
+    // Optional ReShade integration
+    HMODULE hReShade = LoadLibraryA("ReShade32.dll");
+    if (hReShade) {
+        G3O::Log("G3O", "ReShade 6.8.0 post-processing pipeline loaded successfully.");
+    }
+
     // Only the UI label needs engine exports; leave PUP's subsystems untouched.
     int maxWaitMs = 5000;
     while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("GFC.dll")) && maxWaitMs > 0) {
@@ -29,6 +40,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // Hook engine DiagOutput and Fatal Error handlers once SharedBase.dll is available
     G3O::HookEngineFatalErrors();
     G3O::HookLoggingFunctions();
+
+    // Hook camera controller for dynamic widescreen FOV
+    G3O::InitializeCameraController();
 
     InitializeVersionHook();
 
@@ -45,7 +59,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         }
     }
 
-    G3O::Log("G3O", "PUP-compatible core with Crash Investigator and Diagnostic Logging initialized.");
+    G3O::Log("G3O", "PUP-compatible core with Borderless Window, Dynamic FOV, and Crash Investigator initialized.");
     OutputDebugStringA("[Gothic3Optima] PUP-compatible core initialized.\n");
     return 0;
 }
@@ -58,6 +72,8 @@ static void ShutdownOptima() {
         UnloadAll_t unload = (UnloadAll_t)GetProcAddress(hG3SE, "?UnloadAllPlugins@G3SDK@@YAXXZ");
         if (unload) unload();
     }
+    G3O::ShutdownCameraController();
+    G3O::ShutdownBorderlessWindow();
     G3O::ShutdownCrashHandler();
     G3O::ShutdownDiagnosticLogger();
     MH_DisableHook(MH_ALL_HOOKS);

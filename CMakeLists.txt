@@ -26,6 +26,10 @@ add_library(dinput8 SHARED
     src/diagnostic_logger.h
     src/crash_handler.cpp
     src/crash_handler.h
+    src/borderless_window.cpp
+    src/borderless_window.h
+    src/camera_controller.cpp
+    src/camera_controller.h
 )
 
 target_include_directories(dinput8 PRIVATE
