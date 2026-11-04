@@ -30,6 +30,8 @@ add_library(dinput8 SHARED
     src/borderless_window.h
     src/camera_controller.cpp
     src/camera_controller.h
+    src/config_manager.cpp
+    src/config_manager.h
 )
 
 target_include_directories(dinput8 PRIVATE

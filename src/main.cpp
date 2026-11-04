@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <minhook.h>
 #include "dinput8_proxy.h"
+#include "config_manager.h"
 #include "version_watermark.h"
 #include "diagnostic_logger.h"
 #include "crash_handler.h"
@@ -17,14 +18,27 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
 
     Proxy::LoadSystemDirectInput();
 
-    // Hook OutputDebugStringA and install crash interception hooks
-    G3O::InitializeCrashHandler();
-    G3O::HookLoggingFunctions();
+    const G3O::Config& cfg = G3O::GetConfig();
+
+    if (!cfg.enableG3O) {
+        G3O::Log("G3O", "G3O is globally disabled via G3O.ini (EnableG3O=false). Operating in pure proxy mode.");
+        return 0;
+    }
+
+    // Initialize crash handler and diagnostic logging hooks
+    if (cfg.enableCrashInvestigator) {
+        G3O::InitializeCrashHandler();
+    }
+    if (cfg.interceptOutputDebugString) {
+        G3O::HookLoggingFunctions();
+    }
 
     // Initialize Borderless Fullscreen manager
-    G3O::InitializeBorderlessWindow();
+    if (cfg.enableBorderless) {
+        G3O::InitializeBorderlessWindow();
+    }
 
-    // Only the UI label needs engine exports; leave PUP's subsystems untouched.
+    // Wait for engine libraries before installing engine-level hooks
     int maxWaitMs = 5000;
     while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("GFC.dll")) && maxWaitMs > 0) {
         Sleep(2);
@@ -32,24 +46,35 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     }
 
     // Hook engine DiagOutput and Fatal Error handlers once SharedBase.dll is available
-    G3O::HookEngineFatalErrors();
-    G3O::HookLoggingFunctions();
+    if (cfg.enableCrashInvestigator) {
+        G3O::HookEngineFatalErrors();
+    }
+    if (cfg.interceptOutputDebugString) {
+        G3O::HookLoggingFunctions();
+    }
 
     // Hook camera controller for dynamic widescreen FOV
-    G3O::InitializeCameraController();
+    if (cfg.enableDynamicFOV) {
+        G3O::InitializeCameraController();
+    }
 
-    InitializeVersionHook();
+    // Main menu version watermark
+    if (cfg.showWatermark) {
+        InitializeVersionHook();
+    }
 
     // Optional legacy G3SE plugin loader (not part of gothic3sdk).
-    HMODULE hG3SE = LoadLibraryA("G3SDK.dll");
-    if (!hG3SE) hG3SE = LoadLibraryA("G3SE.dll");
-    if (hG3SE) {
-        typedef void (*LoadPlugins_t)(const char*);
-        LoadPlugins_t loadPlugins = (LoadPlugins_t)GetProcAddress(hG3SE, "?LoadPlugins@G3SDK@@YAXPBD@Z");
-        if (loadPlugins) {
-            loadPlugins("Data\\G3SE\\Plugins");
-            G3O::Log("G3O", "Legacy G3SE plugins loaded from Data\\G3SE\\Plugins.");
-            OutputDebugStringA("[Gothic3Optima] G3SE plugins loaded.\n");
+    if (cfg.loadG3SEPlugins) {
+        HMODULE hG3SE = LoadLibraryA("G3SDK.dll");
+        if (!hG3SE) hG3SE = LoadLibraryA("G3SE.dll");
+        if (hG3SE) {
+            typedef void (*LoadPlugins_t)(const char*);
+            LoadPlugins_t loadPlugins = (LoadPlugins_t)GetProcAddress(hG3SE, "?LoadPlugins@G3SDK@@YAXPBD@Z");
+            if (loadPlugins) {
+                loadPlugins("Data\\G3SE\\Plugins");
+                G3O::Log("G3O", "Legacy G3SE plugins loaded from Data\\G3SE\\Plugins.");
+                OutputDebugStringA("[Gothic3Optima] G3SE plugins loaded.\n");
+            }
         }
     }
 
@@ -80,12 +105,21 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD reason, LPVOID reserved) {
     case DLL_PROCESS_ATTACH: {
         DisableThreadLibraryCalls(hinstDLL);
 
-        // Prevent known unstable 32-bit Vulkan implicit layers (such as Bandicam's bdcamvk32.dll)
-        // from crashing DXVK during swapchain creation, while keeping screen capture operational.
-        SetEnvironmentVariableA("DISABLE_VK_LAYER_bandicam_helper_1", "1");
+        // Load G3O.ini settings immediately
+        G3O::LoadConfig();
 
-        G3O::InitializeDiagnosticLogger();
+        if (G3O::GetConfig().fixVulkanLayerConflicts) {
+            // Prevent known unstable 32-bit Vulkan implicit layers (such as Bandicam's bdcamvk32.dll)
+            // from crashing DXVK during swapchain creation, while keeping screen capture operational.
+            SetEnvironmentVariableA("DISABLE_VK_LAYER_bandicam_helper_1", "1");
+        }
+
+        if (G3O::GetConfig().enableDiagnosticLog) {
+            G3O::InitializeDiagnosticLogger();
+        }
+
         G3O::Log("G3O", "Gothic 3 Optima loaded into process PID %lu.", GetCurrentProcessId());
+
         HANDLE thread = CreateThread(nullptr, 0, OptimaInitThread, nullptr, 0, nullptr);
         if (thread) CloseHandle(thread);
         break;

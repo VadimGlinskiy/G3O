@@ -1,5 +1,6 @@
 #include "crash_handler.h"
 #include "diagnostic_logger.h"
+#include "config_manager.h"
 #include <minhook.h>
 #include <dbghelp.h>
 #include <psapi.h>
@@ -505,38 +506,44 @@ static LONG HandleCrash(EXCEPTION_POINTERS* pExceptionInfo) {
     BlameResult blame = AnalyzeAddress(faultAddr);
     std::vector<StackFrameInfo> stackFrames = WalkCallStack(pExceptionInfo->ContextRecord);
 
-    WriteMiniDump(pExceptionInfo);
+    if (GetConfig().writeCrashDump) {
+        WriteMiniDump(pExceptionInfo);
+    }
 
     std::string report;
     BuildReportText(report, pExceptionInfo, blame, stackFrames);
-    SaveReportToFile(report);
+    if (GetConfig().writeCrashLog) {
+        SaveReportToFile(report);
+    }
 
-    // Prepare human-friendly message for popup dialog
-    char msg[2048];
-    snprintf(msg, sizeof(msg),
-             "Gothic 3 Optima — Обнаружен критический сбой!\n\n"
-             "Виновник сбоя: %s\n"
-             "Категория:     %s\n"
-             "Адрес сбоя:    0x%p (смещение +0x%X)\n"
-             "Код ошибки:    0x%08X\n\n"
-             "Описание:\n%s\n\n"
-             "Рекомендация:\n%s\n\n"
-             "Полный отчёт сохранён в:\n%s",
-             blame.moduleName.c_str(),
-             blame.category.c_str(),
-             (void*)faultAddr, (unsigned int)blame.rva,
-             pExceptionInfo->ExceptionRecord->ExceptionCode,
-             blame.description.c_str(),
-             blame.recommendation.c_str(),
-             s_crashLogPath);
+    if (GetConfig().showCrashDialog) {
+        // Prepare human-friendly message for popup dialog
+        char msg[2048];
+        snprintf(msg, sizeof(msg),
+                 "Gothic 3 Optima — Обнаружен критический сбой!\n\n"
+                 "Виновник сбоя: %s\n"
+                 "Категория:     %s\n"
+                 "Адрес сбоя:    0x%p (смещение +0x%X)\n"
+                 "Код ошибки:    0x%08X\n\n"
+                 "Описание:\n%s\n\n"
+                 "Рекомендация:\n%s\n\n"
+                 "Полный отчёт сохранён в:\n%s",
+                 blame.moduleName.c_str(),
+                 blame.category.c_str(),
+                 (void*)faultAddr, (unsigned int)blame.rva,
+                 pExceptionInfo->ExceptionRecord->ExceptionCode,
+                 blame.description.c_str(),
+                 blame.recommendation.c_str(),
+                 s_crashLogPath);
 
-    int wideLen = MultiByteToWideChar(CP_UTF8, 0, msg, -1, nullptr, 0);
-    if (wideLen > 0) {
-        std::vector<wchar_t> wideMsg(wideLen);
-        MultiByteToWideChar(CP_UTF8, 0, msg, -1, wideMsg.data(), wideLen);
-        MessageBoxW(NULL, wideMsg.data(), L"Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
-    } else {
-        MessageBoxA(NULL, msg, "Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+        int wideLen = MultiByteToWideChar(CP_UTF8, 0, msg, -1, nullptr, 0);
+        if (wideLen > 0) {
+            std::vector<wchar_t> wideMsg(wideLen);
+            MultiByteToWideChar(CP_UTF8, 0, msg, -1, wideMsg.data(), wideLen);
+            MessageBoxW(NULL, wideMsg.data(), L"Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+        } else {
+            MessageBoxA(NULL, msg, "Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+        }
     }
 
     // Log to debugger before leaving

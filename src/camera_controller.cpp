@@ -1,5 +1,6 @@
 #include "camera_controller.h"
 #include "diagnostic_logger.h"
+#include "config_manager.h"
 #include <minhook.h>
 #include <cmath>
 
@@ -43,6 +44,10 @@ float GetCurrentFOV() {
 void InitializeCameraController() {
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
     if (!hEngine) return;
+
+    s_customFOV = GetConfig().defaultFOV;
+    if (s_customFOV < 50.0f) s_customFOV = 50.0f;
+    if (s_customFOV > 115.0f) s_customFOV = 115.0f;
 
     void* pSetFOV = (void*)GetProcAddress(hEngine, "?SetFieldOfView@eCCameraBase@@QAEXABM@Z");
     if (pSetFOV) {
