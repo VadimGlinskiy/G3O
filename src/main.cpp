@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <minhook.h>
 #include <timeapi.h>
 #include "dinput8_proxy.h"
@@ -12,6 +12,7 @@
 #include "d3d9_hook.h"
 #include "profiler.h"
 #include "cpu_topology.h"
+#include "vegetation_optimizer.h"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -65,9 +66,14 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeMathSIMDOptimizer();
     }
 
-    // Direct3D 9 State Redundancy Filter
-    if (cfg.enableD3D9StateFilter || cfg.enableProfiler) {
+    // Direct3D 9 State Redundancy Filter & Fast Texture Loader
+    if (cfg.enableD3D9StateFilter || cfg.enableFastTextureLoader || cfg.enableProfiler) {
         G3O::InitializeD3D9Optimizer();
+    }
+
+    // Vegetation & SpeedTree Optimizer (clamps invisible distant tree shadows on terrain)
+    if (cfg.enableVegetationOptimizer) {
+        G3O::InitializeVegetationOptimizer();
     }
 
     if (cfg.enableProfiler) {
@@ -113,6 +119,7 @@ static void ShutdownOptima() {
         if (unload) unload();
     }
     G3O::ShutdownMathSIMDOptimizer();
+    G3O::ShutdownVegetationOptimizer();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();
     G3O::ShutdownCameraController();

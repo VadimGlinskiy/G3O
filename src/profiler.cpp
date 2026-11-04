@@ -1,5 +1,6 @@
-﻿#include "profiler.h"
+#include "profiler.h"
 #include "diagnostic_logger.h"
+#include "d3d9_hook.h"
 #include <minhook.h>
 #include <d3d9.h>
 #include <tlhelp32.h>
@@ -89,6 +90,7 @@ typedef HRESULT (STDMETHODCALLTYPE* Present_t)(IDirect3DDevice9*, const RECT*, c
 static Present_t Real_Present = NULL;
 
 static HRESULT STDMETHODCALLTYPE Hooked_Present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND w, const RGNDATA* d) {
+    InvalidateD3D9StateCaches();
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (s_lastFrame.QuadPart) {

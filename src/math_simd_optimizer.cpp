@@ -157,7 +157,32 @@ static bool __fastcall Hooked_CompareFast(const void* pThis, void* /*edx*/, cons
 }
 
 // ---------------------------------------------------------------------------
-// 5. Windows NT Environment Detection Bypass (_IsNT@0)
+// 5. Fast Case-Insensitive String Compare (bCString::CompareNoCaseFast)
+// Avoids _stricmp overhead by utilizing pointer equality and length pre-checks.
+// ---------------------------------------------------------------------------
+
+typedef bool (__thiscall* CompareNoCaseFast_t)(const void* pThis, const void* pOther);
+static CompareNoCaseFast_t Real_CompareNoCaseFast = NULL;
+
+static bool __fastcall Hooked_CompareNoCaseFast(const void* pThis, void* /*edx*/, const void* pOther) {
+    if (!pThis || !pOther) return pThis == pOther;
+
+    const char* str1 = *(const char* const*)pThis;
+    const char* str2 = *(const char* const*)pOther;
+
+    if (str1 == str2) return true;
+    if (!str1 || !str2) return false;
+
+    int len1 = *(const int*)(str1 - 8);
+    int len2 = *(const int*)(str2 - 8);
+    if (len1 != len2) return false;
+    if (len1 <= 0) return true;
+
+    return _stricmp(str1, str2) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// 6. Windows NT Environment Detection Bypass (_IsNT@0)
 // The engine repeatedly invokes _IsNT@0 (2.8% - 3.8% of CPU frame time) to check
 // if it is running on Windows 95/98 vs NT, allocating 152 bytes of stack on every call.
 // We return TRUE immediately.
@@ -214,7 +239,16 @@ void InitializeMathSIMDOptimizer() {
         }
     }
 
-    // 5. Hook _IsNT@0 at 0x1006B1C0
+    // 5. Hook bCString::CompareNoCaseFast at 0x10004250
+    void* pCompareNoCaseFast = (void*)GetProcAddress(hSharedBase, "?CompareNoCaseFast@bCString@@QBE_NABV1@@Z");
+    if (pCompareNoCaseFast) {
+        if (MH_CreateHook(pCompareNoCaseFast, (LPVOID)Hooked_CompareNoCaseFast, (LPVOID*)&Real_CompareNoCaseFast) == MH_OK) {
+            MH_EnableHook(pCompareNoCaseFast);
+            Log("G3O", "Fast Case-Insensitive String Compare hooked (?CompareNoCaseFast@bCString).");
+        }
+    }
+
+    // 6. Hook _IsNT@0 at 0x1006B1C0
     void* pIsNT = (void*)GetProcAddress(hSharedBase, "_IsNT@0");
     if (pIsNT) {
         if (MH_CreateHook(pIsNT, (LPVOID)Hooked_IsNT, (LPVOID*)&Real_IsNT) == MH_OK) {
@@ -239,6 +273,9 @@ void ShutdownMathSIMDOptimizer() {
 
     void* pCompareFast = (void*)GetProcAddress(hSharedBase, "?CompareFast@bCString@@QBE_NABV1@@Z");
     if (pCompareFast) MH_DisableHook(pCompareFast);
+
+    void* pCompareNoCaseFast = (void*)GetProcAddress(hSharedBase, "?CompareNoCaseFast@bCString@@QBE_NABV1@@Z");
+    if (pCompareNoCaseFast) MH_DisableHook(pCompareNoCaseFast);
 
     void* pIsNT = (void*)GetProcAddress(hSharedBase, "_IsNT@0");
     if (pIsNT) MH_DisableHook(pIsNT);

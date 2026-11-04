@@ -1,4 +1,4 @@
-﻿#include "d3d9_hook.h"
+#include "d3d9_hook.h"
 #include "diagnostic_logger.h"
 #include "config_manager.h"
 #include "profiler.h"
@@ -38,7 +38,7 @@ static SetSamplerState_t Real_SetSamplerState = NULL;
 typedef HRESULT (STDMETHODCALLTYPE* Reset_t)(IDirect3DDevice9* This, D3DPRESENT_PARAMETERS* pPresentationParameters);
 static Reset_t Real_Reset = NULL;
 
-static void InvalidateStateCaches() {
+void InvalidateD3D9StateCaches() {
     memset(s_renderStateValid, 0, sizeof(s_renderStateValid));
     memset(s_stageStateValid, 0, sizeof(s_stageStateValid));
     memset(s_samplerStateValid, 0, sizeof(s_samplerStateValid));
@@ -78,8 +78,142 @@ static HRESULT STDMETHODCALLTYPE Hooked_SetSamplerState(IDirect3DDevice9* This, 
 }
 
 static HRESULT STDMETHODCALLTYPE Hooked_Reset(IDirect3DDevice9* This, D3DPRESENT_PARAMETERS* pPresentationParameters) {
-    InvalidateStateCaches();
+    InvalidateD3D9StateCaches();
     return Real_Reset(This, pPresentationParameters);
+}
+
+// ---------------------------------------------------------------------------
+// Fast Texture Loader (D3DX Optimization)
+// Eliminates CPU triangle mip-filtering and dither calculations during save loading
+// ---------------------------------------------------------------------------
+#define D3DX_FILTER_NONE     (1 << 0)
+#define D3DX_FILTER_POINT    (2 << 0)
+#define D3DX_FILTER_LINEAR   (3 << 0)
+#define D3DX_FILTER_TRIANGLE (4 << 0)
+#define D3DX_FILTER_BOX      (5 << 0)
+#define D3DX_DEFAULT         ((DWORD)-1)
+
+typedef HRESULT (WINAPI* D3DXCreateTextureFromFileInMemoryEx_t)(
+    LPDIRECT3DDEVICE9         pDevice,
+    LPCVOID                   pSrcData,
+    UINT                      SrcDataSize,
+    UINT                      Width,
+    UINT                      Height,
+    UINT                      MipLevels,
+    DWORD                     Usage,
+    D3DFORMAT                 Format,
+    D3DPOOL                   Pool,
+    DWORD                     Filter,
+    DWORD                     MipFilter,
+    D3DCOLOR                  ColorKey,
+    void*                     pSrcInfo,
+    PALETTEENTRY*             pPalette,
+    LPDIRECT3DTEXTURE9*       ppTexture
+);
+static D3DXCreateTextureFromFileInMemoryEx_t Real_D3DXCreateTextureFromFileInMemoryEx = NULL;
+
+static HRESULT WINAPI Hooked_D3DXCreateTextureFromFileInMemoryEx(
+    LPDIRECT3DDEVICE9         pDevice,
+    LPCVOID                   pSrcData,
+    UINT                      SrcDataSize,
+    UINT                      Width,
+    UINT                      Height,
+    UINT                      MipLevels,
+    DWORD                     Usage,
+    D3DFORMAT                 Format,
+    D3DPOOL                   Pool,
+    DWORD                     Filter,
+    DWORD                     MipFilter,
+    D3DCOLOR                  ColorKey,
+    void*                     pSrcInfo,
+    PALETTEENTRY*             pPalette,
+    LPDIRECT3DTEXTURE9*       ppTexture
+) {
+    if (GetConfig().enableFastTextureLoader) {
+        bool isDDS = false;
+        DWORD ddsMipCount = 0;
+        if (pSrcData && SrcDataSize >= 128) {
+            const DWORD* dw = (const DWORD*)pSrcData;
+            if (dw[0] == 0x20534444) { // 'DDS '
+                isDDS = true;
+                ddsMipCount = dw[7]; // dwMipMapCount in DDS_HEADER
+            }
+        }
+
+        if (isDDS && ddsMipCount > 1) {
+            // Pre-generated DDS mipmaps: skip expensive CPU filtering entirely
+            if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
+                MipFilter = D3DX_FILTER_NONE;
+            }
+            if (Filter == D3DX_DEFAULT) {
+                Filter = D3DX_FILTER_LINEAR;
+            }
+        } else {
+            // Mip generation needed: replace heavy CPU triangle filtering with fast 2x2 box filtering
+            if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
+                MipFilter = D3DX_FILTER_BOX;
+            }
+            if (Filter == D3DX_DEFAULT) {
+                Filter = D3DX_FILTER_LINEAR;
+            }
+        }
+    }
+
+    return Real_D3DXCreateTextureFromFileInMemoryEx(
+        pDevice, pSrcData, SrcDataSize, Width, Height,
+        MipLevels, Usage, Format, Pool, Filter, MipFilter,
+        ColorKey, pSrcInfo, pPalette, ppTexture
+    );
+}
+
+typedef HRESULT (WINAPI* D3DXCreateTextureFromFileExA_t)(
+    LPDIRECT3DDEVICE9         pDevice,
+    LPCSTR                    pSrcFile,
+    UINT                      Width,
+    UINT                      Height,
+    UINT                      MipLevels,
+    DWORD                     Usage,
+    D3DFORMAT                 Format,
+    D3DPOOL                   Pool,
+    DWORD                     Filter,
+    DWORD                     MipFilter,
+    D3DCOLOR                  ColorKey,
+    void*                     pSrcInfo,
+    PALETTEENTRY*             pPalette,
+    LPDIRECT3DTEXTURE9*       ppTexture
+);
+static D3DXCreateTextureFromFileExA_t Real_D3DXCreateTextureFromFileExA = NULL;
+
+static HRESULT WINAPI Hooked_D3DXCreateTextureFromFileExA(
+    LPDIRECT3DDEVICE9         pDevice,
+    LPCSTR                    pSrcFile,
+    UINT                      Width,
+    UINT                      Height,
+    UINT                      MipLevels,
+    DWORD                     Usage,
+    D3DFORMAT                 Format,
+    D3DPOOL                   Pool,
+    DWORD                     Filter,
+    DWORD                     MipFilter,
+    D3DCOLOR                  ColorKey,
+    void*                     pSrcInfo,
+    PALETTEENTRY*             pPalette,
+    LPDIRECT3DTEXTURE9*       ppTexture
+) {
+    if (GetConfig().enableFastTextureLoader) {
+        if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
+            MipFilter = D3DX_FILTER_BOX;
+        }
+        if (Filter == D3DX_DEFAULT) {
+            Filter = D3DX_FILTER_LINEAR;
+        }
+    }
+
+    return Real_D3DXCreateTextureFromFileExA(
+        pDevice, pSrcFile, Width, Height,
+        MipLevels, Usage, Format, Pool, Filter, MipFilter,
+        ColorKey, pSrcInfo, pPalette, ppTexture
+    );
 }
 
 static void InstallDeviceStateFilter(IDirect3DDevice9* pDevice) {
@@ -116,10 +250,15 @@ static eCDX9Device_ctor_t Real_eCDX9Device_ctor = NULL;
 static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDirect3DDevice9* pDevice) {
     void* result = Real_eCDX9Device_ctor(pThis, pDevice);
     if (pDevice) {
-        if (GetConfig().enableD3D9StateFilter) InstallDeviceStateFilter(pDevice);
-        if (GetConfig().enableProfiler && !s_presentHooked) {
+        if (GetConfig().enableD3D9StateFilter) {
+            InstallDeviceStateFilter(pDevice);
+        }
+        if (!s_presentHooked) {
             void** vtbl = *(void***)pDevice;
-            if (vtbl) { ProfilerHookPresent(vtbl); s_presentHooked = true; }
+            if (vtbl) {
+                ProfilerHookPresent(vtbl);
+                s_presentHooked = true;
+            }
         }
     }
     return result;
@@ -127,13 +266,36 @@ static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDir
 
 void InitializeD3D9Optimizer() {
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
-    if (!hEngine) return;
+    if (hEngine) {
+        void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");
+        if (pCtor) {
+            if (MH_CreateHook(pCtor, (LPVOID)Hooked_eCDX9Device_ctor, (LPVOID*)&Real_eCDX9Device_ctor) == MH_OK) {
+                MH_EnableHook(pCtor);
+                Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
+            }
+        }
+    }
 
-    void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");
-    if (pCtor) {
-        if (MH_CreateHook(pCtor, (LPVOID)Hooked_eCDX9Device_ctor, (LPVOID*)&Real_eCDX9Device_ctor) == MH_OK) {
-            MH_EnableHook(pCtor);
-            Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
+    // Fast Texture Loader in d3dx9_40.dll
+    if (GetConfig().enableFastTextureLoader) {
+        HMODULE hD3DX = GetModuleHandleA("d3dx9_40.dll");
+        if (!hD3DX) hD3DX = LoadLibraryA("d3dx9_40.dll");
+        if (hD3DX) {
+            void* pMemEx = (void*)GetProcAddress(hD3DX, "D3DXCreateTextureFromFileInMemoryEx");
+            if (pMemEx) {
+                if (MH_CreateHook(pMemEx, (LPVOID)Hooked_D3DXCreateTextureFromFileInMemoryEx, (LPVOID*)&Real_D3DXCreateTextureFromFileInMemoryEx) == MH_OK) {
+                    MH_EnableHook(pMemEx);
+                    Log("G3O", "Fast Texture Loader hooked (d3dx9_40.dll!D3DXCreateTextureFromFileInMemoryEx).");
+                }
+            }
+
+            void* pFileEx = (void*)GetProcAddress(hD3DX, "D3DXCreateTextureFromFileExA");
+            if (pFileEx) {
+                if (MH_CreateHook(pFileEx, (LPVOID)Hooked_D3DXCreateTextureFromFileExA, (LPVOID*)&Real_D3DXCreateTextureFromFileExA) == MH_OK) {
+                    MH_EnableHook(pFileEx);
+                    Log("G3O", "Fast Texture Loader hooked (d3dx9_40.dll!D3DXCreateTextureFromFileExA).");
+                }
+            }
         }
     }
 }
@@ -143,6 +305,13 @@ void ShutdownD3D9Optimizer() {
     if (hEngine) {
         void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");
         if (pCtor) MH_DisableHook(pCtor);
+    }
+    HMODULE hD3DX = GetModuleHandleA("d3dx9_40.dll");
+    if (hD3DX) {
+        void* pMemEx = (void*)GetProcAddress(hD3DX, "D3DXCreateTextureFromFileInMemoryEx");
+        if (pMemEx) MH_DisableHook(pMemEx);
+        void* pFileEx = (void*)GetProcAddress(hD3DX, "D3DXCreateTextureFromFileExA");
+        if (pFileEx) MH_DisableHook(pFileEx);
     }
 }
 
