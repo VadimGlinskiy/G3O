@@ -63,16 +63,16 @@ static inline uint64_t HashNormalizedPath(const char* str, size_t len) {
 }
 
 // -----------------------------------------------------------------------------
-// 4-Way Associative Flat Hash Cache
+// 4-Way Associative Flat Hash Cache with Exact Path Verification
 // -----------------------------------------------------------------------------
-// 16,384 buckets * 4 slots = 65,536 cache entries (~1 MB total footprint)
+// 16,384 buckets * 4 slots = 65,536 cache entries (~7 MB total footprint)
 static const size_t VFS_BUCKET_COUNT = 16384;
 static const size_t VFS_BUCKET_MASK = VFS_BUCKET_COUNT - 1;
 
 struct VFSSlot {
     uint64_t hash;
     const void* result;
-    uint8_t flags; // 0 = empty, 1 = valid result, 2 = negative cached (null)
+    char path[96];
 };
 
 struct VFSBucket {
@@ -100,14 +100,6 @@ typedef void (__thiscall* RemoveFromDirCache_t)(void* pThis, const void* pEastlS
 static RemoveFromDirCache_t Real_RemoveFromDirCache = nullptr;
 static void* s_targetRemoveFromDirCache = nullptr;
 
-typedef bool (__thiscall* UnmountPackFiles_t)(void* pThis, const void* pStr);
-static UnmountPackFiles_t Real_UnmountPackFiles = nullptr;
-static void* s_targetUnmountPackFiles = nullptr;
-
-typedef bool (__thiscall* UnmountDirectory_t)(void* pThis, const void* pStr);
-static UnmountDirectory_t Real_UnmountDirectory = nullptr;
-static void* s_targetUnmountDirectory = nullptr;
-
 static const void* __fastcall Hooked_GetDirCacheEntry(void* pThis, void* /*edx*/, const void* pEastlStr) {
     if (!pEastlStr) {
         return Real_GetDirCacheEntry(pThis, pEastlStr);
@@ -115,7 +107,7 @@ static const void* __fastcall Hooked_GetDirCacheEntry(void* pThis, void* /*edx*/
 
     size_t len = 0;
     const char* path = ExtractEastlString(pEastlStr, len);
-    if (len == 0 || !path) {
+    if (len == 0 || !path || len >= 96) {
         return Real_GetDirCacheEntry(pThis, pEastlStr);
     }
 
@@ -123,11 +115,13 @@ static const void* __fastcall Hooked_GetDirCacheEntry(void* pThis, void* /*edx*/
     size_t bucketIdx = (size_t)(hash & VFS_BUCKET_MASK);
     VFSBucket& bucket = s_buckets[bucketIdx];
 
-    // Read lock-free for fast path (slots are updated atomically or near-atomically)
+    // Read lock-free for fast path
     for (int i = 0; i < 4; ++i) {
-        if (bucket.slots[i].flags != 0 && bucket.slots[i].hash == hash) {
-            InterlockedIncrement(&s_vfsCacheHits);
-            return (bucket.slots[i].flags == 2) ? nullptr : bucket.slots[i].result;
+        if (bucket.slots[i].result != nullptr && bucket.slots[i].hash == hash) {
+            if (_stricmp(bucket.slots[i].path, path) == 0) {
+                InterlockedIncrement(&s_vfsCacheHits);
+                return bucket.slots[i].result;
+            }
         }
     }
 
@@ -135,15 +129,19 @@ static const void* __fastcall Hooked_GetDirCacheEntry(void* pThis, void* /*edx*/
     InterlockedIncrement(&s_vfsCacheMisses);
     const void* res = Real_GetDirCacheEntry(pThis, pEastlStr);
 
-    // Insert into cache
-    AcquireSRWLockExclusive(&s_cacheLock);
-    uint8_t slotIdx = bucket.nextVictim & 3;
-    bucket.nextVictim = (slotIdx + 1) & 3;
+    // CRITICAL: Only cache POSITIVE findings. NEVER cache nullptr,
+    // so scripts and dynamically generated files are never falsely hidden.
+    if (res != nullptr) {
+        AcquireSRWLockExclusive(&s_cacheLock);
+        uint8_t slotIdx = bucket.nextVictim & 3;
+        bucket.nextVictim = (slotIdx + 1) & 3;
 
-    bucket.slots[slotIdx].hash = hash;
-    bucket.slots[slotIdx].result = res;
-    bucket.slots[slotIdx].flags = (res != nullptr) ? 1 : 2; // 2 = negative cache
-    ReleaseSRWLockExclusive(&s_cacheLock);
+        bucket.slots[slotIdx].hash = hash;
+        bucket.slots[slotIdx].result = res;
+        strncpy(bucket.slots[slotIdx].path, path, sizeof(bucket.slots[slotIdx].path) - 1);
+        bucket.slots[slotIdx].path[sizeof(bucket.slots[slotIdx].path) - 1] = '\0';
+        ReleaseSRWLockExclusive(&s_cacheLock);
+    }
 
     return res;
 }
@@ -151,16 +149,6 @@ static const void* __fastcall Hooked_GetDirCacheEntry(void* pThis, void* /*edx*/
 static void __fastcall Hooked_RemoveFromDirCache(void* pThis, void* /*edx*/, const void* pEastlStr, bool a, bool b) {
     ClearVFSCache();
     Real_RemoveFromDirCache(pThis, pEastlStr, a, b);
-}
-
-static bool __fastcall Hooked_UnmountPackFiles(void* pThis, void* /*edx*/, const void* pStr) {
-    ClearVFSCache();
-    return Real_UnmountPackFiles(pThis, pStr);
-}
-
-static bool __fastcall Hooked_UnmountDirectory(void* pThis, void* /*edx*/, const void* pStr) {
-    ClearVFSCache();
-    return Real_UnmountDirectory(pThis, pStr);
 }
 
 bool InitializeVFSCacheOptimizer() {
@@ -174,7 +162,7 @@ bool InitializeVFSCacheOptimizer() {
         s_targetGetDirCacheEntry = pGetDir;
         MH_CreateHook(pGetDir, (LPVOID)Hooked_GetDirCacheEntry, (LPVOID*)&Real_GetDirCacheEntry);
         MH_EnableHook(pGetDir);
-        Log("G3O", "VFS Cache Optimizer: Hooked FileSystem.dll!GetDirCacheEntry (0x%p) with 64K O(1) hash cache.", pGetDir);
+        Log("G3O", "VFS Cache Optimizer: Hooked FileSystem.dll!GetDirCacheEntry (0x%p) with 64K O(1) verified hash cache.", pGetDir);
     }
 
     void* pRemove = (void*)GetProcAddress(hFS, "?RemoveFromDirCache@CFFFileSystemModule@@AAEXABV?$basic_string@DVallocator@eastl@@@eastl@@_N1@Z");
@@ -184,29 +172,19 @@ bool InitializeVFSCacheOptimizer() {
         MH_EnableHook(pRemove);
     }
 
-    void* pUnmountPaks = (void*)GetProcAddress(hFS, "?UnmountPackFiles@CFFFileSystemModule@@UAE_NABVbCString@@@Z");
-    if (pUnmountPaks) {
-        s_targetUnmountPackFiles = pUnmountPaks;
-        MH_CreateHook(pUnmountPaks, (LPVOID)Hooked_UnmountPackFiles, (LPVOID*)&Real_UnmountPackFiles);
-        MH_EnableHook(pUnmountPaks);
-    }
-
-    void* pUnmountDir = (void*)GetProcAddress(hFS, "?UnmountDirectory@CFFFileSystemModule@@UAE_NABVbCString@@@Z");
-    if (pUnmountDir) {
-        s_targetUnmountDirectory = pUnmountDir;
-        MH_CreateHook(pUnmountDir, (LPVOID)Hooked_UnmountDirectory, (LPVOID*)&Real_UnmountDirectory);
-        MH_EnableHook(pUnmountDir);
-    }
-
     Log("G3O", "VFS Cache Optimizer initialized successfully.");
     return true;
 }
 
 void ShutdownVFSCacheOptimizer() {
-    if (s_targetGetDirCacheEntry) MH_DisableHook(s_targetGetDirCacheEntry);
-    if (s_targetRemoveFromDirCache) MH_DisableHook(s_targetRemoveFromDirCache);
-    if (s_targetUnmountPackFiles) MH_DisableHook(s_targetUnmountPackFiles);
-    if (s_targetUnmountDirectory) MH_DisableHook(s_targetUnmountDirectory);
+    if (s_targetGetDirCacheEntry) {
+        MH_DisableHook(s_targetGetDirCacheEntry);
+        s_targetGetDirCacheEntry = nullptr;
+    }
+    if (s_targetRemoveFromDirCache) {
+        MH_DisableHook(s_targetRemoveFromDirCache);
+        s_targetRemoveFromDirCache = nullptr;
+    }
     ClearVFSCache();
 }
 
