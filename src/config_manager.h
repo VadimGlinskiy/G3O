@@ -34,7 +34,7 @@ struct Config {
 
     // [Performance]
     bool enableSIMDFrustumCulling = true;
-    bool enableD3D9StateFilter = true;
+    bool enableD3D9StateFilter = false;
     bool enableFastTextureLoader = true;
     bool enableVegetationOptimizer = true;
     float treeShadowDistance = 6500.0f;

@@ -145,16 +145,10 @@ static HRESULT WINAPI Hooked_D3DXCreateTextureFromFileInMemoryEx(
             if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
                 MipFilter = D3DX_FILTER_NONE;
             }
-            if (Filter == D3DX_DEFAULT) {
-                Filter = D3DX_FILTER_LINEAR;
-            }
         } else {
             // Mip generation needed: replace heavy CPU triangle filtering with fast 2x2 box filtering
             if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
                 MipFilter = D3DX_FILTER_BOX;
-            }
-            if (Filter == D3DX_DEFAULT) {
-                Filter = D3DX_FILTER_LINEAR;
             }
         }
     }
@@ -204,9 +198,6 @@ static HRESULT WINAPI Hooked_D3DXCreateTextureFromFileExA(
         if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
             MipFilter = D3DX_FILTER_BOX;
         }
-        if (Filter == D3DX_DEFAULT) {
-            Filter = D3DX_FILTER_LINEAR;
-        }
     }
 
     return Real_D3DXCreateTextureFromFileExA(
@@ -253,7 +244,7 @@ static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDir
         if (GetConfig().enableD3D9StateFilter) {
             InstallDeviceStateFilter(pDevice);
         }
-        if (!s_presentHooked) {
+        if (GetConfig().enableProfiler && !s_presentHooked) {
             void** vtbl = *(void***)pDevice;
             if (vtbl) {
                 ProfilerHookPresent(vtbl);
@@ -265,13 +256,15 @@ static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDir
 }
 
 void InitializeD3D9Optimizer() {
-    HMODULE hEngine = GetModuleHandleA("Engine.dll");
-    if (hEngine) {
-        void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");
-        if (pCtor) {
-            if (MH_CreateHook(pCtor, (LPVOID)Hooked_eCDX9Device_ctor, (LPVOID*)&Real_eCDX9Device_ctor) == MH_OK) {
-                MH_EnableHook(pCtor);
-                Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
+    if (GetConfig().enableD3D9StateFilter || GetConfig().enableProfiler) {
+        HMODULE hEngine = GetModuleHandleA("Engine.dll");
+        if (hEngine) {
+            void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");
+            if (pCtor) {
+                if (MH_CreateHook(pCtor, (LPVOID)Hooked_eCDX9Device_ctor, (LPVOID*)&Real_eCDX9Device_ctor) == MH_OK) {
+                    MH_EnableHook(pCtor);
+                    Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
+                }
             }
         }
     }
