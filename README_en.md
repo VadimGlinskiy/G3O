@@ -1,48 +1,32 @@
-# Gothic 3 Optima (G3O)
+# Gothic 3 Optima
 
 [Русский](README.md)
 
-G3O currently builds a `dinput8.dll` proxy. Only `src/dinput8_proxy.cpp`, `src/main.cpp`, and `src/version_watermark.cpp` are included: a version label and an attempt to load G3SE plugins. The remaining optimization code is not built, and `gothic3sdk` is not linked. This build has not been tested in-game with Parallel Universe Patch (PUP).
+G3O v1.3.1 is a `dinput8.dll` proxy with a version label in the menu. If G3SE is installed, it attempts to load its plugins. The v1.3.0 engine optimizations are absent to avoid overlap with Parallel Universe Patch (PUP). In-game compatibility with PUP has not been tested.
 
-## Choose a DXVK version
+## Install
 
-DXVK translates Gothic 3's Direct3D 9 calls to Vulkan. It does not add textures or effects. DXVK packages are separate from `dinput8.dll`; each includes `d3d9.dll`, `dxgi.dll`, and `dxvk.conf`.
+- Extract `dinput8.dll` from `Gothic3Optima-v1.3.1-Core.zip` next to `Gothic3.exe`. Back up any existing `dinput8.dll` first; another mod may own it.
+- DXVK is separate. Pick **one** DXVK archive and extract it to the same folder. Back up existing `d3d9.dll`, `dxgi.dll`, and `dxvk.conf` before replacing them.
 
-| Package | Driver | Difference |
-| --- | --- | --- |
-| `1.10.1-async` | Vulkan 1.1 | Older version; experimental async. |
-| `1.10.3-async` | Vulkan 1.1 | Adds cube-map seam control. The user reports it works with anisotropy `-1`. |
-| `2.4.1` | Vulkan 1.3 | Texture-sharpness and compilation options; no async. |
-| `3.0.1` | Vulkan 1.4 plus required features | New GPU/memory options; some older keys are gone. |
-| `3.0.1-hdr` | Same as `3.0.1` | Identical DLLs. The name does not mean Gothic 3 gains HDR. |
+## DXVK
 
-The same rule applies to AMD, NVIDIA, and Intel: choose by Vulkan support, not GPU brand. The RX 570 8 GB on this PC reports Vulkan 1.3.260: keep the working `1.10.3-async` or compare it with `2.4.1`; this driver does not meet `3.0.1`'s requirement. The Vulkan version alone does not guarantee every required driver feature.
+DXVK runs the game's Direct3D 9 graphics through Vulkan; it does not add textures or effects. Choose a version your driver supports, regardless of whether your GPU is AMD, NVIDIA, or Intel:
 
-## What to change
+- `1.10.1-async` and `1.10.3-async` — Vulkan 1.1; experimental async shader compilation. Version 1.10.3 adds a cube-map seam option.
+- `2.4.1` — Vulkan 1.3; texture-sharpness settings, but no async from the older fork.
+- `3.0.1` — Vulkan 1.4 plus required driver features. Some older settings have been removed.
+- `3.0.1-hdr` — the same DLLs as `3.0.1`. The archive kept its old name; it does not enable HDR in Gothic 3.
 
-Put `dxvk.conf` next to `Gothic3.exe`. G3O's base configs are almost empty; only the `-async` packages set `dxvk.enableAsync = true`. Back up the working file and change one line at a time.
+## DXVK settings
 
-### Image quality
+Put `dxvk.conf` next to `Gothic3.exe`. Our packages have just one active override: `dxvk.enableAsync = true` in the two `-async` versions.
 
-- Set textures, shadows, draw distance, and anti-aliasing in the game. DXVK does not add these details.
-- All versions: keep `d3d9.samplerAnisotropy = -1` or omit the line. Forcing `16` caused red noise on the RX 570; `-1` fixed it for the user.
-- `2.4.1`/`3.0.1`: `d3d9.samplerLodBias = -0.25` may sharpen textures but cause shimmer. Test it separately; it is not in the base config.
-- `1.10.1`/`1.10.3`/`2.4.1`: `d3d9.forceSwapchainMSAA` forces anti-aliasing but may break post-processing. Removed in `3.0.1`.
+Forcing `d3d9.samplerAnisotropy = 16` caused red artifacts on an RX 570. Changing it to `-1` stopped them. Do not enable `d3d9.supportCubeDepthFormats` in `3.0.1`: DXVK warns about problems with Gothic 3.
 
-### FPS and latency
+Other settings are in the [version-by-version reference](docs/DXVK_OPTIONS.md) (Russian). Back up your working `dxvk.conf` first.
 
-- `1.10.x-async`: `dxvk.enableAsync = true` reduces compilation stalls, not image quality.
-- `2.4.1`/`3.0.1`: `dxvk.enableGraphicsPipelineLibrary` controls pipeline compilation; leave it at the default `Auto`.
-- All versions: `d3d9.maxFrameRate` caps FPS; `d3d9.maxFrameLatency` changes the frame queue. Neither increases detail.
-
-### Compatibility
-
-- Do not enable `d3d9.supportCubeDepthFormats`: the official DXVK config warns of issues specifically in Gothic 3 (available in `3.0.1`).
-- `dxgi.enableHDR` (`2.4.1`/`3.0.1`) does not enable HDR in a D3D9 game. Spoofing GPU vendors is a game-specific workaround, not an AMD/NVIDIA/Intel speed boost.
-
-**Complete reference:** [all 127 published DXVK keys across the four versions, grouped by purpose and availability](docs/DXVK_OPTIONS.md) (Russian; links to the official English configs included). Environment variables, internal keys, and game profiles are not included in the 127.
-
-## Build G3O
+## Build
 
 ```cmd
 git submodule update --init third_party/minhook
@@ -50,4 +34,4 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
 cmake --build build --config Release
 ```
 
-DLL: `build/Release/dinput8.dll`; packaging: `scripts/package_releases.ps1`. Back up an existing game-folder `dinput8.dll` before replacing it: another mod may own it. Editing this repository does not change the installed game. License: [MIT](LICENSE).
+DLL: `build/Release/dinput8.dll`. Packaging: `scripts/package_releases.ps1`. License: [MIT](LICENSE).
