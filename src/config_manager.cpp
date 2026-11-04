@@ -223,7 +223,7 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Значительно поднимает FPS при экстремальной дальности прорисовки\n"
         << "EnableSIMDFrustumCulling=true\n\n"
         << "; Аппаратная фильтрация избыточных вызовов состояний Direct3D 9 (SetRenderState/SetSamplerState)\n"
-        << "EnableD3D9StateFilter=true\n\n"
+        << "EnableD3D9StateFilter=false\n\n"
         << "; Высокоточный мультимедийный таймер Windows (квант 1 мс) для устранения микрофризов\n"
         << "EnableHighPrecisionTimer=true\n\n"
         << "; Назначить высокий приоритет процессу (HIGH_PRIORITY_CLASS) для защиты от фоновых служб\n"
@@ -311,7 +311,7 @@ void LoadConfig() {
 
     // [Performance]
     s_config.enableSIMDFrustumCulling = ReadIniBool("Performance", "EnableSIMDFrustumCulling", true, path);
-    s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);
+    s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", false, path);
     s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
     s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
     s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);

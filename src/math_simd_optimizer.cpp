@@ -34,11 +34,14 @@ struct Plane4 {
 #pragma pack(pop)
 
 // ---------------------------------------------------------------------------
-// 1. Vectorized Frustum Culling for Bounding Box (bCFrustum::Cull(const bCBox&))
-// In Gothic 3 SharedBase.dll, bCFrustum stores 6 planes starting at offset 0x00:
-// Plane 0: Left, 1: Right, 2: Top, 3: Bottom, 4: Near, 5: Far.
-// Returns true if box is OUTSIDE the frustum (culled).
-// Returns false if box is inside or intersecting (visible).
+// 1. Vectorized Frustum Culling for Bounding Box (bCFrustum::Cull / Intersects)
+// In Gothic 3 SharedBase.dll:
+// - bCFrustum stores 6 planes starting at offset 0x00.
+// - ?Cull@bCFrustum@@QBE_NABVbCBox@@@Z (0x10036380) and
+//   ?Intersects@bCFrustum@@QBE_NABVbCBox@@@Z (0x100368D0) are IDENTICAL.
+// - Return convention:
+//   TRUE (1)  = Box INTERSECTS frustum (visible, keep for rendering).
+//   FALSE (0) = Box is completely OUTSIDE frustum (culled, do not render).
 // ---------------------------------------------------------------------------
 
 typedef bool (__thiscall* FrustumCullBox_t)(void* pThis, const Box3* pBox);
@@ -68,19 +71,20 @@ static bool __fastcall Hooked_FrustumCullBox(void* pThis, void* /*edx*/, const B
         // Effective projection radius of box extents onto plane normal: dot(|N|, E)
         float radius = fabsf(p.a) * ex + fabsf(p.b) * ey + fabsf(p.c) * ez;
 
-        // If dist + radius < 0, all 8 vertices of the box are behind this plane -> culled!
+        // If dist + radius < 0, all 8 vertices of the box are behind this plane -> OUTSIDE (CULLED)!
         if (dist + radius < 0.0f) {
-            return true;
+            return false; // Culled (not visible)
         }
     }
 
-    return false; // Inside or intersecting (visible)
+    return true; // Inside or intersecting (visible)
 }
 
 // ---------------------------------------------------------------------------
-// 2. Vectorized Frustum Culling for Sphere (bCFrustum::Cull(const bCSphere&))
-// Returns true if sphere is OUTSIDE the frustum (culled).
-// Returns false if sphere is inside or intersecting (visible).
+// 2. Vectorized Frustum Culling for Sphere (bCFrustum::Cull / Intersects)
+// Return convention:
+// TRUE (1)  = Sphere INTERSECTS frustum (visible).
+// FALSE (0) = Sphere is completely OUTSIDE frustum (culled).
 // ---------------------------------------------------------------------------
 
 typedef bool (__thiscall* FrustumCullSphere_t)(void* pThis, const Sphere3* pSphere);
@@ -98,11 +102,11 @@ static bool __fastcall Hooked_FrustumCullSphere(void* pThis, void* /*edx*/, cons
 
         // If distance from center to plane is less than -radius -> completely outside
         if (dist + pSphere->radius < 0.0f) {
-            return true;
+            return false; // Culled
         }
     }
 
-    return false; // Visible
+    return true; // Visible
 }
 
 // ---------------------------------------------------------------------------
