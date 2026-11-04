@@ -7,6 +7,7 @@
 
 namespace G3O {
 
+// 1. Tree terrain shadow distance clamping
 typedef void (__thiscall* AddTreeShadow_t)(void* pThis, void* pTree);
 static AddTreeShadow_t Real_AddTreeShadow = nullptr;
 
@@ -59,6 +60,29 @@ static void __fastcall Hooked_AddTreeShadow(void* pThis, void* /*edx*/, void* pT
     Real_AddTreeShadow(pThis, pTree);
 }
 
+// 2. Procedural grass & vegetation grid bounding rect clamping
+// Clamps the effective grass caching radius in eCVegetation_Grid::CalculateCacheRect,
+// preventing tens of thousands of sub-pixel distant grass culling & rendering passes
+// while preserving full view distance for trees (SpeedTree) and terrain (DistanceHigh).
+typedef void (__thiscall* CalculateCacheRect_t)(void* pGrid, const void* pCamera, void* pRect);
+static CalculateCacheRect_t Real_CalculateCacheRect = nullptr;
+
+static void __fastcall Hooked_CalculateCacheRect(void* pGrid, void* /*edx*/, const void* pCamera, void* pRect) {
+    if (!pGrid || !Real_CalculateCacheRect) return;
+
+    float* pRange = (float*)((BYTE*)pGrid + 0x10);
+    float origRange = *pRange;
+    float maxRange = GetConfig().vegetationGridRangeClamp;
+
+    if (maxRange > 0.0f && origRange > maxRange) {
+        *pRange = maxRange;
+    }
+
+    Real_CalculateCacheRect(pGrid, pCamera, pRect);
+
+    *pRange = origRange;
+}
+
 void InitializeVegetationOptimizer() {
     if (!GetConfig().enableVegetationOptimizer) return;
 
@@ -69,11 +93,21 @@ void InitializeVegetationOptimizer() {
     s_treeShadowDistSq = dist * dist;
     s_enableTreeShadowClamping = true;
 
+    // Hook tree terrain shadow registration
     void* pAddTreeShadow = (void*)GetProcAddress(s_hEngine, "?AddTreeShadow@eCTerrainShadowMap@@QAEXPAVeCSpeedTree_PS@@@Z");
     if (pAddTreeShadow) {
         if (MH_CreateHook(pAddTreeShadow, (LPVOID)Hooked_AddTreeShadow, (LPVOID*)&Real_AddTreeShadow) == MH_OK) {
             MH_EnableHook(pAddTreeShadow);
-            Log("G3O", "Vegetation Optimizer active (Engine.dll!AddTreeShadow). Tree terrain shadow distance clamped to %.1f units.", dist);
+            Log("G3O", "Vegetation Optimizer: Tree terrain shadow distance clamped to %.1f units.", dist);
+        }
+    }
+
+    // Hook vegetation grid caching range
+    void* pCalcRect = (void*)GetProcAddress(s_hEngine, "?CalculateCacheRect@eCVegetation_Grid@@IAEXABVeCCameraBase@@AAVbCRect@@@Z");
+    if (pCalcRect) {
+        if (MH_CreateHook(pCalcRect, (LPVOID)Hooked_CalculateCacheRect, (LPVOID*)&Real_CalculateCacheRect) == MH_OK) {
+            MH_EnableHook(pCalcRect);
+            Log("G3O", "Vegetation Optimizer: Grass cache grid radius clamped to %.1f units.", GetConfig().vegetationGridRangeClamp);
         }
     }
 }
@@ -82,6 +116,9 @@ void ShutdownVegetationOptimizer() {
     if (s_hEngine) {
         void* pAddTreeShadow = (void*)GetProcAddress(s_hEngine, "?AddTreeShadow@eCTerrainShadowMap@@QAEXPAVeCSpeedTree_PS@@@Z");
         if (pAddTreeShadow) MH_DisableHook(pAddTreeShadow);
+
+        void* pCalcRect = (void*)GetProcAddress(s_hEngine, "?CalculateCacheRect@eCVegetation_Grid@@IAEXABVeCCameraBase@@AAVbCRect@@@Z");
+        if (pCalcRect) MH_DisableHook(pCalcRect);
     }
 }
 

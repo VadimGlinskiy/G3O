@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima VERSION 1.3.9 LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,11 @@ endif()
 # The PUP-compatible core does not replace the engine's caches, threading, audio,
 # file system, save writer or GPU capability checks.
 add_subdirectory(third_party/minhook)
+
+set(LIBDEFLATE_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
+set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
+set(LIBDEFLATE_BUILD_GZIP OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/libdeflate)
 
 # Main dinput8.dll Proxy library
 add_library(dinput8 SHARED
@@ -42,15 +47,19 @@ add_library(dinput8 SHARED
     src/cpu_topology.h
     src/vegetation_optimizer.cpp
     src/vegetation_optimizer.h
+    src/fast_pak_decompressor.cpp
+    src/fast_pak_decompressor.h
 )
 
 target_include_directories(dinput8 PRIVATE
     src
     third_party/minhook/include
+    third_party/libdeflate
 )
 
 target_link_libraries(dinput8 PRIVATE
     minhook
+    libdeflate_static
     dbghelp
     psapi
     winmm

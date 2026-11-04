@@ -34,10 +34,12 @@ struct Config {
 
     // [Performance]
     bool enableSIMDFrustumCulling = true;
+    bool enableFastPakDecompressor = true;
     bool enableD3D9StateFilter = false;
     bool enableFastTextureLoader = true;
     bool enableVegetationOptimizer = true;
     float treeShadowDistance = 6500.0f;
+    float vegetationGridRangeClamp = 7500.0f;
     bool enableHighPrecisionTimer = true;
     bool enableHighProcessPriority = true;
     bool enableCPUTopologyAffinity = true;
