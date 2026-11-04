@@ -140,13 +140,27 @@ static DWORD WINAPI WindowWatcherThread(LPVOID) {
     }
 
     if (s_gameHWnd) {
+        // Record original window dimensions and styles
+        GetWindowRect(s_gameHWnd, &s_origWindowRect);
+        s_origStyle = GetWindowLongPtrA(s_gameHWnd, GWL_STYLE);
+        s_origExStyle = GetWindowLongPtrA(s_gameHWnd, GWL_EXSTYLE);
+
         // Subclass window procedure
         s_origWndProc = (WNDPROC)SetWindowLongPtrA(s_gameHWnd, GWLP_WNDPROC, (LONG_PTR)BorderlessWndProc);
-        Log("G3O", "Game window captured (HWND 0x%p). Subclassed WndProc.", s_gameHWnd);
+        Log("G3O", "Game window captured (HWND 0x%p, style 0x%08X). Subclassed WndProc.", s_gameHWnd, (unsigned int)s_origStyle);
 
-        // Allow D3D9/DXVK device presentation to establish before adjusting window frame
-        Sleep(1500);
-        ApplyBorderless(s_gameHWnd);
+        // Only convert frame if window is running in traditional windowed mode (has caption/borders).
+        // If the game is already in fullscreen mode (WS_POPUP without WS_CAPTION), DXVK and the engine
+        // already control presentation; calling SetWindowPos/SetWindowLongPtr triggers an abrupt
+        // D3D9 device reset which causes Vulkan driver crashes (amdvlk32.dll on AMD GPUs).
+        if (s_origStyle & WS_CAPTION) {
+            Log("G3O", "Detected windowed mode with borders. Applying Borderless Fullscreen.");
+            Sleep(500);
+            ApplyBorderless(s_gameHWnd);
+        } else {
+            s_isBorderless = true;
+            Log("G3O", "Fullscreen presentation detected. Alt+Tab protection and hotkeys active.");
+        }
     }
     return 0;
 }

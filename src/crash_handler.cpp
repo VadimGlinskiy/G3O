@@ -530,7 +530,14 @@ static LONG HandleCrash(EXCEPTION_POINTERS* pExceptionInfo) {
              blame.recommendation.c_str(),
              s_crashLogPath);
 
-    MessageBoxA(NULL, msg, "Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, msg, -1, nullptr, 0);
+    if (wideLen > 0) {
+        std::vector<wchar_t> wideMsg(wideLen);
+        MultiByteToWideChar(CP_UTF8, 0, msg, -1, wideMsg.data(), wideLen);
+        MessageBoxW(NULL, wideMsg.data(), L"Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+    } else {
+        MessageBoxA(NULL, msg, "Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+    }
 
     // Log to debugger before leaving
     OutputDebugStringA(report.c_str());
