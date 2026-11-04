@@ -24,8 +24,6 @@ DXVK is a separate Direct3D 9-to-Vulkan layer. It does not add textures, shadows
 
 On the RX 570, forcing `d3d9.samplerAnisotropy = 16` caused red noise. `-1` or omitting the line leaves filtering to the game and cleared the noise (user-reported). Back up a working config and change one option at a time.
 
-**Do not install the old `dist/packages/DXVK-1.10.3-Async.zip`:** another process has locked it, and it still contains `samplerAnisotropy = 16`. The verified archive with the safe config is `DXVK-1.10.3-Async-safe.zip`.
-
 For the highest image quality, start with maximum in-game settings and compare `2.4.1` with the current version. On `2.4.1`, try `d3d9.samplerLodBias = -0.25` separately for sharper textures; remove it if it shimmers. Forced filtering, anti-aliasing, and HDR are not part of the safe preset.
 
 ## `dxvk.conf` options
