@@ -69,6 +69,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD reason, LPVOID reserved) {
     switch (reason) {
     case DLL_PROCESS_ATTACH: {
         DisableThreadLibraryCalls(hinstDLL);
+
+        // Prevent known unstable 32-bit Vulkan implicit layers (such as Bandicam's bdcamvk32.dll)
+        // from crashing DXVK during swapchain creation, while keeping screen capture operational.
+        SetEnvironmentVariableA("DISABLE_VK_LAYER_bandicam_helper_1", "1");
+
         G3O::InitializeDiagnosticLogger();
         G3O::Log("G3O", "Gothic 3 Optima loaded into process PID %lu.", GetCurrentProcessId());
         HANDLE thread = CreateThread(nullptr, 0, OptimaInitThread, nullptr, 0, nullptr);
