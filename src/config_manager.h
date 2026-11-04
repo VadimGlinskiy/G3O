@@ -42,6 +42,7 @@ struct Config {
     // [Logging]
     bool enableDiagnosticLog = true;
     bool interceptOutputDebugString = true;
+    bool enableProfiler = false;
 
     std::string iniFilePath;
 };

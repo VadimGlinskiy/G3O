@@ -1,4 +1,4 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <minhook.h>
 #include <timeapi.h>
 #include "dinput8_proxy.h"
@@ -10,6 +10,7 @@
 #include "camera_controller.h"
 #include "math_simd_optimizer.h"
 #include "d3d9_hook.h"
+#include "profiler.h"
 #include "cpu_topology.h"
 
 #pragma comment(lib, "winmm.lib")
@@ -65,8 +66,12 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     }
 
     // Direct3D 9 State Redundancy Filter
-    if (cfg.enableD3D9StateFilter) {
+    if (cfg.enableD3D9StateFilter || cfg.enableProfiler) {
         G3O::InitializeD3D9Optimizer();
+    }
+
+    if (cfg.enableProfiler) {
+        G3O::InitializeProfiler();
     }
 
     // Hook camera controller for dynamic widescreen FOV
@@ -109,6 +114,7 @@ static void ShutdownOptima() {
     }
     G3O::ShutdownMathSIMDOptimizer();
     G3O::ShutdownD3D9Optimizer();
+    G3O::ShutdownProfiler();
     G3O::ShutdownCameraController();
     G3O::ShutdownBorderlessWindow();
     G3O::ShutdownCrashHandler();

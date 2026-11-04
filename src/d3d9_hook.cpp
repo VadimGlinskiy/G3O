@@ -1,5 +1,7 @@
-#include "d3d9_hook.h"
+﻿#include "d3d9_hook.h"
 #include "diagnostic_logger.h"
+#include "config_manager.h"
+#include "profiler.h"
 #include <minhook.h>
 #include <d3d9.h>
 #include <stdio.h>
@@ -22,6 +24,7 @@ static DWORD s_samplerStateCache[MAX_SAMPLERS][MAX_SAMPLER_STATES];
 static BYTE  s_samplerStateValid[MAX_SAMPLERS][MAX_SAMPLER_STATES] = { { 0 } };
 
 static bool s_deviceFilterInstalled = false;
+static bool s_presentHooked = false;
 
 typedef HRESULT (STDMETHODCALLTYPE* SetRenderState_t)(IDirect3DDevice9* This, D3DRENDERSTATETYPE State, DWORD Value);
 static SetRenderState_t Real_SetRenderState = NULL;
@@ -113,7 +116,11 @@ static eCDX9Device_ctor_t Real_eCDX9Device_ctor = NULL;
 static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDirect3DDevice9* pDevice) {
     void* result = Real_eCDX9Device_ctor(pThis, pDevice);
     if (pDevice) {
-        InstallDeviceStateFilter(pDevice);
+        if (GetConfig().enableD3D9StateFilter) InstallDeviceStateFilter(pDevice);
+        if (GetConfig().enableProfiler && !s_presentHooked) {
+            void** vtbl = *(void***)pDevice;
+            if (vtbl) { ProfilerHookPresent(vtbl); s_presentHooked = true; }
+        }
     }
     return result;
 }

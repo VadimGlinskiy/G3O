@@ -1,7 +1,9 @@
 #include "math_simd_optimizer.h"
 #include "diagnostic_logger.h"
+#include "profiler.h"
 #include <minhook.h>
 #include <cmath>
+#include <cstring>
 #include <xmmintrin.h>
 #include <emmintrin.h>
 #include <stdio.h>
@@ -48,6 +50,7 @@ typedef bool (__thiscall* FrustumCullBox_t)(void* pThis, const Box3* pBox);
 static FrustumCullBox_t Real_FrustumCullBox = NULL;
 
 static bool __fastcall Hooked_FrustumCullBox(void* pThis, void* /*edx*/, const Box3* pBox) {
+    InterlockedIncrement(&g_cullCalls);
     if (!pThis || !pBox) return false;
 
     // The 6 bounding planes of the camera frustum start at offset 0x00
@@ -91,6 +94,7 @@ typedef bool (__thiscall* FrustumCullSphere_t)(void* pThis, const Sphere3* pSphe
 static FrustumCullSphere_t Real_FrustumCullSphere = NULL;
 
 static bool __fastcall Hooked_FrustumCullSphere(void* pThis, void* /*edx*/, const Sphere3* pSphere) {
+    InterlockedIncrement(&g_cullCalls);
     if (!pThis || !pSphere) return false;
 
     const Plane4* planes = (const Plane4*)pThis;
@@ -127,6 +131,46 @@ static bool __fastcall Hooked_BoxIntersectsBox(const Box3* pThis, void* /*edx*/,
 }
 
 // ---------------------------------------------------------------------------
+// 4. Fast String Compare (bCString::CompareFast)
+// Avoids scalar byte loops by utilizing pointer equality, length pre-check,
+// and hardware SIMD memcmp.
+// ---------------------------------------------------------------------------
+
+typedef bool (__thiscall* CompareFast_t)(const void* pThis, const void* pOther);
+static CompareFast_t Real_CompareFast = NULL;
+
+static bool __fastcall Hooked_CompareFast(const void* pThis, void* /*edx*/, const void* pOther) {
+    if (!pThis || !pOther) return pThis == pOther;
+
+    const char* str1 = *(const char* const*)pThis;
+    const char* str2 = *(const char* const*)pOther;
+
+    if (str1 == str2) return true;
+    if (!str1 || !str2) return false;
+
+    int len1 = *(const int*)(str1 - 8);
+    int len2 = *(const int*)(str2 - 8);
+    if (len1 != len2) return false;
+    if (len1 <= 0) return true;
+
+    return memcmp(str1, str2, len1) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// 5. Windows NT Environment Detection Bypass (_IsNT@0)
+// The engine repeatedly invokes _IsNT@0 (2.8% - 3.8% of CPU frame time) to check
+// if it is running on Windows 95/98 vs NT, allocating 152 bytes of stack on every call.
+// We return TRUE immediately.
+// ---------------------------------------------------------------------------
+
+typedef BOOL (__stdcall* IsNT_t)();
+static IsNT_t Real_IsNT = NULL;
+
+static BOOL __stdcall Hooked_IsNT() {
+    return TRUE;
+}
+
+// ---------------------------------------------------------------------------
 // Initialization & Shutdown
 // ---------------------------------------------------------------------------
 
@@ -160,6 +204,24 @@ void InitializeMathSIMDOptimizer() {
             Log("G3O", "SIMD Box Intersection hooked (?Intersects@bCBox).");
         }
     }
+
+    // 4. Hook bCString::CompareFast at 0x10001AE0
+    void* pCompareFast = (void*)GetProcAddress(hSharedBase, "?CompareFast@bCString@@QBE_NABV1@@Z");
+    if (pCompareFast) {
+        if (MH_CreateHook(pCompareFast, (LPVOID)Hooked_CompareFast, (LPVOID*)&Real_CompareFast) == MH_OK) {
+            MH_EnableHook(pCompareFast);
+            Log("G3O", "Fast String Compare hooked (?CompareFast@bCString).");
+        }
+    }
+
+    // 5. Hook _IsNT@0 at 0x1006B1C0
+    void* pIsNT = (void*)GetProcAddress(hSharedBase, "_IsNT@0");
+    if (pIsNT) {
+        if (MH_CreateHook(pIsNT, (LPVOID)Hooked_IsNT, (LPVOID*)&Real_IsNT) == MH_OK) {
+            MH_EnableHook(pIsNT);
+            Log("G3O", "Windows NT environment check bypassed (_IsNT@0).");
+        }
+    }
 }
 
 void ShutdownMathSIMDOptimizer() {
@@ -174,6 +236,12 @@ void ShutdownMathSIMDOptimizer() {
 
     void* pIntersects = (void*)GetProcAddress(hSharedBase, "?Intersects@bCBox@@QBE_NABV1@@Z");
     if (pIntersects) MH_DisableHook(pIntersects);
+
+    void* pCompareFast = (void*)GetProcAddress(hSharedBase, "?CompareFast@bCString@@QBE_NABV1@@Z");
+    if (pCompareFast) MH_DisableHook(pCompareFast);
+
+    void* pIsNT = (void*)GetProcAddress(hSharedBase, "_IsNT@0");
+    if (pIsNT) MH_DisableHook(pIsNT);
 }
 
 } // namespace G3O

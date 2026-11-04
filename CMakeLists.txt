@@ -36,6 +36,8 @@ add_library(dinput8 SHARED
     src/math_simd_optimizer.h
     src/d3d9_hook.cpp
     src/d3d9_hook.h
+    src/profiler.cpp
+    src/profiler.h
     src/cpu_topology.cpp
     src/cpu_topology.h
 )
