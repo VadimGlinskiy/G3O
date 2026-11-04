@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "v1.3.0"
+    [string]$Version = "v1.3.1"
 )
 
 # ==============================================================================
@@ -35,39 +35,30 @@ Copy-Item $bin (Join-Path $stageCore "dinput8.dll") -Force
 
 $readmeCore = @"
 ================================================================================
-GOTHIC 3 OPTIMA - CORE OPTIMIZATION & STABILITY SUITE ($Version)
+GOTHIC 3 OPTIMA - PUP-COMPATIBLE DEVELOPMENT CORE ($Version)
 ================================================================================
 
 FEATURES INCLUDED:
-- Multicore Threading Engine (eCThreadPool Expander, Priority Scheduler & Task Offloader)
-- Complete Replacement of Genome Engine Memory Allocator (HeapAlloc & VirtualAlloc)
-- 128-Byte Cache-Line Aligned Allocations (Eliminates False Sharing)
-- Dynamic Large Page Aware / Low-Fragmentation Virtual Sizing
-- Atomic Savegame Transaction Guard (Anti-Corruption & Temporary Write Buffer)
-- SIMD-Accelerated 3D Math Engine (AVX2 / SSE4.1 Vec4, Matrix4x4, Bounding Boxes)
-- High-Performance Work-Stealing Thread Pool with Lock-Free Task Queues
-- Safe SEH Exception Filter & Instant Crash Dump Generator
-- High Memory Shadow Cache (> 4 GB via Heaven's Gate)
-- Fixed Physics Substep (16.6 ms) & Bone Velocity / NaN Ragdoll Clamp
-- Dynamic Vertex & Index Buffer Scaling (1-8 MB, 32-bit Index Promotion)
-- High-Precision Floating-Point Z-Buffer & Shadow Depth Bias Calibration
-- Combatant Frustum Culling Bypass (Continuous AI Pursuit & Aggro Focus)
-- Multi-Ray Footprint & Ground Recovery Fall Guard (Seam Fall Prevention)
+- System dinput8.dll proxy.
+
+- G3O version label in the main menu.
+- Optional legacy G3SE plugin discovery when its DLL is installed.
+
+PUP owns background resource work, caches, prefetching, file system,
+FMOD audio and asynchronous save writing. This core does not modify them.
+The older 1.3.0 release had different features; see README.md.
+Back up an existing game-folder dinput8.dll before installing this build.
+In-game compatibility testing is still required.
 
 INSTALLATION:
 1. Extract 'dinput8.dll' from this archive directly into your Gothic 3 game folder
    (where 'Gothic3.exe' is located).
-2. [OPTIONAL & HIGHLY RECOMMENDED]: Download one of the DXVK packages from the
-   same release page matching your GPU to translate DirectX 9 to Vulkan:
-   - DXVK-2.4.1-Stable.zip (Default / Recommended for NVIDIA / AMD GPUs)
-   - DXVK-3.0.1.zip (Modern GPUs with Vulkan 1.4 support)
-   - DXVK-3.0.1-HDR.zip (With Native HDR output support)
-   - DXVK-1.10.3-Async.zip (Legacy GPUs lacking Vulkan 1.3)
-   - DXVK-1.10.1-Async.zip (Legacy Intel GPUs / Compatibility fallback)
+2. [OPTIONAL]: DXVK is an independent graphics component, not part of G3O.
 
 COMPATIBILITY:
 - Gothic 3 v1.75.14 (Community Patch)
-- Works with Update Pack 1.04+, Update Pack 1.05+, Universal Modpack UNION+ v1.8.2.
+- Designed to avoid overlap with installed Parallel Universe Patch 1.1.1.
+- In-game compatibility with modpacks and Update Pack is not yet verified.
 ================================================================================
 "@
 Set-Content -Path (Join-Path $stageCore "README_INSTALL.txt") -Value $readmeCore -Encoding UTF8
@@ -139,7 +130,7 @@ INCLUDED FILES:
 INSTALLATION:
 1. Extract all files from this archive directly into your Gothic 3 game folder
    (where 'Gothic3.exe' is located).
-2. Ensure you have installed 'Gothic3Optima-$Version-Core.zip' (dinput8.dll) as well.
+2. DXVK is independent of the G3O core and of Parallel Universe Patch.
 3. Launch Gothic 3!
 ================================================================================
 "@
