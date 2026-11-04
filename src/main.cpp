@@ -24,12 +24,6 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // Initialize Borderless Fullscreen manager
     G3O::InitializeBorderlessWindow();
 
-    // Optional ReShade integration
-    HMODULE hReShade = LoadLibraryA("ReShade32.dll");
-    if (hReShade) {
-        G3O::Log("G3O", "ReShade 6.8.0 post-processing pipeline loaded successfully.");
-    }
-
     // Only the UI label needs engine exports; leave PUP's subsystems untouched.
     int maxWaitMs = 5000;
     while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("GFC.dll")) && maxWaitMs > 0) {

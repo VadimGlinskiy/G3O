@@ -128,15 +128,15 @@ static BOOL CALLBACK EnumWindowsCallback(HWND hWnd, LPARAM lParam) {
 }
 
 static DWORD WINAPI WindowWatcherThread(LPVOID) {
-    int attempts = 100;
-    while (attempts-- > 0 && !s_gameHWnd) {
+    // Gothic 3 takes 15-30 seconds to load into main menu
+    for (int i = 0; i < 180 && !s_gameHWnd; ++i) {
         HWND found = nullptr;
         EnumWindows(EnumWindowsCallback, (LPARAM)&found);
-        if (found) {
+        if (found && IsWindow(found) && IsWindowVisible(found)) {
             s_gameHWnd = found;
             break;
         }
-        Sleep(50);
+        Sleep(250);
     }
 
     if (s_gameHWnd) {
@@ -144,7 +144,8 @@ static DWORD WINAPI WindowWatcherThread(LPVOID) {
         s_origWndProc = (WNDPROC)SetWindowLongPtrA(s_gameHWnd, GWLP_WNDPROC, (LONG_PTR)BorderlessWndProc);
         Log("G3O", "Game window captured (HWND 0x%p). Subclassed WndProc.", s_gameHWnd);
 
-        // Apply Borderless Fullscreen automatically
+        // Allow D3D9/DXVK device presentation to establish before adjusting window frame
+        Sleep(1500);
         ApplyBorderless(s_gameHWnd);
     }
     return 0;

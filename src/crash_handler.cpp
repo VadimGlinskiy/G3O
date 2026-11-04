@@ -623,6 +623,20 @@ static CallFatalError1_t s_origCallFatalError1 = nullptr;
 typedef void (__thiscall *CallFatalError2_t)(void* pThis, const char* msg, const char* file, const char* func, int line);
 static CallFatalError2_t s_origCallFatalError2 = nullptr;
 
+typedef int (__thiscall *CallExceptionError_t)(void* pThis, void* pExceptionPointers);
+static CallExceptionError_t s_origCallExceptionError = nullptr;
+
+static int __fastcall HookedCallExceptionError(void* pThis, void* /*edx*/, void* pExceptionPointers) {
+    if (pExceptionPointers) {
+        EXCEPTION_POINTERS* pEP = (EXCEPTION_POINTERS*)pExceptionPointers;
+        HandleCrash(pEP);
+    }
+    if (s_origCallExceptionError) {
+        return s_origCallExceptionError(pThis, pExceptionPointers);
+    }
+    return 1;
+}
+
 static void __fastcall HookedCallFatalError1(void* pThis, void* /*edx*/, const char* msg, const char* file, int line) {
     char fullMsg[1024];
     snprintf(fullMsg, sizeof(fullMsg), "Движок Gothic 3 вызвал Fatal Error:\nСообщение: %s\nФайл: %s (строка %d)",
@@ -665,7 +679,14 @@ void HookEngineFatalErrors() {
         MH_EnableHook(pFatal2);
     }
 
-    Log("G3O", "Engine Fatal Error hooks installed in SharedBase.dll");
+    void* pExceptionError = (void*)GetProcAddress(hSharedBase, "?CallExceptionError@bCErrorAdmin@@QAEHPAUbSException_Pointers@@@Z");
+    if (pExceptionError) {
+        MH_CreateHook(pExceptionError, (void*)&HookedCallExceptionError, (void**)&s_origCallExceptionError);
+        MH_EnableHook(pExceptionError);
+        Log("G3O", "Guru interceptor hook active (?CallExceptionError@bCErrorAdmin).");
+    }
+
+    Log("G3O", "Engine Fatal Error and Guru hooks installed in SharedBase.dll");
 }
 
 void ReportManualCrash(const char* title, const char* message, const char* file, int line) {
