@@ -2,7 +2,7 @@
 
 [Русский](README.md)
 
-G3O v1.3.1 is a `dinput8.dll` proxy with a version label in the menu, built-in **Crash Investigator**, and **Diagnostic Logger**. If G3SE is installed, it attempts to load its plugins. The v1.3.0 engine optimizations are absent to avoid overlap with Parallel Universe Patch (PUP). In-game compatibility with PUP has not been tested.
+G3O v1.3.2 is a `dinput8.dll` proxy with a version label in the menu, built-in **Crash Investigator**, and **Diagnostic Logger**. If G3SE is installed, it attempts to load its plugins. The v1.3.0 engine optimizations are absent to avoid overlap with Parallel Universe Patch (PUP). In-game compatibility with PUP has not been tested.
 
 ## Diagnostic Features
 - **Crash Investigator:** Catches fatal crashes (Access Violations, Stack Overflows, etc.) before the legacy "Where is the guru?" prompt and accurately blames the faulting module:
@@ -16,7 +16,7 @@ G3O v1.3.1 is a `dinput8.dll` proxy with a version label in the menu, built-in *
 
 ## Install
 
-- Extract `dinput8.dll` from `Gothic3Optima-v1.3.1-Core.zip` next to `Gothic3.exe`. Back up any existing `dinput8.dll` first; another mod may own it.
+- Extract `dinput8.dll` from `Gothic3Optima-v1.3.2-Core.zip` next to `Gothic3.exe`. Back up any existing `dinput8.dll` first; another mod may own it.
 - DXVK is separate. Pick **one** DXVK archive and extract it to the same folder. Back up existing `d3d9.dll`, `dxgi.dll`, and `dxvk.conf` before replacing them.
 
 ## DXVK
