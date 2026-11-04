@@ -1,12 +1,9 @@
 #pragma once
 #include <windows.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+namespace G3O {
 
 void InitializeMathSIMDOptimizer();
+void ShutdownMathSIMDOptimizer();
 
-#ifdef __cplusplus
-}
-#endif
+} // namespace G3O

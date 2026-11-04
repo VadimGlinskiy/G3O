@@ -218,6 +218,16 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "WriteCrashDump=true\n\n"
         << "; Записывать подробный отчёт о сбое в G3O_CrashReport.log\n"
         << "WriteCrashLog=true\n\n\n"
+        << "[Performance]\n"
+        << "; Аппаратный SIMD Frustum Culling (SSE2-векторизация отсечения невидимой геометрии)\n"
+        << "; Значительно поднимает FPS при экстремальной дальности прорисовки\n"
+        << "EnableSIMDFrustumCulling=true\n\n"
+        << "; Высокоточный мультимедийный таймер Windows (квант 1 мс) для устранения микрофризов\n"
+        << "EnableHighPrecisionTimer=true\n\n"
+        << "; Назначить высокий приоритет процессу (HIGH_PRIORITY_CLASS) для защиты от фоновых служб\n"
+        << "EnableHighProcessPriority=true\n\n"
+        << "; Оптимизировать планировщик CPU под P-ядра процессора\n"
+        << "EnableCPUTopologyAffinity=true\n\n\n"
         << "[Logging]\n"
         << "; Записывать диагностический журнал событий в G3O_diagnostic.log\n"
         << "EnableDiagnosticLog=true\n\n"
@@ -297,6 +307,12 @@ void LoadConfig() {
     s_config.writeCrashDump = ReadIniBool("CrashInvestigator", "WriteCrashDump", true, path);
     s_config.writeCrashLog = ReadIniBool("CrashInvestigator", "WriteCrashLog", true, path);
 
+    // [Performance]
+    s_config.enableSIMDFrustumCulling = ReadIniBool("Performance", "EnableSIMDFrustumCulling", true, path);
+    s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
+    s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
+    s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);
+
     // [Logging]
     s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", true, path);
     s_config.interceptOutputDebugString = ReadIniBool("Logging", "InterceptOutputDebugString", true, path);
@@ -311,6 +327,9 @@ void LoadConfig() {
         KeyCodeToString(s_config.decreaseFOVKey).c_str(), KeyCodeToString(s_config.increaseFOVKey).c_str(), s_config.fovStep);
     Log("G3O", "  [Crash]   Enable=%d, Dialog=%d, Dump=%d, Log=%d",
         (int)s_config.enableCrashInvestigator, (int)s_config.showCrashDialog, (int)s_config.writeCrashDump, (int)s_config.writeCrashLog);
+    Log("G3O", "  [Perform] SIMDFrustum=%d, 1msTimer=%d, HighPriority=%d, CPUTopology=%d",
+        (int)s_config.enableSIMDFrustumCulling, (int)s_config.enableHighPrecisionTimer,
+        (int)s_config.enableHighProcessPriority, (int)s_config.enableCPUTopologyAffinity);
 }
 
 } // namespace G3O

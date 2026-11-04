@@ -32,6 +32,10 @@ add_library(dinput8 SHARED
     src/camera_controller.h
     src/config_manager.cpp
     src/config_manager.h
+    src/math_simd_optimizer.cpp
+    src/math_simd_optimizer.h
+    src/cpu_topology.cpp
+    src/cpu_topology.h
 )
 
 target_include_directories(dinput8 PRIVATE
@@ -43,6 +47,7 @@ target_link_libraries(dinput8 PRIVATE
     minhook
     dbghelp
     psapi
+    winmm
 )
 
 # Output name must be dinput8.dll

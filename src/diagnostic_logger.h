@@ -7,6 +7,7 @@ namespace G3O {
 
 void InitializeDiagnosticLogger();
 void ShutdownDiagnosticLogger();
+void FlushDiagnosticLog();
 
 // Thread-safe logging to file and circular memory buffer
 void Log(const char* tag, const char* fmt, ...);

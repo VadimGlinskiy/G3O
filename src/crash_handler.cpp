@@ -501,6 +501,7 @@ static LONG HandleCrash(EXCEPTION_POINTERS* pExceptionInfo) {
     }
 
     DetermineCrashPaths();
+    FlushDiagnosticLog();
 
     uintptr_t faultAddr = (uintptr_t)pExceptionInfo->ExceptionRecord->ExceptionAddress;
     BlameResult blame = AnalyzeAddress(faultAddr);
@@ -598,6 +599,7 @@ static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI HookedSetUnhandledExceptionFilter(LPT
 
 void InitializeCrashHandler() {
     DetermineCrashPaths();
+    FlushDiagnosticLog();
 
     // 1. Install top-level unhandled exception filter
     s_previousFilter = SetUnhandledExceptionFilter(G3OUnhandledCrashFilter);

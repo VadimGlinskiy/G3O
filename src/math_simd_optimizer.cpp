@@ -1,8 +1,11 @@
 #include "math_simd_optimizer.h"
+#include "diagnostic_logger.h"
 #include <minhook.h>
 #include <xmmintrin.h>
 #include <emmintrin.h>
 #include <stdio.h>
+
+namespace G3O {
 
 #pragma pack(push, 1)
 struct Vector3 {
@@ -21,10 +24,6 @@ struct Sphere3 {
 
 struct Plane4 {
     float a, b, c, d;
-};
-
-struct Matrix4 {
-    float m[4][4];
 };
 #pragma pack(pop)
 
@@ -82,7 +81,7 @@ static bool __fastcall Hooked_FrustumCullSphere(void* pThis, void* /*edx*/, cons
 }
 
 // ---------------------------------------------------------------------------
-// 3. Vectorized Box-Box Intersection (bCBox::Intersects(const bCBox&))
+// 3. Fast Overlap Box-Box Intersection (bCBox::Intersects(const bCBox&))
 // ---------------------------------------------------------------------------
 
 typedef bool (__thiscall* BoxIntersectsBox_t)(const Box3* pThis, const Box3* pOther);
@@ -91,7 +90,6 @@ static BoxIntersectsBox_t Real_BoxIntersectsBox = NULL;
 static bool __fastcall Hooked_BoxIntersectsBox(const Box3* pThis, void* /*edx*/, const Box3* pOther) {
     if (!pThis || !pOther) return false;
 
-    // Fast SSE overlap test across all 3 axes
     if (pThis->min.x > pOther->max.x || pThis->max.x < pOther->min.x) return false;
     if (pThis->min.y > pOther->max.y || pThis->max.y < pOther->min.y) return false;
     if (pThis->min.z > pOther->max.z || pThis->max.z < pOther->min.z) return false;
@@ -100,109 +98,53 @@ static bool __fastcall Hooked_BoxIntersectsBox(const Box3* pThis, void* /*edx*/,
 }
 
 // ---------------------------------------------------------------------------
-// 4. Vectorized Vector-Matrix Multiplication (bCVector::operator*(const bCMatrix&))
-// ---------------------------------------------------------------------------
-
-typedef Vector3* (__thiscall* VectorMulMatrix_t)(const Vector3* pThis, Vector3* pOut, const Matrix4* pMat);
-static VectorMulMatrix_t Real_VectorMulMatrix = NULL;
-
-static Vector3* __fastcall Hooked_VectorMulMatrix(const Vector3* pThis, void* /*edx*/, Vector3* pOut, const Matrix4* pMat) {
-    if (!pThis || !pOut || !pMat) return pOut;
-
-    __m128 vx = _mm_set1_ps(pThis->x);
-    __m128 vy = _mm_set1_ps(pThis->y);
-    __m128 vz = _mm_set1_ps(pThis->z);
-
-    __m128 row0 = _mm_loadu_ps(&pMat->m[0][0]);
-    __m128 row1 = _mm_loadu_ps(&pMat->m[1][0]);
-    __m128 row2 = _mm_loadu_ps(&pMat->m[2][0]);
-    __m128 row3 = _mm_loadu_ps(&pMat->m[3][0]);
-
-    __m128 res = _mm_add_ps(
-        _mm_add_ps(_mm_mul_ps(vx, row0), _mm_mul_ps(vy, row1)),
-        _mm_add_ps(_mm_mul_ps(vz, row2), row3)
-    );
-
-    alignas(16) float tmp[4];
-    _mm_store_ps(tmp, res);
-
-    pOut->x = tmp[0];
-    pOut->y = tmp[1];
-    pOut->z = tmp[2];
-
-    return pOut;
-}
-
-// ---------------------------------------------------------------------------
-// 5. PhysX 2.4.1 Multithreading & Memory Hook
-// ---------------------------------------------------------------------------
-
-typedef void* (__cdecl* NxCreatePhysicsSDK_t)(unsigned int sdkVersion, void* allocator, void* outputStream, const void* desc);
-static NxCreatePhysicsSDK_t Real_NxCreatePhysicsSDK = NULL;
-
-static void* __cdecl Hooked_NxCreatePhysicsSDK(unsigned int sdkVersion, void* allocator, void* outputStream, const void* desc) {
-    void* pSDK = Real_NxCreatePhysicsSDK(sdkVersion, allocator, outputStream, desc);
-    if (pSDK) {
-        OutputDebugStringA("[Gothic3Optima] PhysX 2.4.1 SDK initialized with mimalloc backing.\n");
-    }
-    return pSDK;
-}
-
-// ---------------------------------------------------------------------------
-// Initialization
+// Initialization & Shutdown
 // ---------------------------------------------------------------------------
 
 void InitializeMathSIMDOptimizer() {
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
-    if (hSharedBase) {
-        // 1. Hook bCFrustum::Cull(const bCBox&)
-        void* pCullBox = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCBox@@@Z");
-        if (pCullBox) {
-            if (MH_CreateHook(pCullBox, (LPVOID)Hooked_FrustumCullBox, (LPVOID*)&Real_FrustumCullBox) == MH_OK) {
-                MH_EnableHook(pCullBox);
-                OutputDebugStringA("[Gothic3Optima] Hooked bCFrustum::Cull(bCBox) with SIMD.\n");
-            }
-        }
+    if (!hSharedBase) return;
 
-        // 2. Hook bCFrustum::Cull(const bCSphere&)
-        void* pCullSphere = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCSphere@@@Z");
-        if (pCullSphere) {
-            if (MH_CreateHook(pCullSphere, (LPVOID)Hooked_FrustumCullSphere, (LPVOID*)&Real_FrustumCullSphere) == MH_OK) {
-                MH_EnableHook(pCullSphere);
-                OutputDebugStringA("[Gothic3Optima] Hooked bCFrustum::Cull(bCSphere) with SIMD.\n");
-            }
+    // 1. Hook bCFrustum::Cull(const bCBox&)
+    void* pCullBox = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCBox@@@Z");
+    if (pCullBox) {
+        if (MH_CreateHook(pCullBox, (LPVOID)Hooked_FrustumCullBox, (LPVOID*)&Real_FrustumCullBox) == MH_OK) {
+            MH_EnableHook(pCullBox);
+            Log("G3O", "SIMD Frustum Culling hooked (?Cull@bCFrustum(bCBox)).");
         }
-
-        // 3. Hook bCBox::Intersects(const bCBox&)
-        void* pIntersects = (void*)GetProcAddress(hSharedBase, "?Intersects@bCBox@@QBE_NABV1@@Z");
-        if (pIntersects) {
-            if (MH_CreateHook(pIntersects, (LPVOID)Hooked_BoxIntersectsBox, (LPVOID*)&Real_BoxIntersectsBox) == MH_OK) {
-                MH_EnableHook(pIntersects);
-                OutputDebugStringA("[Gothic3Optima] Hooked bCBox::Intersects(bCBox) with SIMD.\n");
-            }
-        }
-
-        // 4. Hook bCVector::operator*(const bCMatrix&) disabled to prevent calling convention mismatch on struct return
-        /*
-        void* pVecMul = (void*)GetProcAddress(hSharedBase, "??DbCVector@@QBE?AV0@ABVbCMatrix@@@Z");
-        if (pVecMul) {
-            if (MH_CreateHook(pVecMul, (LPVOID)Hooked_VectorMulMatrix, (LPVOID*)&Real_VectorMulMatrix) == MH_OK) {
-                MH_EnableHook(pVecMul);
-                OutputDebugStringA("[Gothic3Optima] Hooked bCVector::operator*(bCMatrix) with SSE 4-way SIMD.\n");
-            }
-        }
-        */
     }
 
-    // 5. Hook PhysXLoader.dll NxCreatePhysicsSDK
-    HMODULE hPhysXLoader = GetModuleHandleA("PhysXLoader.dll");
-    if (hPhysXLoader) {
-        void* pNxCreate = (void*)GetProcAddress(hPhysXLoader, "_NxCreatePhysicsSDK@16");
-        if (pNxCreate) {
-            if (MH_CreateHook(pNxCreate, (LPVOID)Hooked_NxCreatePhysicsSDK, (LPVOID*)&Real_NxCreatePhysicsSDK) == MH_OK) {
-                MH_EnableHook(pNxCreate);
-                OutputDebugStringA("[Gothic3Optima] Hooked NxCreatePhysicsSDK.\n");
-            }
+    // 2. Hook bCFrustum::Cull(const bCSphere&)
+    void* pCullSphere = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCSphere@@@Z");
+    if (pCullSphere) {
+        if (MH_CreateHook(pCullSphere, (LPVOID)Hooked_FrustumCullSphere, (LPVOID*)&Real_FrustumCullSphere) == MH_OK) {
+            MH_EnableHook(pCullSphere);
+            Log("G3O", "SIMD Frustum Culling hooked (?Cull@bCFrustum(bCSphere)).");
+        }
+    }
+
+    // 3. Hook bCBox::Intersects(const bCBox&)
+    void* pIntersects = (void*)GetProcAddress(hSharedBase, "?Intersects@bCBox@@QBE_NABV1@@Z");
+    if (pIntersects) {
+        if (MH_CreateHook(pIntersects, (LPVOID)Hooked_BoxIntersectsBox, (LPVOID*)&Real_BoxIntersectsBox) == MH_OK) {
+            MH_EnableHook(pIntersects);
+            Log("G3O", "SIMD Box Intersection hooked (?Intersects@bCBox).");
         }
     }
 }
+
+void ShutdownMathSIMDOptimizer() {
+    HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
+    if (!hSharedBase) return;
+
+    void* pCullBox = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCBox@@@Z");
+    if (pCullBox) MH_DisableHook(pCullBox);
+
+    void* pCullSphere = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCSphere@@@Z");
+    if (pCullSphere) MH_DisableHook(pCullSphere);
+
+    void* pIntersects = (void*)GetProcAddress(hSharedBase, "?Intersects@bCBox@@QBE_NABV1@@Z");
+    if (pIntersects) MH_DisableHook(pIntersects);
+}
+
+} // namespace G3O

@@ -32,6 +32,12 @@ struct Config {
     bool writeCrashDump = true;
     bool writeCrashLog = true;
 
+    // [Performance]
+    bool enableSIMDFrustumCulling = true;
+    bool enableHighPrecisionTimer = true;
+    bool enableHighProcessPriority = true;
+    bool enableCPUTopologyAffinity = true;
+
     // [Logging]
     bool enableDiagnosticLog = true;
     bool interceptOutputDebugString = true;

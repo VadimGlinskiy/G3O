@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <minhook.h>
+#include <timeapi.h>
 #include "dinput8_proxy.h"
 #include "config_manager.h"
 #include "version_watermark.h"
@@ -7,6 +8,10 @@
 #include "crash_handler.h"
 #include "borderless_window.h"
 #include "camera_controller.h"
+#include "math_simd_optimizer.h"
+#include "cpu_topology.h"
+
+#pragma comment(lib, "winmm.lib")
 
 static DWORD WINAPI OptimaInitThread(LPVOID) {
     MH_STATUS status = MH_Initialize();
@@ -53,6 +58,11 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::HookLoggingFunctions();
     }
 
+    // Hardware SIMD Frustum Culling & Math optimization for extreme draw distances
+    if (cfg.enableSIMDFrustumCulling) {
+        G3O::InitializeMathSIMDOptimizer();
+    }
+
     // Hook camera controller for dynamic widescreen FOV
     if (cfg.enableDynamicFOV) {
         G3O::InitializeCameraController();
@@ -78,7 +88,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         }
     }
 
-    G3O::Log("G3O", "PUP-compatible core with Borderless Window, Dynamic FOV, and Crash Investigator initialized.");
+    G3O::Log("G3O", "PUP-compatible core with SIMD Frustum Culling, Borderless Window, and Dynamic FOV initialized.");
     OutputDebugStringA("[Gothic3Optima] PUP-compatible core initialized.\n");
     return 0;
 }
@@ -91,10 +101,14 @@ static void ShutdownOptima() {
         UnloadAll_t unload = (UnloadAll_t)GetProcAddress(hG3SE, "?UnloadAllPlugins@G3SDK@@YAXXZ");
         if (unload) unload();
     }
+    G3O::ShutdownMathSIMDOptimizer();
     G3O::ShutdownCameraController();
     G3O::ShutdownBorderlessWindow();
     G3O::ShutdownCrashHandler();
     G3O::ShutdownDiagnosticLogger();
+    if (G3O::GetConfig().enableHighPrecisionTimer) {
+        timeEndPeriod(1);
+    }
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
     Proxy::UnloadSystemDirectInput();
@@ -108,13 +122,30 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD reason, LPVOID reserved) {
         // Load G3O.ini settings immediately
         G3O::LoadConfig();
 
-        if (G3O::GetConfig().fixVulkanLayerConflicts) {
+        const G3O::Config& cfg = G3O::GetConfig();
+
+        // 1. High Process Priority: Give Gothic 3 render thread priority over background tasks
+        if (cfg.enableHighProcessPriority) {
+            SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+        }
+
+        // 2. Multimedia High-Precision 1ms Timer: Eliminate frame pacing jitter and sleep stalls
+        if (cfg.enableHighPrecisionTimer) {
+            timeBeginPeriod(1);
+        }
+
+        // 3. CPU Core Affinity: Pin to performance P-cores and prevent thread hopping
+        if (cfg.enableCPUTopologyAffinity) {
+            G3O::InitializeCPUTopology();
+        }
+
+        if (cfg.fixVulkanLayerConflicts) {
             // Prevent known unstable 32-bit Vulkan implicit layers (such as Bandicam's bdcamvk32.dll)
             // from crashing DXVK during swapchain creation, while keeping screen capture operational.
             SetEnvironmentVariableA("DISABLE_VK_LAYER_bandicam_helper_1", "1");
         }
 
-        if (G3O::GetConfig().enableDiagnosticLog) {
+        if (cfg.enableDiagnosticLog) {
             G3O::InitializeDiagnosticLogger();
         }
 

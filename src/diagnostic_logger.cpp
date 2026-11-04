@@ -76,6 +76,15 @@ void InitializeDiagnosticLogger() {
     LeaveCriticalSection(&s_logCs);
 }
 
+void FlushDiagnosticLog() {
+    if (!s_csInitialized) return;
+    EnterCriticalSection(&s_logCs);
+    if (s_logFile) {
+        fflush(s_logFile);
+    }
+    LeaveCriticalSection(&s_logCs);
+}
+
 void ShutdownDiagnosticLogger() {
     if (!s_csInitialized) return;
 
@@ -112,9 +121,13 @@ void LogRaw(const char* message) {
     }
     s_recentLogs.push_back(fullLine);
 
+    static int s_flushCounter = 0;
     if (s_logFile) {
         fputs(fullLine.c_str(), s_logFile);
-        fflush(s_logFile);
+        if (++s_flushCounter >= 128) {
+            fflush(s_logFile);
+            s_flushCounter = 0;
+        }
     }
 
     LeaveCriticalSection(&s_logCs);

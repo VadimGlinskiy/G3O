@@ -1,6 +1,9 @@
 #include "cpu_topology.h"
+#include "diagnostic_logger.h"
 #include <windows.h>
 #include <stdio.h>
+
+namespace G3O {
 
 static DWORD_PTR g_pCoreMask = 0;
 static DWORD_PTR g_allCoresMask = 0;
@@ -14,7 +17,6 @@ void InitializeCPUTopology() {
     DWORD length = 0;
     GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &length);
     if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || length == 0) {
-        OutputDebugStringA("[Gothic3Optima] GetLogicalProcessorInformationEx not supported or failed.\n");
         return;
     }
 
@@ -28,7 +30,6 @@ void InitializeCPUTopology() {
     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)pBuf;
 
     if (!GetLogicalProcessorInformationEx(RelationProcessorCore, info, &length)) {
-        OutputDebugStringA("[Gothic3Optima] Failed to read processor topology.\n");
         if (pBuf != stackBuf) LocalFree(pBuf);
         return;
     }
@@ -82,15 +83,14 @@ void InitializeCPUTopology() {
     g_allCoresMask = allMask;
     g_pCoreMask = (pCoreMask != 0) ? pCoreMask : allMask;
 
-    char logBuf[256];
     if (isHybrid) {
-        sprintf_s(logBuf, "[Gothic3Optima] Hybrid CPU detected! P-cores: %d, E-cores: %d. Locking process to P-core mask: 0x%IX\n",
+        Log("G3O", "Hybrid CPU detected! P-cores: %d, E-cores: %d. Locking process to P-core mask: 0x%IX",
             pCoreCount, eCoreCount, g_pCoreMask);
-        OutputDebugStringA(logBuf);
         SetProcessAffinityMask(GetCurrentProcess(), g_pCoreMask);
     } else {
-        sprintf_s(logBuf, "[Gothic3Optima] Uniform CPU topology detected (%d cores). Affinity mask: 0x%IX\n",
+        Log("G3O", "Uniform CPU topology detected (%d cores). Affinity mask: 0x%IX",
             pCoreCount, g_pCoreMask);
-        OutputDebugStringA(logBuf);
     }
 }
+
+} // namespace G3O
