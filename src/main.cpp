@@ -76,7 +76,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     }
 
     // VFS Cache Optimizer: O(1) hash cache for virtual file system directory lookups across 395 mod archives
-    G3O::InitializeVFSCacheOptimizer();
+    if (cfg.enableVFSCache) {
+        G3O::InitializeVFSCacheOptimizer();
+    }
 
     // Savegame Profiler: High-resolution telemetry for savegame loading phases
     G3O::InitializeSavegameProfiler();

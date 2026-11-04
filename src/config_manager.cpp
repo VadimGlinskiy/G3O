@@ -277,6 +277,18 @@ static float ReadIniFloat(const char* section, const char* key, float defaultVal
     }
 }
 
+static int ReadIniInt(const char* section, const char* key, int defaultVal, const char* path) {
+    return (int)GetPrivateProfileIntA(section, key, defaultVal, path);
+}
+
+static DWORD_PTR ReadIniHex(const char* section, const char* key, DWORD_PTR defaultVal, const char* path) {
+    char buf[64] = { 0 };
+    GetPrivateProfileStringA(section, key, "0", buf, sizeof(buf), path);
+    char* end = nullptr;
+    unsigned long long val = strtoull(buf, &end, 0);
+    return (val != 0) ? (DWORD_PTR)val : defaultVal;
+}
+
 const Config& GetConfig() {
     return s_config;
 }
@@ -333,6 +345,10 @@ void LoadConfig() {
     s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
     s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
     s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);
+    s_config.enableVFSCache = ReadIniBool("Performance", "EnableVFSCache", true, path);
+    s_config.cpuCores = ReadIniInt("Performance", "CPUCores", 0, path);
+    s_config.cpuThreads = ReadIniInt("Performance", "CPUThreads", 0, path);
+    s_config.cpuAffinityMask = ReadIniHex("Performance", "CPUAffinityMask", 0, path);
 
     // [Logging]
     s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", true, path);

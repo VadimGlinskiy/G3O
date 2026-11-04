@@ -1,4 +1,5 @@
 #include "cpu_topology.h"
+#include "config_manager.h"
 #include "diagnostic_logger.h"
 #include <windows.h>
 #include <stdio.h>
@@ -14,6 +15,34 @@ DWORD_PTR GetPCoreAffinityMask() {
 }
 
 void InitializeCPUTopology() {
+    const G3O::Config& cfg = G3O::GetConfig();
+
+    // 1. Manual Affinity Mask override (if specified in G3O.ini, e.g. CPUAffinityMask=0xFFFFF)
+    if (cfg.cpuAffinityMask != 0) {
+        g_pCoreMask = cfg.cpuAffinityMask;
+        g_allCoresMask = cfg.cpuAffinityMask;
+        SetProcessAffinityMask(GetCurrentProcess(), g_pCoreMask);
+        Log("G3O", "CPU Topology: Manual affinity mask override from G3O.ini: 0x%IX", g_pCoreMask);
+        return;
+    }
+
+    // 2. Manual Thread Count override (if specified in G3O.ini, e.g. CPUThreads=20)
+    int targetThreads = cfg.cpuThreads > 0 ? cfg.cpuThreads : (cfg.cpuCores > 0 ? cfg.cpuCores : 0);
+    if (targetThreads > 0) {
+        DWORD_PTR mask = 0;
+        int count = (targetThreads > 64) ? 64 : targetThreads;
+        for (int i = 0; i < count; ++i) {
+            mask |= ((DWORD_PTR)1 << i);
+        }
+        g_pCoreMask = mask;
+        g_allCoresMask = mask;
+        SetProcessAffinityMask(GetCurrentProcess(), g_pCoreMask);
+        Log("G3O", "CPU Topology: Config override applied: %d threads (%d cores requested). Affinity mask: 0x%IX",
+            targetThreads, cfg.cpuCores > 0 ? cfg.cpuCores : targetThreads, g_pCoreMask);
+        return;
+    }
+
+    // 3. Auto-detection (RelationProcessorCore)
     DWORD length = 0;
     GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &length);
     if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || length == 0) {
