@@ -53,6 +53,8 @@ add_library(dinput8 SHARED
     src/property_cache_optimizer.h
     src/savegame_profiler.cpp
     src/savegame_profiler.h
+    src/load_sampler.cpp
+    src/load_sampler.h
     src/vfs_cache_optimizer.cpp
     src/vfs_cache_optimizer.h
 )
