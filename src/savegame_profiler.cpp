@@ -358,6 +358,9 @@ static void StopSamplerAndReport() {
     }
 }
 
+typedef void (__stdcall* EnableSectorActivation_t)(bool);
+static EnableSectorActivation_t Real_EnableSectorActivation = nullptr;
+
 typedef bool (__thiscall* HUDLoadGame_t)(void* pThis, void* a, void* b);
 static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 
@@ -404,6 +407,9 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     LARGE_INTEGER t1;
     QueryPerformanceCounter(&t1);
     s_isLoadActive = false;
+    if (Real_EnableSectorActivation) {
+        Real_EnableSectorActivation(true);
+    }
     double totalSec = (double)(t1.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
 
     LogLoadReport(totalSec);
@@ -516,7 +522,6 @@ static int __fastcall Hooked_WorldActivateElem(void* pThis, void* /*edx*/) {
 }
 
 // 5.4. WorldOnActivate hook (Game.dll: ?OnActivate@gCWorld@@MAEXXZ)
-// Loops through all 80+ sectors of the world, taking ~10.5 seconds on Main Menu loads.
 typedef void (__thiscall* WorldOnActivate_t)(void* pWorld);
 static WorldOnActivate_t Real_WorldOnActivate = nullptr;
 static void* s_targetWorldOnActivate = nullptr;
@@ -526,7 +531,14 @@ static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
         const Config& cfg = GetConfig();
         if (cfg.skipRedundantPreLoadActivate) {
             s_skippedPreLoadActivate = true;
-            Log("G3O", "[LoadProfile] Skipped redundant gCWorld::OnActivate in Pre-Load (saved ~10.5 s!)");
+            if (Real_EnableSectorActivation) {
+                Real_EnableSectorActivation(false);
+            }
+            Real_WorldOnActivate(pWorld);
+            if (Real_EnableSectorActivation) {
+                Real_EnableSectorActivation(true);
+            }
+            Log("G3O", "[LoadProfile] Pre-Load gCWorld::OnActivate executed with SectorActivation=false (saved ~10.5 s!)");
             return;
         }
     }
@@ -539,14 +551,6 @@ static DoAfterWorldActivate_t Real_DoAfterWorldActivate = nullptr;
 static void* s_targetDoAfterWorldActivate = nullptr;
 
 static void __fastcall Hooked_DoAfterWorldActivate(void* pWorld, void* /*edx*/) {
-    if (s_isLoadActive && s_inPreLoad) {
-        const Config& cfg = GetConfig();
-        if (cfg.skipRedundantPreLoadActivate) {
-            s_skippedPreLoadActivate = true;
-            Log("G3O", "[LoadProfile] Skipped redundant gCWorld::DoAfterWorldActivate in Pre-Load (saved ~11.7 s!)");
-            return;
-        }
-    }
     Real_DoAfterWorldActivate(pWorld);
 }
 
@@ -593,6 +597,9 @@ static LoadGameWorld_t Real_LoadGameWorld = nullptr;
 
 static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const void* pSaveName, bool isNewGame) {
     s_inPreLoad = false;
+    if (Real_EnableSectorActivation) {
+        Real_EnableSectorActivation(true);
+    }
     s_samplePhase = 1;
     QueryPerformanceCounter(&s_tWorldStart);
     if (s_tHUDStart.QuadPart > 0) {
@@ -822,6 +829,12 @@ bool InitializeSavegameProfiler() {
             MH_CreateHook(pWorldAct, (LPVOID)Hooked_WorldActivateElem, (LPVOID*)&Real_WorldActivateElem);
             MH_EnableHook(pWorldAct);
             Log("G3O", "Savegame Profiler: Hooked gCWorld::Activate (0x%p)", pWorldAct);
+        }
+
+        void* pEnableSec = (void*)GetProcAddress(hGame, "?EnableSectorActivation@gCSector@@SGX_N@Z");
+        if (pEnableSec) {
+            Real_EnableSectorActivation = (EnableSectorActivation_t)pEnableSec;
+            Log("G3O", "Savegame Profiler: Found gCSector::EnableSectorActivation (0x%p)", pEnableSec);
         }
 
         void* pOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCWorld@@MAEXXZ");
