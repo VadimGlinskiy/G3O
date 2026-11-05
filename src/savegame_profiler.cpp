@@ -60,6 +60,7 @@ struct ContextAuditMetrics {
     LayerAuditMetric createSpecificEntity; // eCEntityDynamicContext::CreateSpecificEntity (Engine.dll)
     LayerAuditMetric dynEntityRead;        // eCDynamicEntity::Read (Engine.dll RVA 0x2295C0)
     LayerAuditMetric entityRead;           // eCEntity::Read (Engine.dll RVA 0x2257F0)
+    LayerAuditMetric readObject;           // bCPropertyObjectSingleton::ReadObject (SharedBase.dll)
     LayerAuditMetric patchWithTemplate;    // eCEntity::PatchWithTemplate (Engine.dll RVA 0x224350)
     LayerAuditMetric readDependency;       // eCContextBase::ReadDependency (Engine.dll RVA 0x21A150)
     LayerAuditMetric childrenAvailable;    // eCEntity::ChildrenAvailable (Engine.dll)
@@ -80,6 +81,51 @@ using CreateSpecificEntityFn = void* (__thiscall*)(void*);
 using DynamicEntityReadFn = int (__thiscall*)(void*, void*);
 using EntityReadFn = int (__thiscall*)(void*, void*);
 using PatchWithTemplateFn = bool (__thiscall*)(void*, const void*, bool);
+using PropertyObjectReadObjectFn = bool (__thiscall*)(void*, void*, void*);
+static PropertyObjectReadObjectFn Real_PropertyObjectReadObject = nullptr;
+
+// -----------------------------------------------------------------------------
+// O(1) Template Entity Cache (Phase 11.8)
+// Eliminates repetitive hash table traversals & divisions for ~1500 unique templates
+// -----------------------------------------------------------------------------
+struct TemplateCacheSlot {
+    uint32_t guid[4];
+    void*    pTemplateEntity;
+    bool     valid;
+};
+
+static const uint32_t TEMPLATE_CACHE_SIZE = 4096;
+static const uint32_t TEMPLATE_CACHE_MASK = TEMPLATE_CACHE_SIZE - 1;
+
+static TemplateCacheSlot s_templateCache[TEMPLATE_CACHE_SIZE] = {};
+static uint32_t s_templateHits = 0;
+static uint32_t s_templateMisses = 0;
+static uintptr_t s_cachedEngineBase = 0;
+
+static void* LookupTemplateEntity(uintptr_t engineBase, const void* pGuid) {
+    if (!engineBase) return nullptr;
+    typedef void* (__cdecl* GetTemplateContextFn)();
+    GetTemplateContextFn getCtx = reinterpret_cast<GetTemplateContextFn>(engineBase + 0x17B20);
+    void* ctx = getCtx();
+    if (!ctx) return nullptr;
+
+    void* pMap = reinterpret_cast<char*>(ctx) + 0x34;
+    void* pFindNode = reinterpret_cast<void*>(engineBase + 0x1F0F20);
+    uint32_t dummy = 0;
+    void* node = nullptr;
+
+    __asm {
+        mov eax, pMap
+        lea ecx, dummy
+        push ecx
+        push pGuid
+        call pFindNode
+        mov node, eax
+    }
+
+    if (!node) return nullptr;
+    return *reinterpret_cast<void**>(reinterpret_cast<char*>(node) + 0x14);
+}
 using ReadDependencyFn = int (__thiscall*)(void*, void*, void*);
 using ChildrenAvailableFn = void (__thiscall*)(void*, bool);
 
@@ -97,7 +143,7 @@ static PatchWithTemplateFn Real_PatchWithTemplate = nullptr;
 static ReadDependencyFn Real_ReadDependency = nullptr;
 static ChildrenAvailableFn Real_ChildrenAvailable = nullptr;
 
-static LPVOID s_metricsHookTargets[16] = {};
+static LPVOID s_metricsHookTargets[32] = {};
 static int s_numMetricsHooks = 0;
 static bool s_metricsHooksInitialized = false;
 
@@ -205,18 +251,22 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
         const double patchMs = LayerMetricMs(s_contextAuditMetrics.patchWithTemplate.qpcTicks - before.patchWithTemplate.qpcTicks);
         const uint64_t patchCalls = s_contextAuditMetrics.patchWithTemplate.calls - before.patchWithTemplate.calls;
 
+        const double readObjMs = LayerMetricMs(s_contextAuditMetrics.readObject.qpcTicks - before.readObject.qpcTicks);
+        const uint64_t readObjCalls = s_contextAuditMetrics.readObject.calls - before.readObject.calls;
+
         const double depMs = LayerMetricMs(s_contextAuditMetrics.readDependency.qpcTicks - before.readDependency.qpcTicks);
         const uint64_t depCalls = s_contextAuditMetrics.readDependency.calls - before.readDependency.calls;
 
         const double childMs = LayerMetricMs(s_contextAuditMetrics.childrenAvailable.qpcTicks - before.childrenAvailable.qpcTicks);
         const uint64_t childCalls = s_contextAuditMetrics.childrenAvailable.calls - before.childrenAvailable.calls;
 
-        Log("G3O", "[DynamicContextAudit] Layer %p ('%s') directRead=%d | Total=%.2f ms | CPOReadFile=%.2f ms (%llu calls) | Entities=%llu (Create=%.2f ms, DynRead=%.2f ms [EntRead=%.2f ms, Patch=%.2f ms]) | ReadDep=%.2f ms (%llu calls) | ChildrenAvail=%.2f ms (%llu calls)",
+        Log("G3O", "[DynamicContextAudit] Layer %p ('%s') directRead=%d | Total=%.2f ms | CPOReadFile=%.2f ms (%llu calls) | Entities=%llu (Create=%.2f ms, DynRead=%.2f ms [EntRead=%.2f ms (ReadObj=%.2f ms in %llu calls), Patch=%.2f ms (Cache: %u hits, %u miss)]) | ReadDep=%.2f ms (%llu calls)",
             pLayer, filePath, (int)directRead, totalMs,
             cpoMs, cpoCalls,
-            createCalls, createMs, dynReadMs, entReadMs, patchMs,
-            depMs, depCalls,
-            childMs, childCalls);
+            createCalls, createMs, dynReadMs,
+            entReadMs, readObjMs, readObjCalls,
+            patchMs, s_templateHits, s_templateMisses,
+            depMs, depCalls);
     }
 
     return result;
@@ -254,10 +304,54 @@ static int __fastcall Hooked_EntityRead(void* self, void* /*edx*/, void* pStream
     return result;
 }
 
-static bool __fastcall Hooked_PatchWithTemplate(void* self, void* /*edx*/, const void* pGuid, bool flag) {
-    if (!s_isLoadActive) return Real_PatchWithTemplate(self, pGuid, flag);
+static bool __fastcall Hooked_PropertyObjectReadObject(void* self, void* /*edx*/, void* pStream, void* pObject) {
+    if (!s_isLoadActive) return Real_PropertyObjectReadObject(self, pStream, pObject);
     const std::uint64_t start = BeginLayerMetric();
-    const bool result = Real_PatchWithTemplate(self, pGuid, flag);
+    const bool res = Real_PropertyObjectReadObject(self, pStream, pObject);
+    EndLayerMetric(s_contextAuditMetrics.readObject, start);
+    return res;
+}
+
+static bool __fastcall Hooked_PatchWithTemplate(void* self, void* /*edx*/, const void* pGuid, bool flag) {
+    if (!s_isLoadActive || !pGuid) {
+        return Real_PatchWithTemplate(self, pGuid, flag);
+    }
+
+    const std::uint64_t start = BeginLayerMetric();
+
+    const uint32_t* g = reinterpret_cast<const uint32_t*>(pGuid);
+    uint32_t hash = (g[0] ^ (g[1] * 31) ^ (g[2] * 127) ^ g[3]) & TEMPLATE_CACHE_MASK;
+    TemplateCacheSlot& slot = s_templateCache[hash];
+
+    void* pTemplate = nullptr;
+    if (slot.valid && slot.guid[0] == g[0] && slot.guid[1] == g[1] && slot.guid[2] == g[2] && slot.guid[3] == g[3]) {
+        pTemplate = slot.pTemplateEntity;
+        ++s_templateHits;
+    } else {
+        pTemplate = LookupTemplateEntity(s_cachedEngineBase, pGuid);
+        slot.guid[0] = g[0];
+        slot.guid[1] = g[1];
+        slot.guid[2] = g[2];
+        slot.guid[3] = g[3];
+        slot.pTemplateEntity = pTemplate;
+        slot.valid = true;
+        ++s_templateMisses;
+    }
+
+    bool result = true;
+    if (pTemplate) {
+        void* enginePtr = *reinterpret_cast<void**>(s_cachedEngineBase + 0x602A88);
+        if (enginePtr && *reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(enginePtr) + 0x188) != 0) {
+            void** vtbl = *reinterpret_cast<void***>(self);
+            using CopyFromTemplateFn = bool (__thiscall*)(void*, void*, int, bool);
+            CopyFromTemplateFn copyFn = reinterpret_cast<CopyFromTemplateFn>(vtbl[0x104 / 4]);
+            copyFn(self, pTemplate, 0, flag);
+        }
+        result = true;
+    } else {
+        result = Real_PatchWithTemplate(self, pGuid, flag);
+    }
+
     EndLayerMetric(s_contextAuditMetrics.patchWithTemplate, start);
     return result;
 }
@@ -319,6 +413,7 @@ static void RemoveCreatedMetricsHooks() {
     Real_DynamicEntityRead = nullptr;
     Real_EntityRead = nullptr;
     Real_PatchWithTemplate = nullptr;
+    Real_PropertyObjectReadObject = nullptr;
     Real_ReadDependency = nullptr;
     Real_ChildrenAvailable = nullptr;
 
@@ -346,6 +441,7 @@ static bool InitMetricsHooks() {
     }
 
     uintptr_t engineBase = reinterpret_cast<uintptr_t>(hEngine);
+    s_cachedEngineBase = engineBase;
     bool created = true;
 
     // 1. Layer base / Sector hooks
@@ -409,6 +505,12 @@ static bool InitMetricsHooks() {
         reinterpret_cast<LPVOID>(Hooked_PatchWithTemplate),
         reinterpret_cast<LPVOID*>(&Real_PatchWithTemplate),
         "eCEntity::PatchWithTemplate") && created;
+
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?ReadObject@bCPropertyObjectSingleton@@QAE_NAAVbCIStream@@AAVbCPropertyObjectBase@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_PropertyObjectReadObject),
+        reinterpret_cast<LPVOID*>(&Real_PropertyObjectReadObject),
+        "bCPropertyObjectSingleton::ReadObject") && created;
 
     created = InstallHookTarget(
         reinterpret_cast<LPVOID>(engineBase + 0x21A150),
@@ -476,6 +578,7 @@ static void ShutdownMetricsHooks() {
         Real_DynamicEntityRead = nullptr;
         Real_EntityRead = nullptr;
         Real_PatchWithTemplate = nullptr;
+    Real_PropertyObjectReadObject = nullptr;
         Real_ReadDependency = nullptr;
         Real_ChildrenAvailable = nullptr;
         s_metricsHooksInitialized = false;
@@ -690,6 +793,10 @@ static void LogLoadReport(double totalSec) {
         saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
     Log("G3O", "  - Property Resolution Cache (load-thread counters): %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
         totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
+    uint32_t tmplTotal = s_templateHits + s_templateMisses;
+    double tmplHitRate = (tmplTotal > 0) ? (static_cast<double>(s_templateHits) * 100.0 / static_cast<double>(tmplTotal)) : 0.0;
+    Log("G3O", "  - Template Resolution Cache:        %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
+        tmplTotal, s_templateHits, s_templateMisses, tmplHitRate);
     Log("G3O", "================================================================================");
 
     FILE* fp = IsTelemetryActive() ? fopen("G3O_LoadProfiler.log", "w") : nullptr;
@@ -911,6 +1018,9 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
 
     ResetDecompTelemetry();
     ResetPropertyCacheTelemetry();
+    s_templateHits = 0;
+    s_templateMisses = 0;
+    memset(s_templateCache, 0, sizeof(s_templateCache));
     ResetVFSCacheTelemetry();
     InterlockedExchange(&s_readCalls, 0);
     InterlockedExchange64(&s_readBytes, 0);
