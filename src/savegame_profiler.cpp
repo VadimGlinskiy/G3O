@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
+#include <intrin.h>
 
 namespace G3O {
 
@@ -599,6 +600,9 @@ static int __fastcall Hooked_Deactivate(void* pThis, void* /*edx*/) {
     return res;
 }
 
+typedef void* (__thiscall* GetSystemSector_t)(void* pWorld);
+static GetSystemSector_t Real_GetSystemSector = nullptr;
+
 typedef int (__thiscall* GetSectorCount_t)(void* pWorld);
 static GetSectorCount_t Real_GetSectorCount = nullptr;
 
@@ -629,57 +633,6 @@ static int __fastcall Hooked_WorldActivateElem(void* pThis, void* /*edx*/) {
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
 
-    const Config& cfg = GetConfig();
-    if (cfg.enableParallelSectorActivation && Real_GetSectorCount && Real_GetSectorAt && Real_ElementActivate) {
-        int numSectors = Real_GetSectorCount(pThis);
-        Log("G3O", "[ParallelSector] WorldActivateElem entered: pWorld=0x%p, Total sectors in world: %d", pThis, numSectors);
-        if (numSectors > 0) {
-            std::vector<void*> sectorsToActivate;
-            sectorsToActivate.reserve(numSectors);
-            for (int i = 0; i < numSectors; i++) {
-                void* pSec = Real_GetSectorAt(pThis, i);
-                if (pSec) {
-                    // In gCSector, byte offset 0x4c is bool m_bEnabled (1 = enabled)
-                    BYTE enabled = *((const BYTE*)pSec + 0x4c);
-                    if (enabled == 1) {
-                        sectorsToActivate.push_back(pSec);
-                    }
-                }
-            }
-
-            int numWorkers = cfg.sectorActivationWorkers;
-            if (numWorkers <= 0) {
-                unsigned int hc = std::thread::hardware_concurrency();
-                numWorkers = (hc > 2) ? (int)(hc - 1) : 2;
-                if (numWorkers > 6) numWorkers = 6;
-            }
-
-            Log("G3O", "[ParallelSector] Pre-activating %zu enabled sectors (out of %d total) across %d worker threads...",
-                sectorsToActivate.size(), numSectors, numWorkers);
-
-            std::atomic<size_t> nextIndex(0);
-            std::vector<std::thread> workers;
-            workers.reserve(numWorkers);
-
-            for (int w = 0; w < numWorkers; w++) {
-                workers.emplace_back([&]() {
-                    while (true) {
-                        size_t idx = nextIndex.fetch_add(1);
-                        if (idx >= sectorsToActivate.size()) break;
-                        void* pSec = sectorsToActivate[idx];
-                        SafeActivateSector(Real_ElementActivate, pSec);
-                    }
-                });
-            }
-
-            for (auto& t : workers) {
-                if (t.joinable()) t.join();
-            }
-
-            Log("G3O", "[ParallelSector] Parallel activation completed! Passing to engine Real_WorldActivateElem...");
-        }
-    }
-
     int res = Real_WorldActivateElem(pThis);
 
     QueryPerformanceCounter(&t1);
@@ -687,6 +640,16 @@ static int __fastcall Hooked_WorldActivateElem(void* pThis, void* /*edx*/) {
     InterlockedExchangeAdd64(&s_worldActivateElemTimeUs, us);
     Log("G3O", "[LoadProfile] gCWorld::Activate took %.3f s", (double)us / 1000000.0);
     return res;
+}
+
+static void DumpSectorCallStack(const char* secName, void* pSector, DWORD* stackPtr) {
+    Log("G3O", "[SectorTrace] Stack dump at sector 1 ('%s', pSector=0x%p):", secName, pSector);
+    for (int i = 0; i < 24; ++i) {
+        DWORD val = stackPtr[i];
+        if (LooksLikeReturnAddr(val)) {
+            Log("G3O", "  esp[%2d]: 0x%08X -> %s", i, val, DescribeAddr(val).c_str());
+        }
+    }
 }
 
 // 5.3. SectorOnActivate hook (Game.dll: ?OnActivate@gCSector@@MAEXXZ)
@@ -710,6 +673,12 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     double ms = (double)us / 1000.0;
     const char* secName = SafeGetSectorName(pSector);
     RecordSectorTiming(secName, ms);
+
+    if (s_sectorActivateCount == 1) {
+        DWORD* stackPtr = nullptr;
+        __asm { mov stackPtr, esp }
+        DumpSectorCallStack(secName, pSector, stackPtr);
+    }
 }
 
 // 5.4. WorldOnActivate hook (Game.dll: ?OnActivate@gCWorld@@MAEXXZ)
@@ -718,6 +687,75 @@ static WorldOnActivate_t Real_WorldOnActivate = nullptr;
 static void* s_targetWorldOnActivate = nullptr;
 
 static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
+    const Config& cfg = GetConfig();
+    int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
+    Log("G3O", "[ParallelSector] WorldOnActivate entered: pWorld=0x%p, isLoadActive=%d, totalSectors=%d",
+        pWorld, (int)s_isLoadActive, numSectors);
+
+    if (s_isLoadActive && cfg.enableParallelSectorActivation && Real_GetSectorAt && Real_ElementActivate && numSectors > 0) {
+        LARGE_INTEGER pt0, pt1;
+        QueryPerformanceCounter(&pt0);
+
+        std::vector<void*> sectorsToActivate;
+        sectorsToActivate.reserve(numSectors);
+        void* pSysSector = Real_GetSystemSector ? Real_GetSystemSector(pWorld) : nullptr;
+        void* foundSys = nullptr;
+
+        for (int i = 0; i < numSectors; i++) {
+            void* pSec = Real_GetSectorAt(pWorld, i);
+            if (pSec) {
+                // In gCSector, byte offset 0x4c is bool m_bEnabled (1 = enabled)
+                BYTE enabled = *((const BYTE*)pSec + 0x4c);
+                if (enabled == 1) {
+                    if (pSec == pSysSector || (SafeGetSectorName(pSec) && strstr(SafeGetSectorName(pSec), "SysDyn"))) {
+                        foundSys = pSec;
+                    } else {
+                        sectorsToActivate.push_back(pSec);
+                    }
+                }
+            }
+        }
+
+        // Put SysDyn at index 0 so Worker 0 starts on the biggest sector immediately!
+        if (foundSys) {
+            sectorsToActivate.insert(sectorsToActivate.begin(), foundSys);
+        }
+
+        int numWorkers = cfg.sectorActivationWorkers;
+        if (numWorkers <= 0) {
+            unsigned int hc = std::thread::hardware_concurrency();
+            numWorkers = (hc > 2) ? (int)(hc - 1) : 2;
+            if (numWorkers > 6) numWorkers = 6;
+        }
+
+        Log("G3O", "[ParallelSector] Pre-activating %zu enabled sectors (out of %d total, SysDyn prioritized=%s) across %d worker threads...",
+            sectorsToActivate.size(), numSectors, foundSys ? "YES" : "NO", numWorkers);
+
+        std::atomic<size_t> nextIndex(0);
+        std::vector<std::thread> workers;
+        workers.reserve(numWorkers);
+
+        for (int w = 0; w < numWorkers; w++) {
+            workers.emplace_back([&]() {
+                while (true) {
+                    size_t idx = nextIndex.fetch_add(1);
+                    if (idx >= sectorsToActivate.size()) break;
+                    void* pSec = sectorsToActivate[idx];
+                    SafeActivateSector(Real_ElementActivate, pSec);
+                }
+            });
+        }
+
+        for (auto& t : workers) {
+            if (t.joinable()) t.join();
+        }
+
+        QueryPerformanceCounter(&pt1);
+        LONG64 us = (s_freq.QuadPart > 0) ? ((pt1.QuadPart - pt0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+        Log("G3O", "[ParallelSector] Parallel activation completed in %.3f s! Passing to engine Real_WorldOnActivate...",
+            (double)us / 1000000.0);
+    }
+
     Real_WorldOnActivate(pWorld);
 }
 
