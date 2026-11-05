@@ -1,4 +1,4 @@
-﻿#include "config_manager.h"
+#include "config_manager.h"
 #include "diagnostic_logger.h"
 #include <fstream>
 #include <algorithm>
@@ -355,6 +355,8 @@ void LoadConfig() {
     s_config.cpuCores = ReadIniInt("Performance", "CPUCores", 0, path);
     s_config.cpuThreads = ReadIniInt("Performance", "CPUThreads", 0, path);
     s_config.cpuAffinityMask = ReadIniHex("Performance", "CPUAffinityMask", 0, path);
+    s_config.pakCacheBudgetMB = ReadIniInt("Performance", "PakCacheBudgetMB", 192, path);
+    s_config.pakPrefetchWorkers = ReadIniInt("Performance", "PakPrefetchWorkers", 0, path);
 
     // [Logging]
     s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", true, path);

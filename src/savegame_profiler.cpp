@@ -40,6 +40,10 @@ static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead,
     if (!s_isLoadActive) {
         return Real_ReadFile(h, buf, n, pRead, ov);
     }
+    // Step 3: Check if block is pre-decompressed in cache (bypass disk read completely!)
+    if (ov && pRead && n > 0 && buf && PakTracer_TryBypassReadFile(h, buf, n, pRead, ov)) {
+        return TRUE;
+    }
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     BOOL r = Real_ReadFile(h, buf, n, pRead, ov);
@@ -83,6 +87,8 @@ static volatile LONG   s_deactivateCount = 0;
 static volatile LONG64 s_deactivateTimeUs = 0;
 static volatile LONG64 s_worldActivateElemTimeUs = 0;
 static volatile LONG64 s_forceROIUpdateTimeUs = 0;
+static volatile LONG   s_sectorActivateCount = 0;
+static volatile LONG64 s_sectorActivateTotalUs = 0;
 
 static double s_preWorldTotalSec = 0.0;
 static volatile LONG   s_cellsProcessed = 0;
@@ -120,6 +126,9 @@ static void LogLoadReport(double totalSec) {
     double propHitRate = totalProps ? (100.0 * (strHits + idHits) / totalProps) : 0.0;
 
     double deactSec = (double)s_deactivateTimeUs / 1000000.0;
+    double secTotalSec = (double)s_sectorActivateTotalUs / 1000000.0;
+    uint32_t bypassedReads = PakTracer_GetBypassedReads();
+    double bypassedMb = (double)PakTracer_GetBypassedReadBytes() / (1024.0 * 1024.0);
     double worldActElemSec = (double)s_worldActivateElemTimeUs / 1000000.0;
     double roiSec = (double)s_forceROIUpdateTimeUs / 1000000.0;
 
@@ -152,7 +161,9 @@ static void LogLoadReport(double totalSec) {
     Log("G3O", "       * gCSession::Stop:           %6.3f s", s_statSessionStop.durationSec);
     Log("G3O", "       * gCGUIManager::ClearEnt:    %6.3f s", s_statClearEntities.durationSec);
     Log("G3O", "       * Elements Deactivation:     %6.3f s [%ld calls]", deactSec, s_deactivateCount);
-    Log("G3O", "       * gCWorld::Activate:         %6.3f s", worldActElemSec);
+    Log("G3O", "       * gCWorld::Activate:         %6.3f s [%ld sectors, %.3f s, avg %.1f ms/sector]",
+        worldActElemSec, s_sectorActivateCount, secTotalSec,
+        s_sectorActivateCount > 0 ? (secTotalSec * 1000.0 / (double)s_sectorActivateCount) : 0.0);
     Log("G3O", "       * ForceFullROIUpdate:        %6.3f s", roiSec);
     Log("G3O", "       * gCWorld::UnloadCaches:     %6.3f s [%ld pak blocks, %.2f MB read]",
         s_statUnloadCaches.durationSec, s_statUnloadCaches.pakBlocks, s_statUnloadCaches.readMb);
@@ -175,6 +186,8 @@ static void LogLoadReport(double totalSec) {
     Log("G3O", "Subsystem Activity:");
     Log("G3O", "  - Disk ReadFile I/O:              %6.3f s (%5.1f%%) [%ld calls, %.2f MB read, avg speed %.1f MB/s]",
         rSec, totalSec > 0 ? (rSec * 100.0 / totalSec) : 0.0, rc, rbMb, rSec > 0 ? (rbMb / rSec) : 0.0);
+    Log("G3O", "  - ReadFile Disk Bypasses:         %6.3f s saved [%u calls, %.2f MB zero disk I/O from cache]",
+        (rbMb > 0.0 && rSec > 0.0) ? (bypassedMb / (rbMb / rSec)) : 0.0, bypassedReads, bypassedMb);
     Log("G3O", "  - Pak Decompress (libdeflate):    %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB]",
         pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0.0, pakCount, pakInMb, pakOutMb);
     Log("G3O", "  - Save Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]",
@@ -196,7 +209,9 @@ static void LogLoadReport(double totalSec) {
         fprintf(fp, "       * gCSession::Stop:           %6.3f s\n", s_statSessionStop.durationSec);
         fprintf(fp, "       * gCGUIManager::ClearEnt:    %6.3f s\n", s_statClearEntities.durationSec);
         fprintf(fp, "       * Elements Deactivation:     %6.3f s [%ld calls]\n", deactSec, s_deactivateCount);
-        fprintf(fp, "       * gCWorld::Activate:         %6.3f s\n", worldActElemSec);
+        fprintf(fp, "       * gCWorld::Activate:         %6.3f s [%ld sectors, %.3f s, avg %.1f ms/sector]\n",
+            worldActElemSec, s_sectorActivateCount, secTotalSec,
+            s_sectorActivateCount > 0 ? (secTotalSec * 100.0 / (double)s_sectorActivateCount) : 0.0);
         fprintf(fp, "       * ForceFullROIUpdate:        %6.3f s\n", roiSec);
         fprintf(fp, "       * gCWorld::UnloadCaches:     %6.3f s [%ld pak blocks, %.2f MB read]\n",
             s_statUnloadCaches.durationSec, s_statUnloadCaches.pakBlocks, s_statUnloadCaches.readMb);
@@ -219,6 +234,8 @@ static void LogLoadReport(double totalSec) {
         fprintf(fp, "Subsystem Activity:\n");
         fprintf(fp, "  - Disk ReadFile I/O:              %6.3f s (%5.1f%%) [%ld calls, %.2f MB read, speed %.1f MB/s]\n",
             rSec, totalSec > 0 ? (rSec * 100.0 / totalSec) : 0.0, rc, rbMb, rSec > 0 ? (rbMb / rSec) : 0.0);
+        fprintf(fp, "  - ReadFile Disk Bypasses:         %6.3f s saved [%u calls, %.2f MB zero disk I/O from cache]\n",
+            (rbMb > 0.0 && rSec > 0.0) ? (bypassedMb / (rbMb / rSec)) : 0.0, bypassedReads, bypassedMb);
         fprintf(fp, "  - Pak Decompress (libdeflate):    %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB]\n",
             pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0.0, pakCount, pakInMb, pakOutMb);
         fprintf(fp, "  - Save Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]\n",
@@ -388,6 +405,8 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     InterlockedExchange64(&s_hierarchyTimeUs, 0);
 
     InterlockedExchange(&s_deactivateCount, 0);
+    InterlockedExchange(&s_sectorActivateCount, 0);
+    InterlockedExchange64(&s_sectorActivateTotalUs, 0);
     InterlockedExchange64(&s_deactivateTimeUs, 0);
     InterlockedExchange64(&s_worldActivateElemTimeUs, 0);
     InterlockedExchange64(&s_forceROIUpdateTimeUs, 0);
@@ -527,6 +546,25 @@ static int __fastcall Hooked_WorldActivateElem(void* pThis, void* /*edx*/) {
     InterlockedExchangeAdd64(&s_worldActivateElemTimeUs, us);
     Log("G3O", "[LoadProfile] gCWorld::Activate took %.3f s", (double)us / 1000000.0);
     return res;
+}
+
+// 5.3. SectorOnActivate hook (Game.dll: ?OnActivate@gCSector@@MAEXXZ)
+typedef void (__thiscall* SectorOnActivate_t)(void* pSector);
+static SectorOnActivate_t Real_SectorOnActivate = nullptr;
+static void* s_targetSectorOnActivate = nullptr;
+
+static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
+    if (!s_isLoadActive) {
+        Real_SectorOnActivate(pSector);
+        return;
+    }
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    Real_SectorOnActivate(pSector);
+    QueryPerformanceCounter(&t1);
+    LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+    InterlockedIncrement(&s_sectorActivateCount);
+    InterlockedExchangeAdd64(&s_sectorActivateTotalUs, us);
 }
 
 // 5.4. WorldOnActivate hook (Game.dll: ?OnActivate@gCWorld@@MAEXXZ)
@@ -845,6 +883,14 @@ bool InitializeSavegameProfiler() {
             Log("G3O", "Savegame Profiler: Found gCSector::EnableSectorActivation (0x%p)", pEnableSec);
         }
 
+        void* pSecOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCSector@@MAEXXZ");
+        if (pSecOnAct) {
+            s_targetSectorOnActivate = pSecOnAct;
+            MH_CreateHook(pSecOnAct, (LPVOID)Hooked_SectorOnActivate, (LPVOID*)&Real_SectorOnActivate);
+            MH_EnableHook(pSecOnAct);
+            Log("G3O", "Savegame Profiler: Hooked gCSector::OnActivate (0x%p)", pSecOnAct);
+        }
+
         void* pOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCWorld@@MAEXXZ");
         if (pOnAct) {
             s_targetWorldOnActivate = pOnAct;
@@ -907,6 +953,7 @@ void ShutdownSavegameProfiler() {
     if (s_targetLoadGameWorld) MH_DisableHook(s_targetLoadGameWorld);
     if (s_targetGotoPos) MH_DisableHook(s_targetGotoPos);
     if (s_targetSessionStart) MH_DisableHook(s_targetSessionStart);
+    if (s_targetSectorOnActivate) MH_DisableHook(s_targetSectorOnActivate);
     if (s_targetWorldActivate) MH_DisableHook(s_targetWorldActivate);
     if (s_targetBuildStatic) MH_DisableHook(s_targetBuildStatic);
 }
