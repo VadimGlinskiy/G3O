@@ -4,6 +4,7 @@
 #include "fast_pak_decompressor.h"
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
+#include "pak_tracer.h"
 #include <minhook.h>
 #include <windows.h>
 #include <stdio.h>
@@ -45,6 +46,9 @@ static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead,
     QueryPerformanceCounter(&t1);
     if (pRead && r) {
         InterlockedExchangeAdd64(&s_readBytes, (LONG64)*pRead);
+        PakTracer_RecordRead(h, buf, n, *pRead, ov);
+    } else {
+        PakTracer_RecordRead(h, buf, n, 0, ov);
     }
     InterlockedIncrement(&s_readCalls);
     LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
@@ -401,7 +405,9 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     if (GetConfig().enableProfiler) {
         StartSampler();
     }
+    PakTracer_OnLoadStart(s_lastSaveName.c_str());
     bool r = Real_HUDLoadGame(pThis, a, b);
+    PakTracer_OnLoadEnd();
     if (GetConfig().enableProfiler) {
         StopSamplerAndReport();
     }

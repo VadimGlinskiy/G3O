@@ -2,6 +2,7 @@
 #include "decompressor_avx2.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
+#include "pak_tracer.h"
 #include <minhook.h>
 #include <windows.h>
 #include <libdeflate.h>
@@ -134,6 +135,8 @@ static int __stdcall Hooked_ZlibDecompress(
                 InterlockedIncrement(&s_decompCount);
                 InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
                 InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)actual_out);
+
+                PakTracer_RecordDecompress(inBuffer, inSize, outCapacity, (DWORD)actual_out, (uint64_t)us);
 
                 return 0; // Success
             }

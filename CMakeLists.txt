@@ -61,6 +61,8 @@ add_library(dinput8 SHARED
     src/load_sampler.h
     src/vfs_cache_optimizer.cpp
     src/vfs_cache_optimizer.h
+    src/pak_tracer.cpp
+    src/pak_tracer.h
 )
 
 if(MSVC)
