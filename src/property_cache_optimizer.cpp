@@ -18,10 +18,12 @@ static ResolvePropertyID_t Real_ResolvePropertyID = nullptr;
 static void* s_targetString = nullptr;
 static void* s_targetID = nullptr;
 
-static volatile LONG s_stringHits = 0;
-static volatile LONG s_stringMisses = 0;
-static volatile LONG s_idHits = 0;
-static volatile LONG s_idMisses = 0;
+// Per-thread telemetry avoids LOCK INC in the resolver hot path. The load
+// report reads these counters on the thread that runs the sequential load.
+static thread_local uint32_t s_stringHits = 0;
+static thread_local uint32_t s_stringMisses = 0;
+static thread_local uint32_t s_idHits = 0;
+static thread_local uint32_t s_idMisses = 0;
 
 // Direct-mapped cache for String property lookups (16384 slots)
 struct StringCacheEntry {
@@ -120,7 +122,7 @@ static bool __fastcall Hooked_ResolvePropertyString(void* pThis, void* /*edx*/, 
     StringCacheEntry& entry = cache[index];
 
     if (entry.valid && entry.pClass == currentClass && entry.nameHash == hash && memcmp(entry.name, str, len + 1) == 0) {
-        InterlockedIncrement(&s_stringHits);
+        ++s_stringHits;
         if (entry.success) {
             *(void**)pThis = entry.resolvedClass;
             *(uint32_t*)((BYTE*)pThis + 8) = entry.resolvedIndex;
@@ -131,7 +133,7 @@ static bool __fastcall Hooked_ResolvePropertyString(void* pThis, void* /*edx*/, 
         }
     }
 
-    InterlockedIncrement(&s_stringMisses);
+    ++s_stringMisses;
     bool result = Real_ResolvePropertyString(pThis, pName);
 
     entry.pClass = currentClass;
@@ -173,7 +175,7 @@ static bool __fastcall Hooked_ResolvePropertyID(void* pThis, void* /*edx*/, cons
     if (entry.valid && entry.pClass == currentClass &&
         entry.id[0] == id[0] && entry.id[1] == id[1] &&
         entry.id[2] == id[2] && entry.id[3] == id[3]) {
-        InterlockedIncrement(&s_idHits);
+        ++s_idHits;
         if (entry.success) {
             *(void**)pThis = entry.resolvedClass;
             *(uint32_t*)((BYTE*)pThis + 8) = entry.resolvedIndex;
@@ -184,7 +186,7 @@ static bool __fastcall Hooked_ResolvePropertyID(void* pThis, void* /*edx*/, cons
         }
     }
 
-    InterlockedIncrement(&s_idMisses);
+    ++s_idMisses;
     bool result = Real_ResolvePropertyID(pThis, pId);
 
     entry.pClass = currentClass;
@@ -251,20 +253,21 @@ void ShutdownPropertyCacheOptimizer() {
         MH_DisableHook(s_targetID);
         s_targetID = nullptr;
     }
-    Log("G3O", "Property Cache Optimizer stats: String hits=%ld, misses=%ld | ID hits=%ld, misses=%ld",
-        s_stringHits, s_stringMisses, s_idHits, s_idMisses);
+    Log("G3O", "Property Cache Optimizer thread-local stats: String hits=%lu, misses=%lu | ID hits=%lu, misses=%lu",
+        (unsigned long)s_stringHits, (unsigned long)s_stringMisses,
+        (unsigned long)s_idHits, (unsigned long)s_idMisses);
 }
 
-LONG GetPropertyCacheStringHits() { return s_stringHits; }
-LONG GetPropertyCacheStringMisses() { return s_stringMisses; }
-LONG GetPropertyCacheIdHits() { return s_idHits; }
-LONG GetPropertyCacheIdMisses() { return s_idMisses; }
+LONG GetPropertyCacheStringHits() { return static_cast<LONG>(s_stringHits); }
+LONG GetPropertyCacheStringMisses() { return static_cast<LONG>(s_stringMisses); }
+LONG GetPropertyCacheIdHits() { return static_cast<LONG>(s_idHits); }
+LONG GetPropertyCacheIdMisses() { return static_cast<LONG>(s_idMisses); }
 
 void ResetPropertyCacheTelemetry() {
-    InterlockedExchange(&s_stringHits, 0);
-    InterlockedExchange(&s_stringMisses, 0);
-    InterlockedExchange(&s_idHits, 0);
-    InterlockedExchange(&s_idMisses, 0);
+    s_stringHits = 0;
+    s_stringMisses = 0;
+    s_idHits = 0;
+    s_idMisses = 0;
 }
 
 } // namespace G3O

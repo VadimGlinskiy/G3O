@@ -12,20 +12,15 @@
 #include <map>
 #include <vector>
 #include <algorithm>
-#include <thread>
-#include <atomic>
+#include <cstdint>
 #include <intrin.h>
 
 namespace G3O {
 
 static std::string s_lastSaveName = "QuickSave";
 
-static LARGE_INTEGER s_freq = []() {
-    LARGE_INTEGER li;
-    QueryPerformanceFrequency(&li);
-    if (li.QuadPart <= 0) li.QuadPart = 10000000LL;
-    return li;
-}();
+static LARGE_INTEGER s_freq = {};
+static bool s_qpcFrequencyInitialized = false;
 
 // -----------------------------------------------------------------------------
 // ReadFile I/O Tracker
@@ -38,6 +33,229 @@ static volatile LONG64 s_readTimeUs = 0;
 static volatile bool   s_isLoadActive = false;
 static volatile bool   s_inPreLoad = false;
 static volatile bool   s_skippedPreLoadActivate = false;
+
+// ABI is intentionally restricted to the 32-bit Gothic 3 binaries.
+static_assert(sizeof(void*) == 4, "Savegame profiler hooks require the x86 game ABI.");
+
+struct LayerAuditMetric {
+    std::uint64_t calls = 0;
+    std::uint64_t qpcTicks = 0;
+};
+
+struct LayerAuditMetrics {
+    LayerAuditMetric createData;
+    LayerAuditMetric doLoadData;
+    LayerAuditMetric createDynamicEntity;
+    LayerAuditMetric createFromTemplate;
+};
+
+static thread_local LayerAuditMetrics s_layerAuditMetrics{};
+
+// These ABI-level aliases use opaque pointers for SDK reference parameters:
+// on x86 MSVC, bCIStream& and const eCTemplateEntity& are one stack pointer.
+using LayerCreateDataFn = std::int32_t (__thiscall*)(void*);
+using DynamicLayerDoLoadDataFn = std::int32_t (__thiscall*)(void*, void*);
+using DynamicLayerCreateEntityFn = void* (__thiscall*)(void*);
+using EntityCreateFromTemplateFn = bool (__thiscall*)(void*, const void*);
+
+static LayerCreateDataFn Real_LayerCreateData = nullptr;
+static DynamicLayerDoLoadDataFn Real_DynamicLayerDoLoadData = nullptr;
+static DynamicLayerCreateEntityFn Real_DynamicLayerCreateEntity = nullptr;
+static EntityCreateFromTemplateFn Real_EntityCreateFromTemplate = nullptr;
+
+static LPVOID s_metricsHookTargets[4] = {};
+static bool s_metricsHooksInitialized = false;
+
+static std::uint64_t BeginLayerMetric() {
+    LARGE_INTEGER t{};
+    QueryPerformanceCounter(&t);
+    return static_cast<std::uint64_t>(t.QuadPart);
+}
+
+static void EndLayerMetric(LayerAuditMetric& metric, std::uint64_t start) {
+    LARGE_INTEGER t{};
+    QueryPerformanceCounter(&t);
+    metric.qpcTicks += static_cast<std::uint64_t>(t.QuadPart) - start;
+    ++metric.calls;
+}
+
+static double LayerMetricMs(std::uint64_t ticks) {
+    return s_freq.QuadPart > 0
+        ? static_cast<double>(ticks) * 1000.0 / static_cast<double>(s_freq.QuadPart)
+        : 0.0;
+}
+
+static LayerAuditMetrics SubtractLayerMetrics(
+    const LayerAuditMetrics& after, const LayerAuditMetrics& before) {
+    LayerAuditMetrics delta{};
+    delta.createData.calls = after.createData.calls - before.createData.calls;
+    delta.createData.qpcTicks = after.createData.qpcTicks - before.createData.qpcTicks;
+    delta.doLoadData.calls = after.doLoadData.calls - before.doLoadData.calls;
+    delta.doLoadData.qpcTicks = after.doLoadData.qpcTicks - before.doLoadData.qpcTicks;
+    delta.createDynamicEntity.calls = after.createDynamicEntity.calls - before.createDynamicEntity.calls;
+    delta.createDynamicEntity.qpcTicks = after.createDynamicEntity.qpcTicks - before.createDynamicEntity.qpcTicks;
+    delta.createFromTemplate.calls = after.createFromTemplate.calls - before.createFromTemplate.calls;
+    delta.createFromTemplate.qpcTicks = after.createFromTemplate.qpcTicks - before.createFromTemplate.qpcTicks;
+    return delta;
+}
+
+static std::int32_t __fastcall Hooked_LayerCreateData(void* self, void* /*edx*/) {
+    if (!s_isLoadActive) return Real_LayerCreateData(self);
+    const std::uint64_t start = BeginLayerMetric();
+    const std::int32_t result = Real_LayerCreateData(self);
+    EndLayerMetric(s_layerAuditMetrics.createData, start);
+    return result;
+}
+
+static std::int32_t __fastcall Hooked_DynamicLayerDoLoadData(
+    void* self, void* /*edx*/, void* streamReferenceSlot) {
+    if (!s_isLoadActive) return Real_DynamicLayerDoLoadData(self, streamReferenceSlot);
+    const std::uint64_t start = BeginLayerMetric();
+    const std::int32_t result = Real_DynamicLayerDoLoadData(self, streamReferenceSlot);
+    EndLayerMetric(s_layerAuditMetrics.doLoadData, start);
+    return result;
+}
+
+static void* __fastcall Hooked_DynamicLayerCreateEntity(void* self, void* /*edx*/) {
+    if (!s_isLoadActive) return Real_DynamicLayerCreateEntity(self);
+    const std::uint64_t start = BeginLayerMetric();
+    void* result = Real_DynamicLayerCreateEntity(self);
+    EndLayerMetric(s_layerAuditMetrics.createDynamicEntity, start);
+    return result;
+}
+
+static bool __fastcall Hooked_EntityCreateFromTemplate(
+    void* self, void* /*edx*/, const void* templateReferenceSlot) {
+    if (!s_isLoadActive) return Real_EntityCreateFromTemplate(self, templateReferenceSlot);
+    const std::uint64_t start = BeginLayerMetric();
+    const bool result = Real_EntityCreateFromTemplate(self, templateReferenceSlot);
+    EndLayerMetric(s_layerAuditMetrics.createFromTemplate, start);
+    return result;
+}
+
+static bool InstallMetricsHook(HMODULE module, const char* exportName,
+    LPVOID detour, LPVOID* original, int slot) {
+    FARPROC exported = GetProcAddress(module, exportName);
+    if (!exported) {
+        Log("G3O", "[LayerAudit] Export not found: %s (error=%lu)", exportName, GetLastError());
+        return false;
+    }
+
+    LPVOID target = reinterpret_cast<LPVOID>(exported);
+    const MH_STATUS status = MH_CreateHook(target, detour, original);
+    if (status != MH_OK) {
+        Log("G3O", "[LayerAudit] MH_CreateHook failed for %s (status=%d)", exportName, (int)status);
+        return false;
+    }
+    s_metricsHookTargets[slot] = target;
+    Log("G3O", "[LayerAudit] Hook created: %s at %p", exportName, target);
+    return true;
+}
+
+static void RemoveCreatedMetricsHooks() {
+    for (int i = 0; i < 4; ++i) {
+        if (s_metricsHookTargets[i]) {
+            MH_DisableHook(s_metricsHookTargets[i]);
+            MH_RemoveHook(s_metricsHookTargets[i]);
+            s_metricsHookTargets[i] = nullptr;
+        }
+    }
+    Real_LayerCreateData = nullptr;
+    Real_DynamicLayerDoLoadData = nullptr;
+    Real_DynamicLayerCreateEntity = nullptr;
+    Real_EntityCreateFromTemplate = nullptr;
+    s_metricsHooksInitialized = false;
+}
+
+static bool InitMetricsHooks() {
+    if (s_metricsHooksInitialized) return true;
+
+    if (!s_qpcFrequencyInitialized) {
+        if (!QueryPerformanceFrequency(&s_freq) || s_freq.QuadPart <= 0) {
+            Log("G3O", "[LayerAudit] QueryPerformanceFrequency failed; metrics hooks not installed.");
+            return false;
+        }
+        s_qpcFrequencyInitialized = true;
+    }
+
+    HMODULE hGame = GetModuleHandleA("Game.dll");
+    HMODULE hEngine = GetModuleHandleA("Engine.dll");
+    if (!hGame || !hEngine) {
+        Log("G3O", "[LayerAudit] Game.dll/Engine.dll unavailable; metrics hooks not installed.");
+        return false;
+    }
+
+    bool created = true;
+    created = InstallMetricsHook(hGame,
+        "?CreateData@gCLayerBase@@MAE?AW4eEResult@eCProcessibleElement@@XZ",
+        reinterpret_cast<LPVOID>(Hooked_LayerCreateData),
+        reinterpret_cast<LPVOID*>(&Real_LayerCreateData), 0) && created;
+    created = InstallMetricsHook(hGame,
+        "?DoLoadData@gCDynamicLayer@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z",
+        reinterpret_cast<LPVOID>(Hooked_DynamicLayerDoLoadData),
+        reinterpret_cast<LPVOID*>(&Real_DynamicLayerDoLoadData), 1) && created;
+    created = InstallMetricsHook(hGame,
+        "?CreateDynamicEntity@gCDynamicLayer@@QAEPAVeCDynamicEntity@@XZ",
+        reinterpret_cast<LPVOID>(Hooked_DynamicLayerCreateEntity),
+        reinterpret_cast<LPVOID*>(&Real_DynamicLayerCreateEntity), 2) && created;
+    created = InstallMetricsHook(hEngine,
+        "?CreateFromTemplate@eCEntity@@QAE_NABVeCTemplateEntity@@@Z",
+        reinterpret_cast<LPVOID>(Hooked_EntityCreateFromTemplate),
+        reinterpret_cast<LPVOID*>(&Real_EntityCreateFromTemplate), 3) && created;
+
+    if (!created) {
+        RemoveCreatedMetricsHooks();
+        return false;
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        const MH_STATUS status = MH_EnableHook(s_metricsHookTargets[i]);
+        if (status != MH_OK) {
+            Log("G3O", "[LayerAudit] MH_EnableHook failed for target %d (status=%d)", i, (int)status);
+            RemoveCreatedMetricsHooks();
+            return false;
+        }
+    }
+
+    s_metricsHooksInitialized = true;
+    Log("G3O", "[LayerAudit] Four QPC metrics hooks enabled (frequency=%lld Hz).",
+        s_freq.QuadPart);
+    return true;
+}
+
+static void ShutdownMetricsHooks() {
+    bool hadHooks = false;
+    bool cleanupSucceeded = true;
+    for (int i = 0; i < 4; ++i) {
+        LPVOID target = s_metricsHookTargets[i];
+        if (!target) continue;
+        hadHooks = true;
+
+        const MH_STATUS disableStatus = MH_DisableHook(target);
+        if (disableStatus != MH_OK && disableStatus != MH_ERROR_DISABLED) {
+            Log("G3O", "[LayerAudit] MH_DisableHook failed for target %d (status=%d)", i, (int)disableStatus);
+            cleanupSucceeded = false;
+            continue;
+        }
+
+        const MH_STATUS removeStatus = MH_RemoveHook(target);
+        if (removeStatus != MH_OK && removeStatus != MH_ERROR_NOT_CREATED) {
+            Log("G3O", "[LayerAudit] MH_RemoveHook failed for target %d (status=%d)", i, (int)removeStatus);
+            cleanupSucceeded = false;
+            continue;
+        }
+        s_metricsHookTargets[i] = nullptr;
+    }
+
+    if (cleanupSucceeded) {
+        Real_LayerCreateData = nullptr;
+        Real_DynamicLayerDoLoadData = nullptr;
+        Real_DynamicLayerCreateEntity = nullptr;
+        Real_EntityCreateFromTemplate = nullptr;
+        s_metricsHooksInitialized = false;
+    }
+    if (hadHooks) Log("G3O", "[LayerAudit] Metrics hooks shutdown attempted.");
+}
 
 static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead, LPOVERLAPPED ov) {
     if (!s_isLoadActive) {
@@ -242,7 +460,7 @@ static void LogLoadReport(double totalSec) {
         pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0.0, pakCount, pakInMb, pakOutMb);
     Log("G3O", "  - Save Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]",
         saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
-    Log("G3O", "  - Property Resolution Cache:      %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
+    Log("G3O", "  - Property Resolution Cache (load-thread counters): %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
         totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
     Log("G3O", "================================================================================");
 
@@ -309,7 +527,7 @@ static void LogLoadReport(double totalSec) {
             saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
         fprintf(fp, "  - Decomp Duplicate Cache:         %ld hits (%.2f MB saved from redundant decompression)\n",
             GetDecompCacheHits(), (double)GetDecompCacheBytesSaved() / (1024.0 * 1024.0));
-        fprintf(fp, "  - Property Resolution Cache:      %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
+        fprintf(fp, "  - Property Resolution Cache (load-thread counters): %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
             totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
         fprintf(fp, "================================================================================\n");
         fclose(fp);
@@ -456,6 +674,7 @@ static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 
 static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, void* b) {
     s_isLoadActive = true;
+    s_layerAuditMetrics = {};
     s_inPreLoad = true;
     s_skippedPreLoadActivate = false;
     QueryPerformanceCounter(&s_tHUDStart);
@@ -600,33 +819,11 @@ static int __fastcall Hooked_Deactivate(void* pThis, void* /*edx*/) {
     return res;
 }
 
-typedef void* (__thiscall* GetSystemSector_t)(void* pWorld);
-static GetSystemSector_t Real_GetSystemSector = nullptr;
-
 typedef int (__thiscall* GetDynamicLayerCount_t)(void* pSector);
 static GetDynamicLayerCount_t Real_GetDynamicLayerCount = nullptr;
 
-typedef void* (__thiscall* GetDynamicLayerAt_t)(void* pSector, int index);
-static GetDynamicLayerAt_t Real_GetDynamicLayerAt = nullptr;
-
 typedef int (__thiscall* GetSectorCount_t)(void* pWorld);
 static GetSectorCount_t Real_GetSectorCount = nullptr;
-
-typedef void* (__thiscall* GetSectorAt_t)(void* pWorld, int index);
-static GetSectorAt_t Real_GetSectorAt = nullptr;
-
-typedef int (__thiscall* ElementActivate_t)(void* pElement);
-static ElementActivate_t Real_ElementActivate = nullptr;
-
-static bool SafeActivateSector(ElementActivate_t pfnActivate, void* pSec) {
-    if (!pfnActivate || !pSec) return false;
-    __try {
-        pfnActivate(pSec);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
 
 // 5. WorldActivateElem hook (Game.dll: ?Activate@gCWorld@@UAE?AW4eEResult@eCProcessibleElement@@XZ)
 typedef int (__thiscall* WorldActivateElem_t)(void* pThis);
@@ -689,10 +886,12 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     s_lastSectorDoLoadDataUs = 0;
     int dynBefore = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
 
+    const LayerAuditMetrics metricsBefore = s_layerAuditMetrics;
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     Real_SectorOnActivate(pSector);
     QueryPerformanceCounter(&t1);
+    const LayerAuditMetrics metricsDelta = SubtractLayerMetrics(s_layerAuditMetrics, metricsBefore);
     LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
     InterlockedIncrement(&s_sectorActivateCount);
     InterlockedExchangeAdd64(&s_sectorActivateTotalUs, us);
@@ -707,6 +906,12 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     if (totalMs >= 50.0) {
         Log("G3O", "[SectorAudit] Sector '%s': Total=%.2f ms (DoLoadData=%.2f ms, LayerLoop=%.2f ms), dynLayers: %d -> %d",
             secName ? secName : "unknown", totalMs, loadMs, loopMs, dynBefore, dynAfter);
+        Log("G3O", "[LayerAudit] Sector '%s': Total=%.2f ms | CreateData: %llu calls, %.2f ms | DoLoadData: %llu calls, %.2f ms | CreateDynamicEntity: %llu calls, %.2f ms | CreateFromTemplate: %llu calls, %.2f ms",
+            secName ? secName : "unknown", totalMs,
+            static_cast<unsigned long long>(metricsDelta.createData.calls), LayerMetricMs(metricsDelta.createData.qpcTicks),
+            static_cast<unsigned long long>(metricsDelta.doLoadData.calls), LayerMetricMs(metricsDelta.doLoadData.qpcTicks),
+            static_cast<unsigned long long>(metricsDelta.createDynamicEntity.calls), LayerMetricMs(metricsDelta.createDynamicEntity.qpcTicks),
+            static_cast<unsigned long long>(metricsDelta.createFromTemplate.calls), LayerMetricMs(metricsDelta.createFromTemplate.qpcTicks));
     }
 }
 
@@ -722,81 +927,15 @@ static void* s_targetWorldDoLoadData = nullptr;
 static int __fastcall Hooked_WorldDoLoadData(void* pWorld, void* /*edx*/, void* pStream) {
     int res = Real_WorldDoLoadData(pWorld, pStream);
     int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
-    Log("G3O", "[ParallelSector] World DoLoadData returned res=%d, totalSectors=%d, isLoadActive=%d",
+    Log("G3O", "[WorldAudit] World DoLoadData returned res=%d, totalSectors=%d, isLoadActive=%d",
         res, numSectors, (int)s_isLoadActive);
     return res;
 }
 
 static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
-    const Config& cfg = GetConfig();
     int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
-    Log("G3O", "[ParallelSector] WorldOnActivate entered: pWorld=0x%p, isLoadActive=%d, totalSectors=%d",
+    Log("G3O", "[WorldAudit] WorldOnActivate entered: pWorld=0x%p, isLoadActive=%d, totalSectors=%d",
         pWorld, (int)s_isLoadActive, numSectors);
-
-    if (s_isLoadActive && cfg.enableParallelSectorActivation && Real_GetSectorAt && Real_ElementActivate && numSectors > 0) {
-        LARGE_INTEGER pt0, pt1;
-        QueryPerformanceCounter(&pt0);
-
-        std::vector<void*> sectorsToActivate;
-        sectorsToActivate.reserve(numSectors);
-        void* pSysSector = Real_GetSystemSector ? Real_GetSystemSector(pWorld) : nullptr;
-        void* foundSys = nullptr;
-
-        for (int i = 0; i < numSectors; i++) {
-            void* pSec = Real_GetSectorAt(pWorld, i);
-            if (pSec) {
-                // In gCSector, byte offset 0x4c is bool m_bEnabled (1 = enabled)
-                BYTE enabled = *((const BYTE*)pSec + 0x4c);
-                if (enabled == 1) {
-                    if (pSec == pSysSector || (SafeGetSectorName(pSec) && strstr(SafeGetSectorName(pSec), "SysDyn"))) {
-                        foundSys = pSec;
-                    } else {
-                        sectorsToActivate.push_back(pSec);
-                    }
-                }
-            }
-        }
-
-        // Put SysDyn at index 0 so Worker 0 starts on the biggest sector immediately!
-        if (foundSys) {
-            sectorsToActivate.insert(sectorsToActivate.begin(), foundSys);
-        }
-
-        int numWorkers = cfg.sectorActivationWorkers;
-        if (numWorkers <= 0) {
-            unsigned int hc = std::thread::hardware_concurrency();
-            numWorkers = (hc > 2) ? (int)(hc - 1) : 2;
-            if (numWorkers > 6) numWorkers = 6;
-        }
-
-        Log("G3O", "[ParallelSector] Pre-activating %zu enabled sectors (out of %d total, SysDyn prioritized=%s) across %d worker threads...",
-            sectorsToActivate.size(), numSectors, foundSys ? "YES" : "NO", numWorkers);
-
-        std::atomic<size_t> nextIndex(0);
-        std::vector<std::thread> workers;
-        workers.reserve(numWorkers);
-
-        for (int w = 0; w < numWorkers; w++) {
-            workers.emplace_back([&]() {
-                while (true) {
-                    size_t idx = nextIndex.fetch_add(1);
-                    if (idx >= sectorsToActivate.size()) break;
-                    void* pSec = sectorsToActivate[idx];
-                    SafeActivateSector(Real_ElementActivate, pSec);
-                }
-            });
-        }
-
-        for (auto& t : workers) {
-            if (t.joinable()) t.join();
-        }
-
-        QueryPerformanceCounter(&pt1);
-        LONG64 us = (s_freq.QuadPart > 0) ? ((pt1.QuadPart - pt0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
-        Log("G3O", "[ParallelSector] Parallel activation completed in %.3f s! Passing to engine Real_WorldOnActivate...",
-            (double)us / 1000000.0);
-    }
-
     Real_WorldOnActivate(pWorld);
 }
 
@@ -999,6 +1138,12 @@ static void* s_targetWorldActivate = nullptr;
 static void* s_targetBuildStatic = nullptr;
 
 bool InitializeSavegameProfiler() {
+    const bool metricsHooksReady = InitMetricsHooks();
+    if (s_freq.QuadPart <= 0) {
+        Log("G3O", "Savegame Profiler initialization aborted: QPC frequency unavailable.");
+        return false;
+    }
+
     HMODULE hK32 = GetModuleHandleA("kernel32.dll");
     if (hK32) {
         void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
@@ -1138,22 +1283,10 @@ bool InitializeSavegameProfiler() {
             Log("G3O", "Savegame Profiler: Found gCWorld::GetSectorCount (0x%p)", pCount);
         }
 
-        void* pAt = (void*)GetProcAddress(hGame, "?GetSectorAt@gCWorld@@QAEPAVgCSector@@H@Z");
-        if (pAt) {
-            Real_GetSectorAt = (GetSectorAt_t)pAt;
-            Log("G3O", "Savegame Profiler: Found gCWorld::GetSectorAt (0x%p)", pAt);
-        }
-
         void* pDynCount = (void*)GetProcAddress(hGame, "?GetDynamicLayerCount@gCSector@@QBEHXZ");
         if (pDynCount) {
             Real_GetDynamicLayerCount = (GetDynamicLayerCount_t)pDynCount;
             Log("G3O", "Savegame Profiler: Found gCSector::GetDynamicLayerCount (0x%p)", pDynCount);
-        }
-
-        void* pDynAt = (void*)GetProcAddress(hGame, "?GetDynamicLayerAt@gCSector@@QAEPAVgCDynamicLayer@@H@Z");
-        if (pDynAt) {
-            Real_GetDynamicLayerAt = (GetDynamicLayerAt_t)pDynAt;
-            Log("G3O", "Savegame Profiler: Found gCSector::GetDynamicLayerAt (0x%p)", pDynAt);
         }
     }
 
@@ -1182,18 +1315,15 @@ bool InitializeSavegameProfiler() {
             Log("G3O", "Savegame Profiler: Hooked eCEntityAdmin::ForceFullROIUpdate (0x%p)", pROI);
         }
 
-        void* pAct = (void*)GetProcAddress(hEngine, "?Activate@eCProcessibleElement@@UAE?AW4eEResult@1@XZ");
-        if (pAct) {
-            Real_ElementActivate = (ElementActivate_t)pAct;
-            Log("G3O", "Savegame Profiler: Found eCProcessibleElement::Activate (0x%p)", pAct);
-        }
     }
 
-    Log("G3O", "Savegame Profiler initialized with comprehensive sub-phase telemetry.");
+    Log("G3O", "Savegame Profiler initialized with sub-phase telemetry (LayerAudit hooks=%s).",
+        metricsHooksReady ? "enabled" : "unavailable");
     return true;
 }
 
 void ShutdownSavegameProfiler() {
+    ShutdownMetricsHooks();
     if (s_targetReadFile) MH_DisableHook(s_targetReadFile);
     if (s_targetHUDLoadGame) MH_DisableHook(s_targetHUDLoadGame);
     if (s_targetHeader) MH_DisableHook(s_targetHeader);
@@ -1211,6 +1341,8 @@ void ShutdownSavegameProfiler() {
     if (s_targetSectorOnActivate) MH_DisableHook(s_targetSectorOnActivate);
     if (s_targetWorldActivate) MH_DisableHook(s_targetWorldActivate);
     if (s_targetBuildStatic) MH_DisableHook(s_targetBuildStatic);
+    if (s_targetWorldDoLoadData) MH_DisableHook(s_targetWorldDoLoadData);
+    if (s_targetSectorDoLoadData) MH_DisableHook(s_targetSectorDoLoadData);
 }
 
 } // namespace G3O

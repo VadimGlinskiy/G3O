@@ -230,11 +230,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnablePakPrefetch=true\n\n"
         << "; ЭКСПЕРИМЕНТАЛЬНО: пропуск активации секторов при загрузке из меню (нестабильно, вылеты в Engine.dll)\n"
         << "SkipRedundantPreLoadActivate=false\n\n"
-        << "; Многопоточная параллельная активация секторов мира (Parallel Sector Activation)\n"
-        << "; Радикально ускоряет фазу активации 562 секторов мира с ~11 с до ~2 с\n"
-        << "EnableParallelSectorActivation=true\n\n"
-        << "; Количество рабочих потоков для активации секторов (0 = авто: до 6 потоков)\n"
-        << "SectorActivationWorkers=0\n\n"
         << "; Аппаратная фильтрация избыточных вызовов состояний Direct3D 9 (SetRenderState/SetSamplerState)\n"
         << "EnableD3D9StateFilter=true\n\n"
         << "; Fast Texture Loader (d3dx9_40.dll)\n"
@@ -362,8 +357,6 @@ void LoadConfig() {
     s_config.cpuAffinityMask = ReadIniHex("Performance", "CPUAffinityMask", 0, path);
     s_config.pakCacheBudgetMB = ReadIniInt("Performance", "PakCacheBudgetMB", 192, path);
     s_config.pakPrefetchWorkers = ReadIniInt("Performance", "PakPrefetchWorkers", 0, path);
-    s_config.enableParallelSectorActivation = ReadIniBool("Performance", "EnableParallelSectorActivation", true, path);
-    s_config.sectorActivationWorkers = ReadIniInt("Performance", "SectorActivationWorkers", 0, path);
 
     // [Logging]
     s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", true, path);
