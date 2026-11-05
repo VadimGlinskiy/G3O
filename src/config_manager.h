@@ -35,6 +35,9 @@ struct Config {
     // [Performance]
     bool enableSIMDFrustumCulling = true;
     bool enableFastPakDecompressor = true;
+    bool enableParallelPakDecompressor = true;
+    bool enableWorldDeactivateOptimizer = true;
+    int pakPrefetchThreads = 0;        // 0 = Auto-detect based on CPU threads
     bool enablePropertyCache = true;
     bool enableD3D9StateFilter = false;
     bool enableFastTextureLoader = true;

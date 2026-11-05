@@ -224,6 +224,12 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnableSIMDFrustumCulling=true\n\n"
         << "; SIMD-ускоритель декомпрессии архивов .pak и сохранений (libdeflate)\n"
         << "EnableFastPakDecompressor=true\n\n"
+        << "; Многопоточный пайплайн упреждающей декомпрессии ресурсов .pak (Parallel Prefetch)\n"
+        << "EnableParallelPakDecompressor=true\n\n"
+        << "; Оптимизатор параллельной деактивации секторов мира (устраняет 10-секундный фриз перед загрузкой)\n"
+        << "EnableWorldDeactivateOptimizer=true\n\n"
+        << "; Количество потоков преддекомпрессии (0 = автоопределение по ядрам/потокам CPU)\n"
+        << "PakPrefetchThreads=0\n\n"
         << "; O(1) хэш-кэш свойств сущностей для ускорения загрузки сохранений\n"
         << "EnablePropertyCache=true\n\n"
         << "; Аппаратная фильтрация избыточных вызовов состояний Direct3D 9 (SetRenderState/SetSamplerState)\n"
@@ -336,6 +342,9 @@ void LoadConfig() {
     // [Performance]
     s_config.enableSIMDFrustumCulling = ReadIniBool("Performance", "EnableSIMDFrustumCulling", true, path);
     s_config.enableFastPakDecompressor = ReadIniBool("Performance", "EnableFastPakDecompressor", true, path);
+    s_config.enableParallelPakDecompressor = ReadIniBool("Performance", "EnableParallelPakDecompressor", true, path);
+    s_config.enableWorldDeactivateOptimizer = ReadIniBool("Performance", "EnableWorldDeactivateOptimizer", true, path);
+    s_config.pakPrefetchThreads = ReadIniInt("Performance", "PakPrefetchThreads", 0, path);
     s_config.enablePropertyCache = ReadIniBool("Performance", "EnablePropertyCache", true, path);
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", false, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);

@@ -14,6 +14,8 @@
 #include "cpu_topology.h"
 #include "vegetation_optimizer.h"
 #include "fast_pak_decompressor.h"
+#include "parallel_pak_decompressor.h"
+#include "world_deactivate_optimizer.h"
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
@@ -68,6 +70,16 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // Fast Pak Decompressor: SIMD libdeflate zlib decompression for .pak archives & savegames
     if (cfg.enableFastPakDecompressor) {
         G3O::InitializeFastPakDecompressor();
+    }
+
+    // Parallel Pak Decompressor: Multithreaded prefetch pipeline across CPU cores
+    if (cfg.enableParallelPakDecompressor) {
+        G3O::InitializeParallelPakDecompressor();
+    }
+
+    // World Deactivate Optimizer: Multithreaded sector cleanup (eliminates 10s pre-load freeze)
+    if (cfg.enableWorldDeactivateOptimizer) {
+        G3O::InitializeWorldDeactivateOptimizer();
     }
 
     // Property Cache Optimizer: O(1) hash cache for entity property resolution during save loading
@@ -142,7 +154,9 @@ static void ShutdownOptima() {
     }
     G3O::ShutdownMathSIMDOptimizer();
     G3O::ShutdownVegetationOptimizer();
+    G3O::ShutdownParallelPakDecompressor();
     G3O::ShutdownFastPakDecompressor();
+    G3O::ShutdownWorldDeactivateOptimizer();
     G3O::ShutdownPropertyCacheOptimizer();
     G3O::ShutdownVFSCacheOptimizer();
     G3O::ShutdownSavegameProfiler();

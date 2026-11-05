@@ -1,13 +1,18 @@
 #include "savegame_profiler.h"
 #include "diagnostic_logger.h"
 #include "fast_pak_decompressor.h"
+#include "parallel_pak_decompressor.h"
+#include "world_deactivate_optimizer.h"
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include <minhook.h>
 #include <windows.h>
 #include <stdio.h>
+#include <string>
 
 namespace G3O {
+
+static std::string s_lastSaveName = "QuickSave";
 
 static LARGE_INTEGER s_freq = []() {
     LARGE_INTEGER li;
@@ -144,6 +149,9 @@ static void LogLoadReport(double totalSec) {
         saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
     Log("G3O", "  - Property Resolution Cache:      %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
         totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
+    Log("G3O", "  - World Deactivate Optimizer:     Last duration: %.3f s", GetLastWorldDeactivateDurationSec());
+    Log("G3O", "  - Parallel Pak Prefetcher:        %ld hits, %ld misses (est. %.2f s saved)",
+        GetPakPrefetchHits(), GetPakPrefetchMisses(), GetPakPrefetchTimeSavedSec());
     Log("G3O", "================================================================================");
 
     FILE* fp = fopen("G3O_LoadProfiler.log", "w");
@@ -181,6 +189,9 @@ static void LogLoadReport(double totalSec) {
             saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
         fprintf(fp, "  - Property Resolution Cache:      %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
             totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
+        fprintf(fp, "  - World Deactivate Optimizer:     Last duration: %.3f s\n", GetLastWorldDeactivateDurationSec());
+        fprintf(fp, "  - Parallel Pak Prefetcher:        %ld hits, %ld misses (est. %.2f s saved)\n",
+            GetPakPrefetchHits(), GetPakPrefetchMisses(), GetPakPrefetchTimeSavedSec());
         fprintf(fp, "================================================================================\n");
         fclose(fp);
     }
@@ -233,6 +244,10 @@ typedef int (__thiscall* GetSaveGameHeader_t)(void* pThis, const void* pStr, voi
 static GetSaveGameHeader_t Real_GetSaveGameHeader = nullptr;
 
 static int __fastcall Hooked_GetSaveGameHeader(void* pThis, void* /*edx*/, const void* pStr, void* pHeader) {
+    if (pStr) {
+        const char* s = *(const char**)pStr;
+        if (s && *s) s_lastSaveName = s;
+    }
     if (!s_isLoadActive) return Real_GetSaveGameHeader(pThis, pStr, pHeader);
     LARGE_INTEGER t0, t1;
     LONG pak0 = GetPakDecompCount(); LONG64 pakOut0 = GetPakDecompOutBytes();
@@ -339,7 +354,9 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
     QueryPerformanceCounter(&t0);
     Log("G3O", "[LoadProfile] -> gCSession::GotoLoadedPosition START (Resource Streaming / Scene Init)");
 
+    NotifyGotoLoadedPositionStart(s_lastSaveName.c_str());
     Real_GotoLoadedPosition(pThis, pEntity, a);
+    NotifyGotoLoadedPositionEnd();
 
     QueryPerformanceCounter(&t1);
     SnapshotPhase(s_statGotoPos, t0, t1, pak0, pakOut0, read0, readBytes0);
