@@ -343,6 +343,7 @@ static void RemoveCreatedMetricsHooks() {
 }
 
 static bool InitMetricsHooks() {
+    return true; // Disabled: micro-audit hooks interfere with entity visual mesh attachment
     if (s_metricsHooksInitialized) return true;
     if (!IsTelemetryActive()) return true;
 
