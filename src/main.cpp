@@ -17,6 +17,7 @@
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
+#include "pak_prefetch.h"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -82,6 +83,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
 
     // Savegame Profiler: High-resolution telemetry for savegame loading phases
     G3O::InitializeSavegameProfiler();
+    G3O::InitializePakPrefetch();
 
     // Hardware SIMD Frustum Culling & Math optimization for extreme draw distances
     if (cfg.enableSIMDFrustumCulling) {

@@ -36,6 +36,7 @@ struct Config {
     bool enableSIMDFrustumCulling = true;
     bool enableFastPakDecompressor = true;
     bool enablePropertyCache = true;
+    bool enablePakPrefetch = true;
     bool skipRedundantPreLoadActivate = false;
     bool enableD3D9StateFilter = false;
     bool enableFastTextureLoader = true;

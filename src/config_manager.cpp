@@ -226,6 +226,8 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnableFastPakDecompressor=true\n\n"
         << "; O(1) хэш-кэш свойств сущностей для ускорения загрузки сохранений\n"
         << "EnablePropertyCache=true\n\n"
+        << "; Фоновая предзагрузка .pak в кэш Windows при старте (ускоряет первую загрузку сохранения)\n"
+        << "EnablePakPrefetch=true\n\n"
         << "; ЭКСПЕРИМЕНТАЛЬНО: пропуск активации секторов при загрузке из меню (нестабильно, вылеты в Engine.dll)\n"
         << "SkipRedundantPreLoadActivate=false\n\n"
         << "; Аппаратная фильтрация избыточных вызовов состояний Direct3D 9 (SetRenderState/SetSamplerState)\n"
@@ -339,6 +341,7 @@ void LoadConfig() {
     s_config.enableSIMDFrustumCulling = ReadIniBool("Performance", "EnableSIMDFrustumCulling", true, path);
     s_config.enableFastPakDecompressor = ReadIniBool("Performance", "EnableFastPakDecompressor", true, path);
     s_config.enablePropertyCache = ReadIniBool("Performance", "EnablePropertyCache", true, path);
+    s_config.enablePakPrefetch = ReadIniBool("Performance", "EnablePakPrefetch", true, path);
     s_config.skipRedundantPreLoadActivate = ReadIniBool("Performance", "SkipRedundantPreLoadActivate", false, path);
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", false, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);
