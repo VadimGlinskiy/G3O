@@ -219,6 +219,8 @@ static void LogLoadReport(double totalSec) {
             pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0.0, pakCount, pakInMb, pakOutMb);
         fprintf(fp, "  - Save Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]\n",
             saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
+        fprintf(fp, "  - Decomp Duplicate Cache:         %ld hits (%.2f MB saved from redundant decompression)\n",
+            GetDecompCacheHits(), (double)GetDecompCacheBytesSaved() / (1024.0 * 1024.0));
         fprintf(fp, "  - Property Resolution Cache:      %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
             totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
         fprintf(fp, "================================================================================\n");
