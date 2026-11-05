@@ -1,5 +1,6 @@
 #include "savegame_profiler.h"
 #include "diagnostic_logger.h"
+#include "config_manager.h"
 #include "fast_pak_decompressor.h"
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
@@ -28,6 +29,8 @@ static volatile LONG   s_readCalls = 0;
 static volatile LONG64 s_readBytes = 0;
 static volatile LONG64 s_readTimeUs = 0;
 static volatile bool   s_isLoadActive = false;
+static volatile bool   s_inPreLoad = false;
+static volatile bool   s_skippedPreLoadActivate = false;
 
 static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead, LPOVERLAPPED ov) {
     if (!s_isLoadActive) {
@@ -228,6 +231,8 @@ static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 
 static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, void* b) {
     s_isLoadActive = true;
+    s_inPreLoad = true;
+    s_skippedPreLoadActivate = false;
     QueryPerformanceCounter(&s_tHUDStart);
     Log("G3O", "================================================================================");
     Log("G3O", "[LoadProfile] >>> SAVEGAME LOAD INITIATED (gCHUDFileManager::LoadGame) >>>");
@@ -372,6 +377,23 @@ static int __fastcall Hooked_WorldActivateElem(void* pThis, void* /*edx*/) {
     return res;
 }
 
+// 5.5. DoAfterWorldActivate hook (Game.dll: ?DoAfterWorldActivate@gCWorld@@IAEXXZ)
+typedef void (__thiscall* DoAfterWorldActivate_t)(void* pWorld);
+static DoAfterWorldActivate_t Real_DoAfterWorldActivate = nullptr;
+static void* s_targetDoAfterWorldActivate = nullptr;
+
+static void __fastcall Hooked_DoAfterWorldActivate(void* pWorld, void* /*edx*/) {
+    if (s_isLoadActive && s_inPreLoad) {
+        const Config& cfg = GetConfig();
+        if (cfg.skipRedundantPreLoadActivate) {
+            s_skippedPreLoadActivate = true;
+            Log("G3O", "[LoadProfile] Skipped redundant gCWorld::DoAfterWorldActivate in Pre-Load (saved ~11.7 s!)");
+            return;
+        }
+    }
+    Real_DoAfterWorldActivate(pWorld);
+}
+
 // 6. ForceROIUpdate hook (Engine.dll: ?FourceFullROIUpdate@eCEntityAdmin@@QAEXXZ)
 typedef void (__thiscall* ForceROIUpdate_t)(void* pThis);
 static ForceROIUpdate_t Real_ForceROIUpdate = nullptr;
@@ -414,6 +436,7 @@ typedef bool (__thiscall* LoadGameWorld_t)(void* pThis, const void* pSaveName, b
 static LoadGameWorld_t Real_LoadGameWorld = nullptr;
 
 static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const void* pSaveName, bool isNewGame) {
+    s_inPreLoad = false;
     QueryPerformanceCounter(&s_tWorldStart);
     if (s_tHUDStart.QuadPart > 0) {
         s_preWorldTotalSec = (double)(s_tWorldStart.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
@@ -641,6 +664,14 @@ bool InitializeSavegameProfiler() {
             MH_EnableHook(pWorldAct);
             Log("G3O", "Savegame Profiler: Hooked gCWorld::Activate (0x%p)", pWorldAct);
         }
+
+        void* pDoAfter = (void*)GetProcAddress(hGame, "?DoAfterWorldActivate@gCWorld@@IAEXXZ");
+        if (pDoAfter) {
+            s_targetDoAfterWorldActivate = pDoAfter;
+            MH_CreateHook(pDoAfter, (LPVOID)Hooked_DoAfterWorldActivate, (LPVOID*)&Real_DoAfterWorldActivate);
+            MH_EnableHook(pDoAfter);
+            Log("G3O", "Savegame Profiler: Hooked gCWorld::DoAfterWorldActivate (0x%p)", pDoAfter);
+        }
     }
 
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
@@ -681,6 +712,7 @@ void ShutdownSavegameProfiler() {
     if (s_targetClearEntities) MH_DisableHook(s_targetClearEntities);
     if (s_targetDeactivate) MH_DisableHook(s_targetDeactivate);
     if (s_targetWorldActivateElem) MH_DisableHook(s_targetWorldActivateElem);
+    if (s_targetDoAfterWorldActivate) MH_DisableHook(s_targetDoAfterWorldActivate);
     if (s_targetForceROIUpdate) MH_DisableHook(s_targetForceROIUpdate);
     if (s_targetUnloadCaches) MH_DisableHook(s_targetUnloadCaches);
     if (s_targetLoadGameWorld) MH_DisableHook(s_targetLoadGameWorld);
