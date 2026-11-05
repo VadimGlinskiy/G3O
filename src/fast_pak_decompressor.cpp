@@ -1,4 +1,5 @@
 #include "fast_pak_decompressor.h"
+#include "decompressor_avx2.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
 #include <minhook.h>
@@ -7,6 +8,21 @@
 #include <stdio.h>
 
 namespace G3O {
+
+// -----------------------------------------------------------------------------
+// CPU Dispatch Architecture (SSE2 baseline + AVX2/BMI2 hardware acceleration)
+// -----------------------------------------------------------------------------
+typedef void* (*AllocDecompFn)();
+typedef void  (*FreeDecompFn)(void*);
+typedef int   (*DecompZlibFn)(void*, const void*, size_t, void*, size_t, size_t*);
+typedef int   (*DecompDeflateFn)(void*, const void*, size_t, void*, size_t, size_t*);
+
+static AllocDecompFn   s_fnAlloc = nullptr;
+static FreeDecompFn    s_fnFree = nullptr;
+static DecompZlibFn    s_fnZlib = nullptr;
+static DecompDeflateFn s_fnDeflate = nullptr;
+static const char*     s_backendName = "Uninitialized";
+static bool            s_isAvx2Active = false;
 
 // -----------------------------------------------------------------------------
 // FileSystem.dll hook (for virtual files inside .pak archives)
@@ -47,11 +63,11 @@ static LARGE_INTEGER s_timerFreq = []() {
     return li;
 }();
 
-static thread_local struct libdeflate_decompressor* s_tlDecompressor = nullptr;
+static thread_local void* s_tlDecompressor = nullptr;
 
-static struct libdeflate_decompressor* GetThreadDecompressor() {
-    if (!s_tlDecompressor) {
-        s_tlDecompressor = libdeflate_alloc_decompressor();
+static void* GetThreadDecompressor() {
+    if (!s_tlDecompressor && s_fnAlloc) {
+        s_tlDecompressor = s_fnAlloc();
     }
     return s_tlDecompressor;
 }
@@ -71,15 +87,15 @@ static int __stdcall Hooked_ZlibDecompress(
     DWORD outCapacity,
     DWORD* pOutWritten
 ) {
-    if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0) {
-        struct libdeflate_decompressor* dec = GetThreadDecompressor();
+    if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0 && s_fnZlib) {
+        void* dec = GetThreadDecompressor();
         if (dec) {
             LARGE_INTEGER t0, t1;
             QueryPerformanceCounter(&t0);
 
             size_t actual_out = 0;
             // Primary path: Standard zlib-wrapped stream
-            enum libdeflate_result res = libdeflate_zlib_decompress(
+            int res = s_fnZlib(
                 dec,
                 inBuffer,
                 (size_t)inSize,
@@ -89,8 +105,8 @@ static int __stdcall Hooked_ZlibDecompress(
             );
 
             // Secondary path: Raw deflate with header/trailer stripped
-            if (res != LIBDEFLATE_SUCCESS && inSize >= 6) {
-                res = libdeflate_deflate_decompress(
+            if (res != 0 && inSize >= 6 && s_fnDeflate) {
+                res = s_fnDeflate(
                     dec,
                     (const BYTE*)inBuffer + 2,
                     (size_t)(inSize - 6),
@@ -100,7 +116,7 @@ static int __stdcall Hooked_ZlibDecompress(
                 );
             }
 
-            if (res == LIBDEFLATE_SUCCESS) {
+            if (res == 0) { // 0 == LIBDEFLATE_SUCCESS
                 QueryPerformanceCounter(&t1);
                 LONG64 us = (s_timerFreq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_timerFreq.QuadPart) : 0;
                 InterlockedExchangeAdd64(&s_decompTimeUs, us);
@@ -126,15 +142,15 @@ static int __stdcall SavegameDecompressImpl(
     void* outBuffer,
     DWORD* pDestLen
 ) {
-    if (inBuffer && inSize >= 6 && outBuffer && pDestLen && *pDestLen > 0) {
-        struct libdeflate_decompressor* dec = GetThreadDecompressor();
+    if (inBuffer && inSize >= 6 && outBuffer && pDestLen && *pDestLen > 0 && s_fnZlib) {
+        void* dec = GetThreadDecompressor();
         if (dec) {
             LARGE_INTEGER t0, t1;
             QueryPerformanceCounter(&t0);
 
             size_t actual_out = 0;
             // Primary path: Standard zlib decompress
-            enum libdeflate_result res = libdeflate_zlib_decompress(
+            int res = s_fnZlib(
                 dec,
                 inBuffer,
                 (size_t)inSize,
@@ -142,7 +158,7 @@ static int __stdcall SavegameDecompressImpl(
                 (size_t)*pDestLen,
                 &actual_out
             );
-            if (res == LIBDEFLATE_SUCCESS) {
+            if (res == 0) {
                 QueryPerformanceCounter(&t1);
                 LONG64 us = (s_timerFreq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_timerFreq.QuadPart) : 0;
                 InterlockedExchangeAdd64(&s_savegameDecompTimeUs, us);
@@ -152,14 +168,14 @@ static int __stdcall SavegameDecompressImpl(
                 InterlockedExchangeAdd64(&s_savegameDecompInBytes, (LONG64)inSize);
                 InterlockedExchangeAdd64(&s_savegameDecompOutBytes, (LONG64)actual_out);
 
-                Log("G3O", "[SavegameDecomp] Chunk #%ld: %lu bytes -> %lu bytes (%.2f ms, libdeflate zlib)",
-                    count, inSize, (DWORD)actual_out, (double)us / 1000.0);
+                Log("G3O", "[SavegameDecomp] Chunk #%ld: %lu bytes -> %lu bytes (%.2f ms, %s)",
+                    count, inSize, (DWORD)actual_out, (double)us / 1000.0, s_backendName);
                 return 0; // Z_OK
             }
 
             // Secondary path: Raw deflate
-            if (inSize >= 6) {
-                res = libdeflate_deflate_decompress(
+            if (inSize >= 6 && s_fnDeflate) {
+                res = s_fnDeflate(
                     dec,
                     (const BYTE*)inBuffer + 2,
                     (size_t)(inSize - 6),
@@ -167,7 +183,7 @@ static int __stdcall SavegameDecompressImpl(
                     (size_t)*pDestLen,
                     &actual_out
                 );
-                if (res == LIBDEFLATE_SUCCESS) {
+                if (res == 0) {
                     QueryPerformanceCounter(&t1);
                     LONG64 us = (s_timerFreq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_timerFreq.QuadPart) : 0;
                     InterlockedExchangeAdd64(&s_savegameDecompTimeUs, us);
@@ -177,8 +193,8 @@ static int __stdcall SavegameDecompressImpl(
                     InterlockedExchangeAdd64(&s_savegameDecompInBytes, (LONG64)inSize);
                     InterlockedExchangeAdd64(&s_savegameDecompOutBytes, (LONG64)actual_out);
 
-                    Log("G3O", "[SavegameDecomp] Chunk #%ld: %lu bytes -> %lu bytes (%.2f ms, libdeflate raw)",
-                        count, inSize, (DWORD)actual_out, (double)us / 1000.0);
+                    Log("G3O", "[SavegameDecomp] Chunk #%ld: %lu bytes -> %lu bytes (%.2f ms, %s raw)",
+                        count, inSize, (DWORD)actual_out, (double)us / 1000.0, s_backendName);
                     return 0; // Z_OK
                 }
             }
@@ -290,6 +306,24 @@ bool InitializeFastPakDecompressor() {
         return false;
     }
 
+    // 0. Dynamic CPU Dispatch (Select AVX2+BMI2 if CPU supports it, else universal SSE2 baseline)
+    if (G3O_AVX2_IsSupported()) {
+        s_fnAlloc = (AllocDecompFn)G3O_AVX2_AllocDecompressor;
+        s_fnFree = (FreeDecompFn)G3O_AVX2_FreeDecompressor;
+        s_fnZlib = (DecompZlibFn)G3O_AVX2_DecompressZlib;
+        s_fnDeflate = (DecompDeflateFn)G3O_AVX2_DecompressDeflate;
+        s_backendName = "libdeflate [AVX2 + BMI2 Hardware Accelerated]";
+        s_isAvx2Active = true;
+    } else {
+        s_fnAlloc = (AllocDecompFn)libdeflate_alloc_decompressor;
+        s_fnFree = (FreeDecompFn)libdeflate_free_decompressor;
+        s_fnZlib = (DecompZlibFn)libdeflate_zlib_decompress;
+        s_fnDeflate = (DecompDeflateFn)libdeflate_deflate_decompress;
+        s_backendName = "libdeflate [Universal SSE2 Baseline]";
+        s_isAvx2Active = false;
+    }
+    Log("G3O", "[CPU Dispatch] Decompressor backend: %s", s_backendName);
+
     // 1. FileSystem.dll hook
     HMODULE hFs = GetModuleHandleA("FileSystem.dll");
     if (hFs) {
@@ -341,6 +375,10 @@ void ShutdownFastPakDecompressor() {
     if (s_targetGameDecompressor) {
         MH_DisableHook(s_targetGameDecompressor);
         s_targetGameDecompressor = nullptr;
+    }
+    if (s_tlDecompressor && s_fnFree) {
+        s_fnFree(s_tlDecompressor);
+        s_tlDecompressor = nullptr;
     }
     ClearDecompCache();
     Log("G3O", "Decompressor stats: Pak files: %ld blocks (in: %.2f MB, out: %.2f MB, time: %.2f ms) | Savegame: %ld chunks (in: %.2f MB, out: %.2f MB, time: %.2f ms)",

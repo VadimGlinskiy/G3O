@@ -19,10 +19,6 @@ set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
 set(LIBDEFLATE_BUILD_GZIP OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/libdeflate)
 
-if(MSVC)
-    target_compile_options(libdeflate_static PRIVATE /arch:AVX2 /Oi /O2)
-endif()
-
 # Main dinput8.dll Proxy library
 add_library(dinput8 SHARED
     src/main.cpp
@@ -51,6 +47,8 @@ add_library(dinput8 SHARED
     src/cpu_topology.h
     src/vegetation_optimizer.cpp
     src/vegetation_optimizer.h
+    src/decompressor_avx2.c
+    src/decompressor_avx2.h
     src/fast_pak_decompressor.cpp
     src/fast_pak_decompressor.h
     src/property_cache_optimizer.cpp
@@ -65,10 +63,16 @@ add_library(dinput8 SHARED
     src/vfs_cache_optimizer.h
 )
 
+if(MSVC)
+    # Enable AVX2 and BMI2 only for the dedicated hardware-accelerated translation unit (C11 mode)
+    set_source_files_properties(src/decompressor_avx2.c PROPERTIES COMPILE_FLAGS "/TC /arch:AVX2 /Oi /O2")
+endif()
+
 target_include_directories(dinput8 PRIVATE
     src
     third_party/minhook/include
     third_party/libdeflate
+    third_party/libdeflate/lib
 )
 
 target_link_libraries(dinput8 PRIVATE
