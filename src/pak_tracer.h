@@ -20,7 +20,8 @@ void PakTracer_RecordDecompress(
     DWORD inSize,
     DWORD outCapacity,
     DWORD actualOut,
-    uint64_t decompTimeUs
+    uint64_t decompTimeUs,
+    const void* outBuffer
 );
 
 bool PakTracer_IsActive();

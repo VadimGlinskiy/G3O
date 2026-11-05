@@ -136,7 +136,7 @@ static int __stdcall Hooked_ZlibDecompress(
                 InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
                 InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)actual_out);
 
-                PakTracer_RecordDecompress(inBuffer, inSize, outCapacity, (DWORD)actual_out, (uint64_t)us);
+                PakTracer_RecordDecompress(inBuffer, inSize, outCapacity, (DWORD)actual_out, (uint64_t)us, outBuffer);
 
                 return 0; // Success
             }
