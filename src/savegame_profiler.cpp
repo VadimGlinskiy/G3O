@@ -1,8 +1,6 @@
 #include "savegame_profiler.h"
 #include "diagnostic_logger.h"
 #include "fast_pak_decompressor.h"
-#include "parallel_pak_decompressor.h"
-#include "world_deactivate_optimizer.h"
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include <minhook.h>
@@ -71,6 +69,11 @@ static PhaseStats s_statGotoPos = {};
 static PhaseStats s_statSessionStart = {};
 static PhaseStats s_statWorldActivate = {};
 
+static volatile LONG   s_deactivateCount = 0;
+static volatile LONG64 s_deactivateTimeUs = 0;
+static volatile LONG64 s_worldActivateElemTimeUs = 0;
+static volatile LONG64 s_forceROIUpdateTimeUs = 0;
+
 static double s_preWorldTotalSec = 0.0;
 static volatile LONG   s_cellsProcessed = 0;
 static volatile LONG64 s_hierarchyTimeUs = 0;
@@ -106,7 +109,13 @@ static void LogLoadReport(double totalSec) {
     LONG totalProps = strHits + strMiss + idHits + idMiss;
     double propHitRate = totalProps ? (100.0 * (strHits + idHits) / totalProps) : 0.0;
 
-    double preKnown = s_statHeader.durationSec + s_statSessionStop.durationSec + s_statClearEntities.durationSec + s_statUnloadCaches.durationSec;
+    double deactSec = (double)s_deactivateTimeUs / 1000000.0;
+    double worldActElemSec = (double)s_worldActivateElemTimeUs / 1000000.0;
+    double roiSec = (double)s_forceROIUpdateTimeUs / 1000000.0;
+
+    double preKnown = s_statHeader.durationSec + s_statSessionStop.durationSec + 
+                      s_statClearEntities.durationSec + s_statUnloadCaches.durationSec +
+                      deactSec + worldActElemSec + roiSec;
     double preOther = s_preWorldTotalSec - preKnown;
     if (preOther < 0.0) preOther = 0.0;
 
@@ -115,6 +124,12 @@ static void LogLoadReport(double totalSec) {
     if (postTotal < 0.0) postTotal = 0.0;
     double postOther = postTotal - postKnown;
     if (postOther < 0.0) postOther = 0.0;
+
+    double gotoPakSec = (pakOutMb > 0.0) ? (s_statGotoPos.pakOutMb / pakOutMb) * pakSec : 0.0;
+    double gotoReadSec = (rbMb > 0.0) ? (s_statGotoPos.readMb / rbMb) * rSec : 0.0;
+    double pvsSec = (double)s_hierarchyTimeUs / 1000000.0;
+    double gotoSetupSec = s_statGotoPos.durationSec - (gotoPakSec + gotoReadSec + pvsSec);
+    if (gotoSetupSec < 0.0) gotoSetupSec = 0.0;
 
     Log("G3O", "================================================================================");
     Log("G3O", "[LoadProfile] === DETAILED SAVEGAME LOAD BENCHMARK (Total: %.3f s) ===", totalSec);
@@ -126,6 +141,9 @@ static void LogLoadReport(double totalSec) {
         s_statHeader.durationSec, s_statHeader.pakBlocks, s_statHeader.readMb);
     Log("G3O", "       * gCSession::Stop:           %6.3f s", s_statSessionStop.durationSec);
     Log("G3O", "       * gCGUIManager::ClearEnt:    %6.3f s", s_statClearEntities.durationSec);
+    Log("G3O", "       * Elements Deactivation:     %6.3f s [%ld calls]", deactSec, s_deactivateCount);
+    Log("G3O", "       * gCWorld::Activate:         %6.3f s", worldActElemSec);
+    Log("G3O", "       * ForceFullROIUpdate:        %6.3f s", roiSec);
     Log("G3O", "       * gCWorld::UnloadCaches:     %6.3f s [%ld pak blocks, %.2f MB read]",
         s_statUnloadCaches.durationSec, s_statUnloadCaches.pakBlocks, s_statUnloadCaches.readMb);
     Log("G3O", "       * Other Pre-Load Overhead:   %6.3f s", preOther);
@@ -136,6 +154,10 @@ static void LogLoadReport(double totalSec) {
         postTotal, totalSec > 0 ? (postTotal * 100.0 / totalSec) : 0.0);
     Log("G3O", "       * gCSession::GotoLoadedPos:  %6.3f s [%ld pak blocks, %.2f MB decomp, %.2f MB read]",
         s_statGotoPos.durationSec, s_statGotoPos.pakBlocks, s_statGotoPos.pakOutMb, s_statGotoPos.readMb);
+    Log("G3O", "           - Pak Decompress (libdeflate): %6.3f s", gotoPakSec);
+    Log("G3O", "           - Disk ReadFile I/O:           %6.3f s", gotoReadSec);
+    Log("G3O", "           - PVS Cell Hierarchies:        %6.3f s [%ld cells]", pvsSec, s_cellsProcessed);
+    Log("G3O", "           - Scene & Entity Setup:        %6.3f s", gotoSetupSec);
     Log("G3O", "       * gCSession::Start (World):  %6.3f s [%ld pak blocks, %.2f MB read]",
         s_statSessionStart.durationSec, s_statSessionStart.pakBlocks, s_statSessionStart.readMb);
     Log("G3O", "       * Other Post Overhead:       %6.3f s", postOther);
@@ -149,9 +171,6 @@ static void LogLoadReport(double totalSec) {
         saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
     Log("G3O", "  - Property Resolution Cache:      %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
         totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
-    Log("G3O", "  - World Deactivate Optimizer:     Last duration: %.3f s", GetLastWorldDeactivateDurationSec());
-    Log("G3O", "  - Parallel Pak Prefetcher:        %ld hits, %ld misses (est. %.2f s saved)",
-        GetPakPrefetchHits(), GetPakPrefetchMisses(), GetPakPrefetchTimeSavedSec());
     Log("G3O", "================================================================================");
 
     FILE* fp = fopen("G3O_LoadProfiler.log", "w");
@@ -166,6 +185,9 @@ static void LogLoadReport(double totalSec) {
             s_statHeader.durationSec, s_statHeader.pakBlocks, s_statHeader.readMb);
         fprintf(fp, "       * gCSession::Stop:           %6.3f s\n", s_statSessionStop.durationSec);
         fprintf(fp, "       * gCGUIManager::ClearEnt:    %6.3f s\n", s_statClearEntities.durationSec);
+        fprintf(fp, "       * Elements Deactivation:     %6.3f s [%ld calls]\n", deactSec, s_deactivateCount);
+        fprintf(fp, "       * gCWorld::Activate:         %6.3f s\n", worldActElemSec);
+        fprintf(fp, "       * ForceFullROIUpdate:        %6.3f s\n", roiSec);
         fprintf(fp, "       * gCWorld::UnloadCaches:     %6.3f s [%ld pak blocks, %.2f MB read]\n",
             s_statUnloadCaches.durationSec, s_statUnloadCaches.pakBlocks, s_statUnloadCaches.readMb);
         fprintf(fp, "       * Other Pre-Load Overhead:   %6.3f s\n", preOther);
@@ -176,6 +198,10 @@ static void LogLoadReport(double totalSec) {
             postTotal, totalSec > 0 ? (postTotal * 100.0 / totalSec) : 0.0);
         fprintf(fp, "       * gCSession::GotoLoadedPos:  %6.3f s [%ld pak blocks, %.2f MB decomp, %.2f MB read]\n",
             s_statGotoPos.durationSec, s_statGotoPos.pakBlocks, s_statGotoPos.pakOutMb, s_statGotoPos.readMb);
+        fprintf(fp, "           - Pak Decompress (libdeflate): %6.3f s\n", gotoPakSec);
+        fprintf(fp, "           - Disk ReadFile I/O:           %6.3f s\n", gotoReadSec);
+        fprintf(fp, "           - PVS Cell Hierarchies:        %6.3f s [%ld cells]\n", pvsSec, s_cellsProcessed);
+        fprintf(fp, "           - Scene & Entity Setup:        %6.3f s\n", gotoSetupSec);
         fprintf(fp, "       * gCSession::Start (World):  %6.3f s [%ld pak blocks, %.2f MB read]\n",
             s_statSessionStart.durationSec, s_statSessionStart.pakBlocks, s_statSessionStart.readMb);
         fprintf(fp, "       * Other Post Overhead:       %6.3f s\n", postOther);
@@ -189,9 +215,6 @@ static void LogLoadReport(double totalSec) {
             saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
         fprintf(fp, "  - Property Resolution Cache:      %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
             totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
-        fprintf(fp, "  - World Deactivate Optimizer:     Last duration: %.3f s\n", GetLastWorldDeactivateDurationSec());
-        fprintf(fp, "  - Parallel Pak Prefetcher:        %ld hits, %ld misses (est. %.2f s saved)\n",
-            GetPakPrefetchHits(), GetPakPrefetchMisses(), GetPakPrefetchTimeSavedSec());
         fprintf(fp, "================================================================================\n");
         fclose(fp);
     }
@@ -217,6 +240,11 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     InterlockedExchange64(&s_readTimeUs, 0);
     InterlockedExchange(&s_cellsProcessed, 0);
     InterlockedExchange64(&s_hierarchyTimeUs, 0);
+
+    InterlockedExchange(&s_deactivateCount, 0);
+    InterlockedExchange64(&s_deactivateTimeUs, 0);
+    InterlockedExchange64(&s_worldActivateElemTimeUs, 0);
+    InterlockedExchange64(&s_forceROIUpdateTimeUs, 0);
 
     s_statHeader = {};
     s_statSessionStop = {};
@@ -299,7 +327,71 @@ static bool __fastcall Hooked_ClearAllEntities(void* pThis, void* /*edx*/) {
     return r;
 }
 
-// 4. UnloadCaches hook
+// 4. Deactivate hook (Engine.dll: ?Deactivate@eCProcessibleElement@@QAE?AW4eEResult@1@XZ)
+typedef int (__thiscall* Deactivate_t)(void* pThis);
+static Deactivate_t Real_Deactivate = nullptr;
+static void* s_targetDeactivate = nullptr;
+
+static int __fastcall Hooked_Deactivate(void* pThis, void* /*edx*/) {
+    if (!s_isLoadActive) return Real_Deactivate(pThis);
+
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+
+    int res = Real_Deactivate(pThis);
+
+    QueryPerformanceCounter(&t1);
+    LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+    InterlockedExchangeAdd64(&s_deactivateTimeUs, us);
+    InterlockedIncrement(&s_deactivateCount);
+
+    double dt = (double)us / 1000000.0;
+    if (dt >= 0.010) {
+        Log("G3O", "[LoadProfile] eCProcessibleElement::Deactivate (0x%p) took %.3f s", pThis, dt);
+    }
+    return res;
+}
+
+// 5. WorldActivateElem hook (Game.dll: ?Activate@gCWorld@@UAE?AW4eEResult@eCProcessibleElement@@XZ)
+typedef int (__thiscall* WorldActivateElem_t)(void* pThis);
+static WorldActivateElem_t Real_WorldActivateElem = nullptr;
+static void* s_targetWorldActivateElem = nullptr;
+
+static int __fastcall Hooked_WorldActivateElem(void* pThis, void* /*edx*/) {
+    if (!s_isLoadActive) return Real_WorldActivateElem(pThis);
+
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+
+    int res = Real_WorldActivateElem(pThis);
+
+    QueryPerformanceCounter(&t1);
+    LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+    InterlockedExchangeAdd64(&s_worldActivateElemTimeUs, us);
+    Log("G3O", "[LoadProfile] gCWorld::Activate took %.3f s", (double)us / 1000000.0);
+    return res;
+}
+
+// 6. ForceROIUpdate hook (Engine.dll: ?FourceFullROIUpdate@eCEntityAdmin@@QAEXXZ)
+typedef void (__thiscall* ForceROIUpdate_t)(void* pThis);
+static ForceROIUpdate_t Real_ForceROIUpdate = nullptr;
+static void* s_targetForceROIUpdate = nullptr;
+
+static void __fastcall Hooked_ForceROIUpdate(void* pThis, void* /*edx*/) {
+    if (!s_isLoadActive) { Real_ForceROIUpdate(pThis); return; }
+
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+
+    Real_ForceROIUpdate(pThis);
+
+    QueryPerformanceCounter(&t1);
+    LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+    InterlockedExchangeAdd64(&s_forceROIUpdateTimeUs, us);
+    Log("G3O", "[LoadProfile] eCEntityAdmin::ForceFullROIUpdate took %.3f s", (double)us / 1000000.0);
+}
+
+// 7. UnloadCaches hook
 typedef void (__thiscall* UnloadCaches_t)(void* pThis);
 static UnloadCaches_t Real_UnloadCaches = nullptr;
 
@@ -317,7 +409,7 @@ static void __fastcall Hooked_UnloadCaches(void* pThis, void* /*edx*/) {
     Log("G3O", "[LoadProfile] gCWorld::UnloadCaches took %.3f s", s_statUnloadCaches.durationSec);
 }
 
-// 5. LoadGameWorld hook
+// 8. LoadGameWorld hook
 typedef bool (__thiscall* LoadGameWorld_t)(void* pThis, const void* pSaveName, bool isNewGame);
 static LoadGameWorld_t Real_LoadGameWorld = nullptr;
 
@@ -342,7 +434,7 @@ static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const vo
     return r;
 }
 
-// 6. GotoLoadedPosition hook
+// 9. GotoLoadedPosition hook
 typedef void (__thiscall* GotoLoadedPosition_t)(void* pThis, void* pEntity, bool a);
 static GotoLoadedPosition_t Real_GotoLoadedPosition = nullptr;
 
@@ -354,9 +446,7 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
     QueryPerformanceCounter(&t0);
     Log("G3O", "[LoadProfile] -> gCSession::GotoLoadedPosition START (Resource Streaming / Scene Init)");
 
-    NotifyGotoLoadedPositionStart(s_lastSaveName.c_str());
     Real_GotoLoadedPosition(pThis, pEntity, a);
-    NotifyGotoLoadedPositionEnd();
 
     QueryPerformanceCounter(&t1);
     SnapshotPhase(s_statGotoPos, t0, t1, pak0, pakOut0, read0, readBytes0);
@@ -364,7 +454,7 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
         s_statGotoPos.durationSec, s_statGotoPos.pakBlocks, s_statGotoPos.pakOutMb, s_statGotoPos.readMb);
 }
 
-// 7. SessionStart hook
+// 10. SessionStart hook
 typedef void (__thiscall* SessionStart_t)(void* pThis, int mode);
 static SessionStart_t Real_SessionStart = nullptr;
 
@@ -384,7 +474,7 @@ static void __fastcall Hooked_SessionStart(void* pThis, void* /*edx*/, int mode)
         s_statSessionStart.durationSec, s_statSessionStart.pakBlocks, s_statSessionStart.readMb);
 }
 
-// 8. WorldActivate hook
+// 11. WorldActivate hook
 typedef int (__thiscall* WorldActivate_t)(void* pThis);
 static WorldActivate_t Real_WorldActivate = nullptr;
 
@@ -399,7 +489,7 @@ static int __fastcall Hooked_WorldActivate(void* pThis, void* /*edx*/) {
     return r;
 }
 
-// 9. BuildStaticHierachy hook
+// 12. BuildStaticHierachy hook
 typedef void (__thiscall* BuildStaticHierachy_t)(void* pThis);
 static BuildStaticHierachy_t Real_BuildStaticHierachy = nullptr;
 
@@ -543,6 +633,14 @@ bool InitializeSavegameProfiler() {
             MH_CreateHook(pAct, (LPVOID)Hooked_WorldActivate, (LPVOID*)&Real_WorldActivate);
             MH_EnableHook(pAct);
         }
+
+        void* pWorldAct = (void*)GetProcAddress(hGame, "?Activate@gCWorld@@UAE?AW4eEResult@eCProcessibleElement@@XZ");
+        if (pWorldAct) {
+            s_targetWorldActivateElem = pWorldAct;
+            MH_CreateHook(pWorldAct, (LPVOID)Hooked_WorldActivateElem, (LPVOID*)&Real_WorldActivateElem);
+            MH_EnableHook(pWorldAct);
+            Log("G3O", "Savegame Profiler: Hooked gCWorld::Activate (0x%p)", pWorldAct);
+        }
     }
 
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
@@ -553,9 +651,25 @@ bool InitializeSavegameProfiler() {
             MH_CreateHook(pBuild, (LPVOID)Hooked_BuildStaticHierachy, (LPVOID*)&Real_BuildStaticHierachy);
             MH_EnableHook(pBuild);
         }
+
+        void* pDeact = (void*)GetProcAddress(hEngine, "?Deactivate@eCProcessibleElement@@QAE?AW4eEResult@1@XZ");
+        if (pDeact) {
+            s_targetDeactivate = pDeact;
+            MH_CreateHook(pDeact, (LPVOID)Hooked_Deactivate, (LPVOID*)&Real_Deactivate);
+            MH_EnableHook(pDeact);
+            Log("G3O", "Savegame Profiler: Hooked eCProcessibleElement::Deactivate (0x%p)", pDeact);
+        }
+
+        void* pROI = (void*)GetProcAddress(hEngine, "?FourceFullROIUpdate@eCEntityAdmin@@QAEXXZ");
+        if (pROI) {
+            s_targetForceROIUpdate = pROI;
+            MH_CreateHook(pROI, (LPVOID)Hooked_ForceROIUpdate, (LPVOID*)&Real_ForceROIUpdate);
+            MH_EnableHook(pROI);
+            Log("G3O", "Savegame Profiler: Hooked eCEntityAdmin::ForceFullROIUpdate (0x%p)", pROI);
+        }
     }
 
-    Log("G3O", "Savegame Profiler initialized with 10 deep phase inspection hooks.");
+    Log("G3O", "Savegame Profiler initialized with comprehensive sub-phase telemetry.");
     return true;
 }
 
@@ -565,6 +679,9 @@ void ShutdownSavegameProfiler() {
     if (s_targetHeader) MH_DisableHook(s_targetHeader);
     if (s_targetSessionStop) MH_DisableHook(s_targetSessionStop);
     if (s_targetClearEntities) MH_DisableHook(s_targetClearEntities);
+    if (s_targetDeactivate) MH_DisableHook(s_targetDeactivate);
+    if (s_targetWorldActivateElem) MH_DisableHook(s_targetWorldActivateElem);
+    if (s_targetForceROIUpdate) MH_DisableHook(s_targetForceROIUpdate);
     if (s_targetUnloadCaches) MH_DisableHook(s_targetUnloadCaches);
     if (s_targetLoadGameWorld) MH_DisableHook(s_targetLoadGameWorld);
     if (s_targetGotoPos) MH_DisableHook(s_targetGotoPos);

@@ -49,10 +49,6 @@ add_library(dinput8 SHARED
     src/vegetation_optimizer.h
     src/fast_pak_decompressor.cpp
     src/fast_pak_decompressor.h
-    src/parallel_pak_decompressor.cpp
-    src/parallel_pak_decompressor.h
-    src/world_deactivate_optimizer.cpp
-    src/world_deactivate_optimizer.h
     src/property_cache_optimizer.cpp
     src/property_cache_optimizer.h
     src/savegame_profiler.cpp
