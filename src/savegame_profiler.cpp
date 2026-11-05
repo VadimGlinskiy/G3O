@@ -684,58 +684,7 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
         return;
     }
 
-    const Config& cfg = GetConfig();
-    int dynCount = (Real_GetDynamicLayerCount && cfg.enableParallelSectorActivation) ? Real_GetDynamicLayerCount(pSector) : 0;
 
-    if (dynCount > 4 && Real_GetDynamicLayerAt && Real_ElementActivate) {
-        LARGE_INTEGER lt0, lt1;
-        QueryPerformanceCounter(&lt0);
-
-        std::vector<void*> layers;
-        layers.reserve(dynCount);
-        for (int i = 0; i < dynCount; ++i) {
-            void* pLayer = Real_GetDynamicLayerAt(pSector, i);
-            if (pLayer) {
-                layers.push_back(pLayer);
-            }
-        }
-
-        if (layers.size() > 4) {
-            int numWorkers = cfg.sectorActivationWorkers;
-            if (numWorkers <= 0) {
-                unsigned int hc = std::thread::hardware_concurrency();
-                numWorkers = (hc > 2) ? (int)(hc - 1) : 2;
-                if (numWorkers > 8) numWorkers = 8;
-            }
-
-            const char* secName = SafeGetSectorName(pSector);
-            Log("G3O", "[ParallelLayer] Sector '%s': pre-activating %zu dynamic layers across %d worker threads...",
-                secName ? secName : "unknown", layers.size(), numWorkers);
-
-            std::atomic<size_t> nextIdx(0);
-            std::vector<std::thread> workers;
-            workers.reserve(numWorkers);
-
-            for (int w = 0; w < numWorkers; ++w) {
-                workers.emplace_back([&]() {
-                    while (true) {
-                        size_t idx = nextIdx.fetch_add(1);
-                        if (idx >= layers.size()) break;
-                        SafeActivateSector(Real_ElementActivate, layers[idx]);
-                    }
-                });
-            }
-
-            for (auto& t : workers) {
-                if (t.joinable()) t.join();
-            }
-
-            QueryPerformanceCounter(&lt1);
-            LONG64 lus = (s_freq.QuadPart > 0) ? ((lt1.QuadPart - lt0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
-            Log("G3O", "[ParallelLayer] Sector '%s': %zu dynamic layers completed in %.3f s!",
-                secName ? secName : "unknown", layers.size(), (double)lus / 1000000.0);
-        }
-    }
 
     s_lastSectorDoLoadDataUs = 0;
     int dynBefore = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
@@ -772,76 +721,9 @@ static void* s_targetWorldDoLoadData = nullptr;
 
 static int __fastcall Hooked_WorldDoLoadData(void* pWorld, void* /*edx*/, void* pStream) {
     int res = Real_WorldDoLoadData(pWorld, pStream);
-
     int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
     Log("G3O", "[ParallelSector] World DoLoadData returned res=%d, totalSectors=%d, isLoadActive=%d",
         res, numSectors, (int)s_isLoadActive);
-
-    const Config& cfg = GetConfig();
-    if (s_isLoadActive && cfg.enableParallelSectorActivation && Real_GetSectorAt && Real_ElementActivate && numSectors > 0) {
-        LARGE_INTEGER pt0, pt1;
-        QueryPerformanceCounter(&pt0);
-
-        std::vector<void*> sectorsToActivate;
-        sectorsToActivate.reserve(numSectors);
-        void* pSysSector = Real_GetSystemSector ? Real_GetSystemSector(pWorld) : nullptr;
-        void* foundSys = nullptr;
-
-        for (int i = 0; i < numSectors; i++) {
-            void* pSec = Real_GetSectorAt(pWorld, i);
-            if (pSec) {
-                // In gCSector, byte offset 0x4c is bool m_bEnabled (1 = enabled)
-                BYTE enabled = *((const BYTE*)pSec + 0x4c);
-                if (enabled == 1) {
-                    if (pSec == pSysSector || (SafeGetSectorName(pSec) && strstr(SafeGetSectorName(pSec), "SysDyn"))) {
-                        foundSys = pSec;
-                    } else {
-                        sectorsToActivate.push_back(pSec);
-                    }
-                }
-            }
-        }
-
-        // Prioritize SysDyn on Worker 0!
-        if (foundSys) {
-            sectorsToActivate.insert(sectorsToActivate.begin(), foundSys);
-        }
-
-        int numWorkers = cfg.sectorActivationWorkers;
-        if (numWorkers <= 0) {
-            unsigned int hc = std::thread::hardware_concurrency();
-            numWorkers = (hc > 2) ? (int)(hc - 1) : 2;
-            if (numWorkers > 6) numWorkers = 6;
-        }
-
-        Log("G3O", "[ParallelSector] Pre-activating %zu enabled sectors (out of %d total, SysDyn prioritized=%s) across %d worker threads...",
-            sectorsToActivate.size(), numSectors, foundSys ? "YES" : "NO", numWorkers);
-
-        std::atomic<size_t> nextIndex(0);
-        std::vector<std::thread> workers;
-        workers.reserve(numWorkers);
-
-        for (int w = 0; w < numWorkers; w++) {
-            workers.emplace_back([&]() {
-                while (true) {
-                    size_t idx = nextIndex.fetch_add(1);
-                    if (idx >= sectorsToActivate.size()) break;
-                    void* pSec = sectorsToActivate[idx];
-                    SafeActivateSector(Real_ElementActivate, pSec);
-                }
-            });
-        }
-
-        for (auto& t : workers) {
-            if (t.joinable()) t.join();
-        }
-
-        QueryPerformanceCounter(&pt1);
-        LONG64 us = (s_freq.QuadPart > 0) ? ((pt1.QuadPart - pt0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
-        Log("G3O", "[ParallelSector] Parallel activation completed in %.3f s! All sectors active for engine OnActivate loop.",
-            (double)us / 1000000.0);
-    }
-
     return res;
 }
 
