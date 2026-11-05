@@ -1393,6 +1393,9 @@ static void* s_targetWorldActivate = nullptr;
 static void* s_targetBuildStatic = nullptr;
 
 bool InitializeSavegameProfiler() {
+    if (s_freq.QuadPart <= 0) {
+        QueryPerformanceFrequency(&s_freq);
+    }
     const bool metricsHooksReady = InitMetricsHooks();
     if (s_freq.QuadPart <= 0) {
         Log("G3O", "Savegame Profiler initialization aborted: QPC frequency unavailable.");
