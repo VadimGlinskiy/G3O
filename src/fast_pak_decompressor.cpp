@@ -94,29 +94,7 @@ static int __stdcall Hooked_ZlibDecompress(
     DWORD outCapacity,
     DWORD* pOutWritten
 ) {
-    // Thread-local last decompress cache (handles consecutive duplicate decompression)
-    struct LastDecompCache {
-        DWORD inSize = 0;
-        DWORD outSize = 0;
-        BYTE  inSample[32] = { 0 };
-        std::vector<BYTE> cachedOut;
-    };
-    static thread_local LastDecompCache s_lastDec;
-
     if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0 && s_fnZlib) {
-        // Check if this chunk is identical to the immediately preceding chunk
-        if (s_lastDec.inSize == inSize && s_lastDec.outSize <= outCapacity && s_lastDec.outSize > 0) {
-            size_t sampleLen = (inSize < 32) ? inSize : 32;
-            if (memcmp(inBuffer, s_lastDec.inSample, sampleLen) == 0) {
-                // Instant hit: copy already decompressed output
-                memcpy(outBuffer, s_lastDec.cachedOut.data(), s_lastDec.outSize);
-                if (pOutWritten) *pOutWritten = s_lastDec.outSize;
-                InterlockedIncrement(&s_consecutiveHits);
-                InterlockedExchangeAdd64(&s_consecutiveBytesSaved, s_lastDec.outSize);
-                return 0; // Success without running decompressor!
-            }
-        }
-
         void* dec = GetThreadDecompressor();
         if (dec) {
             LARGE_INTEGER t0, t1;
@@ -156,18 +134,6 @@ static int __stdcall Hooked_ZlibDecompress(
                 InterlockedIncrement(&s_decompCount);
                 InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
                 InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)actual_out);
-
-                // Update thread-local last decompress cache (cap at 4 MB to prevent huge memory usage)
-                if (actual_out > 0 && actual_out <= 4 * 1024 * 1024) {
-                    s_lastDec.inSize = inSize;
-                    s_lastDec.outSize = (DWORD)actual_out;
-                    size_t sampleLen = (inSize < 32) ? inSize : 32;
-                    memcpy(s_lastDec.inSample, inBuffer, sampleLen);
-                    s_lastDec.cachedOut.resize(actual_out);
-                    memcpy(s_lastDec.cachedOut.data(), outBuffer, actual_out);
-                } else {
-                    s_lastDec.inSize = 0;
-                }
 
                 return 0; // Success
             }
