@@ -37,6 +37,12 @@ static volatile bool   s_skippedPreLoadActivate = false;
 // ABI is intentionally restricted to the 32-bit Gothic 3 binaries.
 static_assert(sizeof(void*) == 4, "Savegame profiler hooks require the x86 game ABI.");
 
+#ifdef G3O_ENABLE_TELEMETRY
+static inline bool IsTelemetryActive() { return true; }
+#else
+static inline bool IsTelemetryActive() { return GetConfig().enableProfiler; }
+#endif
+
 struct LayerAuditMetric {
     std::uint64_t calls = 0;
     std::uint64_t qpcTicks = 0;
@@ -176,7 +182,7 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
     const std::uint64_t elapsedTicks = BeginLayerMetric() - start;
     const double totalMs = LayerMetricMs(elapsedTicks);
 
-    if (totalMs >= 20.0) { // Log any layer taking >= 20 ms
+    if (IsTelemetryActive() && totalMs >= 20.0) { // Log any layer taking >= 20 ms
         const char* filePath = "<unknown>";
         void* pContext = pLayer ? *reinterpret_cast<void**>(reinterpret_cast<char*>(pLayer) + 0x40) : nullptr;
         if (pContext) {
@@ -321,6 +327,7 @@ static void RemoveCreatedMetricsHooks() {
 
 static bool InitMetricsHooks() {
     if (s_metricsHooksInitialized) return true;
+    if (!IsTelemetryActive()) return true;
 
     if (!s_qpcFrequencyInitialized) {
         if (!QueryPerformanceFrequency(&s_freq) || s_freq.QuadPart <= 0) {
@@ -685,7 +692,7 @@ static void LogLoadReport(double totalSec) {
         totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
     Log("G3O", "================================================================================");
 
-    FILE* fp = fopen("G3O_LoadProfiler.log", "w");
+    FILE* fp = IsTelemetryActive() ? fopen("G3O_LoadProfiler.log", "w") : nullptr;
     if (fp) {
         fprintf(fp, "================================================================================\n");
         fprintf(fp, "[LoadProfile] === DETAILED SAVEGAME LOAD BENCHMARK (Total: %.3f s) ===\n", totalSec);
@@ -1124,7 +1131,7 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     const char* secName = SafeGetSectorName(pSector);
     RecordSectorTiming(secName, totalMs);
 
-    if (totalMs >= 50.0) {
+    if (IsTelemetryActive() && totalMs >= 50.0) {
         Log("G3O", "[SectorAudit] Sector '%s': Total=%.2f ms (DoLoadData=%.2f ms, LayerLoop=%.2f ms), dynLayers: %d -> %d",
             secName ? secName : "unknown", totalMs, loadMs, loopMs, dynBefore, dynAfter);
         Log("G3O", "[LayerAudit] Sector '%s': Total=%.2f ms | CreateData: %llu calls, %.2f ms | DoLoadData: %llu calls, %.2f ms | CreateDynamicEntity: %llu calls, %.2f ms | CreateFromTemplate: %llu calls, %.2f ms",

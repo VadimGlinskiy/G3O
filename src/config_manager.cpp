@@ -246,9 +246,9 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnableCPUTopologyAffinity=true\n\n\n"
         << "[Logging]\n"
         << "; Записывать диагностический журнал событий в G3O_diagnostic.log\n"
-        << "EnableDiagnosticLog=true\n\n"
+        << "EnableDiagnosticLog=false\n\n"
         << "; Перехватывать системный отладочный вывод игры (OutputDebugStringA)\n"
-        << "InterceptOutputDebugString=true\n\n"
+        << "InterceptOutputDebugString=false\n\n"
         << "; Профайлер: пишет G3O_profile.log (FPS, фризы, чтение файлов, нагрузка CPU) раз в секунду\n"
         << "EnableProfiler=false\n";
     ofs.close();
@@ -359,8 +359,8 @@ void LoadConfig() {
     s_config.pakPrefetchWorkers = ReadIniInt("Performance", "PakPrefetchWorkers", 0, path);
 
     // [Logging]
-    s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", true, path);
-    s_config.interceptOutputDebugString = ReadIniBool("Logging", "InterceptOutputDebugString", true, path);
+    s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", false, path);
+    s_config.interceptOutputDebugString = ReadIniBool("Logging", "InterceptOutputDebugString", false, path);
     s_config.enableProfiler = ReadIniBool("Logging", "EnableProfiler", false, path);
 
     Log("G3O", "Configuration loaded from '%s':", path);

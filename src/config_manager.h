@@ -54,8 +54,8 @@ struct Config {
     int pakPrefetchWorkers = 0;        // 0 = Auto-detect based on CPU cores (up to 6)
 
     // [Logging]
-    bool enableDiagnosticLog = true;
-    bool interceptOutputDebugString = true;
+    bool enableDiagnosticLog = false;
+    bool interceptOutputDebugString = false;
     bool enableProfiler = false;
 
     std::string iniFilePath;

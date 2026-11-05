@@ -1,8 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima VERSION 1.5.0 LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(G3O_ENABLE_TELEMETRY "Enable detailed load profiling and diagnostic audit hooks" OFF)
+if(G3O_ENABLE_TELEMETRY)
+    add_compile_definitions(G3O_ENABLE_TELEMETRY=1)
+endif()
 
 if(MSVC)
     add_compile_options(/O2 /Oi /Oy /W3 /EHsc /Zi /utf-8 /arch:SSE2)
