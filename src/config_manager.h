@@ -57,6 +57,7 @@ struct Config {
     bool enableDiagnosticLog = false;
     bool interceptOutputDebugString = false;
     bool enableProfiler = false;
+    bool enableSavegameAudit = false;
 
     std::string iniFilePath;
 };

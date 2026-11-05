@@ -250,7 +250,9 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Перехватывать системный отладочный вывод игры (OutputDebugStringA)\n"
         << "InterceptOutputDebugString=false\n\n"
         << "; Профайлер: пишет G3O_profile.log (FPS, фризы, чтение файлов, нагрузка CPU) раз в секунду\n"
-        << "EnableProfiler=false\n";
+        << "EnableProfiler=false\n\n"
+        << "; Детальный аудит и бенчмарк загрузки сохранений (LayerAudit, DynamicContextAudit, G3O_LoadProfiler.log)\n"
+        << "EnableSavegameAudit=false\n";
     ofs.close();
 }
 
@@ -362,6 +364,7 @@ void LoadConfig() {
     s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", false, path);
     s_config.interceptOutputDebugString = ReadIniBool("Logging", "InterceptOutputDebugString", false, path);
     s_config.enableProfiler = ReadIniBool("Logging", "EnableProfiler", false, path);
+    s_config.enableSavegameAudit = ReadIniBool("Logging", "EnableSavegameAudit", false, path);
 
     Log("G3O", "Configuration loaded from '%s':", path);
     Log("G3O", "  [General] EnableG3O=%d, ShowWatermark=%d", (int)s_config.enableG3O, (int)s_config.showWatermark);

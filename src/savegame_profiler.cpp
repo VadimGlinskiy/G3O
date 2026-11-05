@@ -40,7 +40,7 @@ static_assert(sizeof(void*) == 4, "Savegame profiler hooks require the x86 game 
 #ifdef G3O_ENABLE_TELEMETRY
 static inline bool IsTelemetryActive() { return true; }
 #else
-static inline bool IsTelemetryActive() { return GetConfig().enableProfiler; }
+static inline bool IsTelemetryActive() { return GetConfig().enableSavegameAudit || GetConfig().enableProfiler; }
 #endif
 
 struct LayerAuditMetric {
