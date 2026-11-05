@@ -7,10 +7,12 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
 #include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 #include <stdio.h>
 
 namespace G3O {
@@ -57,38 +59,51 @@ static SRWLOCK s_handleLock = SRWLOCK_INIT;
 static std::unordered_map<HANDLE, std::string> s_handlePathCache;
 
 // -----------------------------------------------------------------------------
-// Controlled Pre-Decompression Verification Slots (Stage 2.2)
+// Step 2.3: Bounded Speculative Pre-Decompression Cache
 // -----------------------------------------------------------------------------
-struct VerifySlot {
+struct PrefetchCandidate {
+    uint32_t seq = 0;
     std::string pakName;
     uint64_t offset = 0;
     uint32_t inBytes = 0;
     uint32_t outBytes = 0;
-    std::vector<BYTE> decompressedData;
-    uint64_t bgDecompTimeUs = 0;
-    volatile LONG ready = 0;
-    bool verified = false;
-    bool matchSuccess = false;
-
-    VerifySlot() = default;
-    VerifySlot(const VerifySlot& o)
-        : pakName(o.pakName), offset(o.offset), inBytes(o.inBytes), outBytes(o.outBytes),
-          decompressedData(o.decompressedData), bgDecompTimeUs(o.bgDecompTimeUs),
-          ready(o.ready), verified(o.verified), matchSuccess(o.matchSuccess) {}
-    VerifySlot& operator=(const VerifySlot& o) {
-        if (this != &o) {
-            pakName = o.pakName; offset = o.offset; inBytes = o.inBytes; outBytes = o.outBytes;
-            decompressedData = o.decompressedData; bgDecompTimeUs = o.bgDecompTimeUs;
-            ready = o.ready; verified = o.verified; matchSuccess = o.matchSuccess;
-        }
-        return *this;
-    }
+    uint64_t decompUs = 0;
 };
 
-static std::vector<VerifySlot> s_verifySlots;
+struct CachedBlock {
+    std::string pakName;
+    uint64_t offset = 0;
+    uint32_t outBytes = 0;
+    uint64_t savedUs = 0;
+    std::vector<BYTE> data;
+};
+
+static const size_t MAX_CACHE_MEMORY_BYTES = 96 * 1024 * 1024; // 96 MB strict budget
+static std::atomic<size_t> s_currentMemoryBytes{ 0 };
+static std::atomic<size_t> s_peakMemoryBytes{ 0 };
+
+static SRWLOCK s_cacheLock = SRWLOCK_INIT;
+static std::unordered_map<uint64_t, std::shared_ptr<CachedBlock>> s_predecompCache;
+
+static std::vector<PrefetchCandidate> s_candidates;
 static HANDLE s_bgWorkerThread = nullptr;
-static std::atomic<uint32_t> s_verifyMatchCount{ 0 };
-static std::atomic<uint32_t> s_verifyMismatchCount{ 0 };
+static HANDLE s_memAvailableEvent = nullptr;
+static bool s_hasValidTrace = false;
+
+static std::atomic<uint32_t> s_cacheHits{ 0 };
+static std::atomic<uint32_t> s_cacheMisses{ 0 };
+static std::atomic<uint64_t> s_cacheHitBytes{ 0 };
+static std::atomic<uint64_t> s_cacheSavedTimeUs{ 0 };
+
+static inline uint64_t MakeCacheKey(const std::string& pakName, uint64_t offset) {
+    uint64_t hash = 14695981039346656037ULL;
+    for (char c : pakName) {
+        hash ^= (uint8_t)tolower((unsigned char)c);
+        hash *= 1099511628211ULL;
+    }
+    hash ^= (offset * 0x9E3779B97F4A7C15ULL);
+    return hash;
+}
 
 static std::string ResolveArchiveName(HANDLE h) {
     if (!h || h == INVALID_HANDLE_VALUE) return "";
@@ -179,46 +194,96 @@ static DWORD WINAPI BgPredecompWorker(LPVOID /*lpParam*/) {
     }
     if (!dec) return 1;
 
-    size_t totalBytes = 0;
+    // Cache open PAK handles to eliminate repeated CreateFile/CloseHandle syscalls
+    std::unordered_map<std::string, HANDLE> pakHandles;
+
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
+    size_t decompressedCount = 0;
 
-    for (size_t i = 0; i < s_verifySlots.size(); ++i) {
-        VerifySlot& slot = s_verifySlots[i];
-        std::string fullPath = "Data\\" + slot.pakName;
-        HANDLE hFile = CreateFileA(fullPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) continue;
+    for (size_t i = 0; i < s_candidates.size(); ++i) {
+        if (!s_isActive.load(std::memory_order_relaxed)) break;
 
-        std::vector<BYTE> compBuf(slot.inBytes);
-        OVERLAPPED ov = { 0 };
-        ov.Offset = (DWORD)slot.offset;
-        ov.OffsetHigh = (DWORD)(slot.offset >> 32);
+        const auto& cand = s_candidates[i];
 
-        DWORD bytesRead = 0;
-        if (ReadFile(hFile, compBuf.data(), slot.inBytes, &bytesRead, &ov) && bytesRead == slot.inBytes) {
-            slot.decompressedData.resize(slot.outBytes);
-            size_t actualOut = 0;
-            LARGE_INTEGER dt0, dt1;
-            QueryPerformanceCounter(&dt0);
+        // Memory budget check: wait if adding this block exceeds 96 MB
+        while (s_currentMemoryBytes.load(std::memory_order_relaxed) + cand.outBytes > MAX_CACHE_MEMORY_BYTES &&
+               s_currentMemoryBytes.load(std::memory_order_relaxed) > 0) {
+            if (!s_isActive.load(std::memory_order_relaxed)) break;
+            WaitForSingleObject(s_memAvailableEvent, 10);
+        }
+        if (!s_isActive.load(std::memory_order_relaxed)) break;
 
-            int res = -1;
-            if (G3O_AVX2_IsSupported()) {
-                res = G3O_AVX2_DecompressZlib(dec, compBuf.data(), slot.inBytes, slot.decompressedData.data(), slot.outBytes, &actualOut);
-            } else {
-                res = libdeflate_zlib_decompress(dec, compBuf.data(), slot.inBytes, slot.decompressedData.data(), slot.outBytes, &actualOut);
-            }
-
-            QueryPerformanceCounter(&dt1);
-            if (res == 0 && actualOut > 0) {
-                slot.outBytes = (uint32_t)actualOut;
-                slot.decompressedData.resize(actualOut);
-                slot.bgDecompTimeUs = (s_freq.QuadPart > 0) ? ((dt1.QuadPart - dt0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
-                totalBytes += actualOut;
-                InterlockedExchange(&slot.ready, 1);
+        // Get or open archive handle
+        HANDLE hFile = INVALID_HANDLE_VALUE;
+        auto hit = pakHandles.find(cand.pakName);
+        if (hit != pakHandles.end()) {
+            hFile = hit->second;
+        } else {
+            std::string fullPath = "Data\\" + cand.pakName;
+            hFile = CreateFileA(fullPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                pakHandles[cand.pakName] = hFile;
             }
         }
-        CloseHandle(hFile);
+        if (hFile == INVALID_HANDLE_VALUE) continue;
+
+        // Read compressed chunk
+        std::vector<BYTE> compBuf(cand.inBytes);
+        OVERLAPPED ov = { 0 };
+        ov.Offset = (DWORD)cand.offset;
+        ov.OffsetHigh = (DWORD)(cand.offset >> 32);
+
+        DWORD bytesRead = 0;
+        if (!ReadFile(hFile, compBuf.data(), cand.inBytes, &bytesRead, &ov) || bytesRead != cand.inBytes) {
+            continue;
+        }
+
+        // Allocate block buffer
+        auto block = std::make_shared<CachedBlock>();
+        block->pakName = cand.pakName;
+        block->offset = cand.offset;
+        block->outBytes = cand.outBytes;
+        block->savedUs = cand.decompUs;
+        block->data.resize(cand.outBytes);
+
+        size_t actualOut = 0;
+        int res = -1;
+        if (G3O_AVX2_IsSupported()) {
+            res = G3O_AVX2_DecompressZlib(dec, compBuf.data(), cand.inBytes, block->data.data(), cand.outBytes, &actualOut);
+        } else {
+            res = libdeflate_zlib_decompress(dec, compBuf.data(), cand.inBytes, block->data.data(), cand.outBytes, &actualOut);
+        }
+
+        if (res == 0 && actualOut > 0) {
+            if (actualOut != cand.outBytes) {
+                block->outBytes = (uint32_t)actualOut;
+                block->data.resize(actualOut);
+            }
+
+            uint64_t key = MakeCacheKey(block->pakName, block->offset);
+
+            // Track memory usage
+            size_t curMem = s_currentMemoryBytes.fetch_add(block->outBytes, std::memory_order_relaxed) + block->outBytes;
+            size_t peak = s_peakMemoryBytes.load(std::memory_order_relaxed);
+            while (curMem > peak && !s_peakMemoryBytes.compare_exchange_weak(peak, curMem, std::memory_order_relaxed)) {}
+
+            // Insert into lookup map
+            AcquireSRWLockExclusive(&s_cacheLock);
+            s_predecompCache[key] = block;
+            ReleaseSRWLockExclusive(&s_cacheLock);
+
+            decompressedCount++;
+        }
     }
+
+    // Clean up cached handles
+    for (auto& pair : pakHandles) {
+        if (pair.second != INVALID_HANDLE_VALUE) {
+            CloseHandle(pair.second);
+        }
+    }
+    pakHandles.clear();
 
     if (G3O_AVX2_IsSupported()) {
         G3O_AVX2_FreeDecompressor(dec);
@@ -227,9 +292,8 @@ static DWORD WINAPI BgPredecompWorker(LPVOID /*lpParam*/) {
     }
 
     QueryPerformanceCounter(&t1);
-    double totalMs = (s_freq.QuadPart > 0) ? ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)s_freq.QuadPart) : 0.0;
-    Log("G3O", "[PakVerify] Background worker pre-decompressed %zu slots (%.2f MB) in %.2f ms",
-        s_verifySlots.size(), (double)totalBytes / (1024.0 * 1024.0), totalMs);
+    double elapsedMs = (s_freq.QuadPart > 0) ? ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)s_freq.QuadPart) : 0.0;
+    Log("G3O", "[PakCache] Background worker completed %zu pre-decompressions in %.2f ms", decompressedCount, elapsedMs);
     return 0;
 }
 
@@ -250,48 +314,62 @@ void PakTracer_OnLoadStart(const char* saveName) {
     s_matchedCount.store(0, std::memory_order_relaxed);
     s_unmatchedCount.store(0, std::memory_order_relaxed);
     s_tracerOverheadUs.store(0, std::memory_order_relaxed);
-    s_verifyMatchCount.store(0, std::memory_order_relaxed);
-    s_verifyMismatchCount.store(0, std::memory_order_relaxed);
 
-    s_verifySlots.clear();
+    s_cacheHits.store(0, std::memory_order_relaxed);
+    s_cacheMisses.store(0, std::memory_order_relaxed);
+    s_cacheHitBytes.store(0, std::memory_order_relaxed);
+    s_cacheSavedTimeUs.store(0, std::memory_order_relaxed);
+    s_currentMemoryBytes.store(0, std::memory_order_relaxed);
+    s_peakMemoryBytes.store(0, std::memory_order_relaxed);
+
+    s_candidates.clear();
     tl_lastRead.valid = false;
 
-    // Check if valid trace exists from previous run
+    if (!s_memAvailableEvent) {
+        s_memAvailableEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    }
+
     std::string csvPath = "G3O_PakTrace_" + s_currentSaveName + ".csv";
-    if (IsTraceValid(csvPath, s_currentSaveName)) {
-        // Load target blocks for controlled Stage 2.2 verification:
-        // Pick first 16 blocks from GotoLoadedPosition where out_bytes <= 4 MB
+    s_hasValidTrace = IsTraceValid(csvPath, s_currentSaveName);
+
+    if (s_hasValidTrace) {
         std::ifstream ifs(csvPath);
         if (ifs.is_open()) {
             std::string line;
             std::getline(ifs, line); // header
-            while (std::getline(ifs, line) && s_verifySlots.size() < 16) {
+            while (std::getline(ifs, line)) {
                 std::stringstream ss(line);
                 std::string item;
                 std::vector<std::string> cols;
                 while (std::getline(ss, item, ',')) cols.push_back(item);
                 if (cols.size() >= 7) {
                     double t_ms = std::stod(cols[6]);
+                    uint64_t decomp_us = std::stoull(cols[5]);
                     uint32_t outSz = std::stoul(cols[4]);
-                    // GotoLoadedPosition targets
-                    if (t_ms >= 12000.0 && outSz <= 4 * 1024 * 1024 && outSz > 1024) {
-                        VerifySlot slot;
-                        slot.pakName = cols[1];
-                        slot.offset = std::stoull(cols[2], nullptr, 16);
-                        slot.inBytes = std::stoul(cols[3]);
-                        slot.outBytes = outSz;
-                        s_verifySlots.push_back(slot);
+                    // Prefetch candidates: GotoLoadedPosition & Start blocks taking >= 500 us
+                    if (t_ms >= 10000.0 && decomp_us >= 500 && outSz <= 96 * 1024 * 1024 && outSz > 1024) {
+                        PrefetchCandidate cand;
+                        cand.seq = std::stoul(cols[0]);
+                        cand.pakName = cols[1];
+                        cand.offset = std::stoull(cols[2], nullptr, 16);
+                        cand.inBytes = std::stoul(cols[3]);
+                        cand.outBytes = outSz;
+                        cand.decompUs = decomp_us;
+                        s_candidates.push_back(cand);
                     }
                 }
             }
             ifs.close();
         }
 
-        if (!s_verifySlots.empty()) {
-            Log("G3O", "[PakVerify] Selected %zu candidate blocks for controlled Stage 2.2 pre-decompression & memcmp verification",
-                s_verifySlots.size());
+        if (!s_candidates.empty()) {
+            Log("G3O", "[PakCache] Loaded %zu prefetch candidates (budget: 96 MB) for savegame '%s'",
+                s_candidates.size(), s_currentSaveName.c_str());
             s_bgWorkerThread = CreateThread(nullptr, 0, BgPredecompWorker, nullptr, 0, nullptr);
         }
+    } else {
+        Log("G3O", "[PakTracer] No valid trace for '%s' (savegame newer or first run) - recording fresh trace",
+            s_currentSaveName.c_str());
     }
 
     s_isActive.store(true, std::memory_order_release);
@@ -332,13 +410,90 @@ void PakTracer_RecordRead(
     s_tracerOverheadUs.fetch_add(oh, std::memory_order_relaxed);
 }
 
+bool PakTracer_TryGetPredecompressed(
+    const void* inBuffer,
+    DWORD inSize,
+    void* outBuffer,
+    DWORD outCapacity,
+    DWORD* pActualOut
+) {
+    if (!s_isActive.load(std::memory_order_relaxed)) return false;
+    if (!tl_lastRead.valid || tl_lastRead.buffer != inBuffer || tl_lastRead.bytesRead != inSize) {
+        return false;
+    }
+
+    std::string archive = ResolveArchiveName(tl_lastRead.hFile);
+    if (archive.empty()) return false;
+
+    uint64_t key = MakeCacheKey(archive, tl_lastRead.offset);
+
+    std::shared_ptr<CachedBlock> block;
+    AcquireSRWLockExclusive(&s_cacheLock);
+    auto it = s_predecompCache.find(key);
+    if (it != s_predecompCache.end()) {
+        block = it->second;
+        s_predecompCache.erase(it);
+    }
+    ReleaseSRWLockExclusive(&s_cacheLock);
+
+    if (!block) {
+        s_cacheMisses.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    if (outCapacity < block->outBytes) {
+        s_cacheMisses.fetch_add(1, std::memory_order_relaxed);
+        s_currentMemoryBytes.fetch_sub(block->outBytes, std::memory_order_relaxed);
+        if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
+        return false;
+    }
+
+    // Fast memcpy directly into engine buffer!
+    memcpy(outBuffer, block->data.data(), block->outBytes);
+    if (pActualOut) {
+        *pActualOut = block->outBytes;
+    }
+
+    // Telemetry & budget
+    s_cacheHits.fetch_add(1, std::memory_order_relaxed);
+    s_cacheHitBytes.fetch_add(block->outBytes, std::memory_order_relaxed);
+    s_cacheSavedTimeUs.fetch_add(block->savedUs, std::memory_order_relaxed);
+
+    s_currentMemoryBytes.fetch_sub(block->outBytes, std::memory_order_relaxed);
+    if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
+
+    // Free block memory immediately
+    block->data.clear();
+    block->data.shrink_to_fit();
+
+    // Record trace record for profiler reporting
+    TraceRecord rec;
+    rec.seq = s_seqCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+    strncpy_s(rec.pakName, sizeof(rec.pakName), archive.c_str(), _TRUNCATE);
+    rec.offset = tl_lastRead.offset;
+    rec.inBytes = inSize;
+    rec.outBytes = block->outBytes;
+    rec.decompTimeUs = 50; // served from cache
+    rec.loadTimestampUs = tl_lastRead.timestampUs;
+
+    AcquireSRWLockExclusive(&s_traceLock);
+    s_traceRecords.push_back(rec);
+    ReleaseSRWLockExclusive(&s_traceLock);
+
+    s_matchedCount.fetch_add(1, std::memory_order_relaxed);
+
+    // Invalidate read
+    tl_lastRead.valid = false;
+    return true;
+}
+
 void PakTracer_RecordDecompress(
     const void* inBuffer,
     DWORD inSize,
     DWORD outCapacity,
     DWORD actualOut,
     uint64_t decompTimeUs,
-    const void* outBuffer
+    const void* /*outBuffer*/
 ) {
     if (!s_isActive.load(std::memory_order_relaxed)) return;
 
@@ -355,36 +510,6 @@ void PakTracer_RecordDecompress(
         rec.outBytes = actualOut ? actualOut : outCapacity;
         rec.decompTimeUs = decompTimeUs;
         rec.loadTimestampUs = tl_lastRead.timestampUs;
-
-        // Stage 2.2: Controlled memcmp verification
-        if (outBuffer && actualOut > 0) {
-            for (auto& slot : s_verifySlots) {
-                if (slot.ready != 0 && !slot.verified &&
-                    slot.offset == rec.offset && slot.pakName == archive) {
-                    
-                    slot.verified = true;
-                    if (actualOut == slot.decompressedData.size()) {
-                        int diff = memcmp(outBuffer, slot.decompressedData.data(), actualOut);
-                        if (diff == 0) {
-                            slot.matchSuccess = true;
-                            s_verifyMatchCount.fetch_add(1, std::memory_order_relaxed);
-                            Log("G3O", "[PakVerify] Block #%u [%-24s off=0x%08llX size=%-7u]: 100%% BYTE-FOR-BYTE MATCH! (BgTime=%.2f ms, MainTime=%.2f ms)",
-                                rec.seq, slot.pakName.c_str(), slot.offset, actualOut,
-                                (double)slot.bgDecompTimeUs / 1000.0, (double)decompTimeUs / 1000.0);
-                        } else {
-                            s_verifyMismatchCount.fetch_add(1, std::memory_order_relaxed);
-                            Log("G3O", "[PakVerify] Block #%u [%-24s off=0x%08llX size=%-7u]: MISMATCH (memcmp diff=%d)!",
-                                rec.seq, slot.pakName.c_str(), slot.offset, actualOut, diff);
-                        }
-                    } else {
-                        s_verifyMismatchCount.fetch_add(1, std::memory_order_relaxed);
-                        Log("G3O", "[PakVerify] Block #%u [%-24s off=0x%08llX]: SIZE MISMATCH (engine=%u, bg=%zu)!",
-                            rec.seq, slot.pakName.c_str(), slot.offset, actualOut, slot.decompressedData.size());
-                    }
-                    break;
-                }
-            }
-        }
 
         tl_lastRead.valid = false;
 
@@ -407,11 +532,26 @@ void PakTracer_OnLoadEnd() {
     s_isActive.store(false, std::memory_order_release);
     tl_lastRead.valid = false;
 
+    if (s_memAvailableEvent) {
+        SetEvent(s_memAvailableEvent);
+    }
+
     if (s_bgWorkerThread) {
         WaitForSingleObject(s_bgWorkerThread, 1000);
         CloseHandle(s_bgWorkerThread);
         s_bgWorkerThread = nullptr;
     }
+
+    if (s_memAvailableEvent) {
+        CloseHandle(s_memAvailableEvent);
+        s_memAvailableEvent = nullptr;
+    }
+
+    // Free all remaining cached blocks
+    AcquireSRWLockExclusive(&s_cacheLock);
+    s_predecompCache.clear();
+    ReleaseSRWLockExclusive(&s_cacheLock);
+    s_currentMemoryBytes.store(0, std::memory_order_relaxed);
 
     AcquireSRWLockShared(&s_traceLock);
     uint32_t totalMatched = (uint32_t)s_traceRecords.size();
@@ -421,6 +561,12 @@ void PakTracer_OnLoadEnd() {
     double matchRate = (totalDecomps > 0) ? (100.0 * (double)matched / (double)totalDecomps) : 0.0;
     double overheadMs = (double)s_tracerOverheadUs.load(std::memory_order_relaxed) / 1000.0;
 
+    uint32_t hits = s_cacheHits.load(std::memory_order_relaxed);
+    uint32_t misses = s_cacheMisses.load(std::memory_order_relaxed);
+    double hitMb = (double)s_cacheHitBytes.load(std::memory_order_relaxed) / (1024.0 * 1024.0);
+    double savedSec = (double)s_cacheSavedTimeUs.load(std::memory_order_relaxed) / 1000000.0;
+    double peakMb = (double)s_peakMemoryBytes.load(std::memory_order_relaxed) / (1024.0 * 1024.0);
+
     Log("G3O", "================================================================================");
     Log("G3O", "[PakTracer] === SAVEGAME LOAD TRACE REPORT: '%s' ===", s_currentSaveName.c_str());
     Log("G3O", "  Total decompressions: %u", totalDecomps);
@@ -428,32 +574,37 @@ void PakTracer_OnLoadEnd() {
     Log("G3O", "  Unmatched / Other:    %u (%.1f%%)", unmatched, 100.0 - matchRate);
     Log("G3O", "  Tracer overhead:      %.2f ms", overheadMs);
 
-    uint32_t vMatch = s_verifyMatchCount.load(std::memory_order_relaxed);
-    uint32_t vMismatch = s_verifyMismatchCount.load(std::memory_order_relaxed);
-    if (!s_verifySlots.empty()) {
-        Log("G3O", "[PakVerify] Stage 2.2 Controlled Experiment Results:");
-        Log("G3O", "  Candidate slots tested: %zu", s_verifySlots.size());
-        Log("G3O", "  100%% Byte-for-Byte Matches: %u", vMatch);
-        Log("G3O", "  Mismatches:                 %u", vMismatch);
+    if (!s_candidates.empty()) {
+        double hitPct = (hits + misses > 0) ? (100.0 * (double)hits / (double)(hits + misses)) : 0.0;
+        Log("G3O", "[PakCache] === PRE-DECOMPRESSION CACHE PERFORMANCE REPORT ===");
+        Log("G3O", "  Candidates Queued:        %zu", s_candidates.size());
+        Log("G3O", "  Cache HITS:               %u (%.1f%%)", hits, hitPct);
+        Log("G3O", "  Cache MISSES:             %u (%.1f%%)", misses, 100.0 - hitPct);
+        Log("G3O", "  Data Served from Cache:   %.2f MB", hitMb);
+        Log("G3O", "  Estimated CPU Time Saved: %.2f s", savedSec);
+        Log("G3O", "  Peak Cache Memory Used:   %.2f MB (Budget: 96.00 MB)", peakMb);
     }
 
-    // Write trace to CSV file: Gothic 3/G3O_PakTrace_<SaveName>.csv
-    char csvName[MAX_PATH] = { 0 };
-    snprintf(csvName, sizeof(csvName), "G3O_PakTrace_%s.csv", s_currentSaveName.c_str());
-    FILE* fp = fopen(csvName, "w");
-    if (fp) {
-        fprintf(fp, "seq,pak,offset,in_bytes,out_bytes,decomp_us,load_time_ms\n");
-        for (const auto& r : s_traceRecords) {
-            fprintf(fp, "%u,%s,0x%llX,%u,%u,%llu,%.2f\n",
-                r.seq, r.pakName, r.offset, r.inBytes, r.outBytes,
-                r.decompTimeUs, (double)r.loadTimestampUs / 1000.0);
+    // Write trace to CSV only if there was no valid trace (so we preserve golden baseline trace)
+    if (!s_hasValidTrace && totalMatched > 0) {
+        char csvName[MAX_PATH] = { 0 };
+        snprintf(csvName, sizeof(csvName), "G3O_PakTrace_%s.csv", s_currentSaveName.c_str());
+        std::ofstream ofs(csvName);
+        if (ofs.is_open()) {
+            ofs << "seq,pak,offset,in_bytes,out_bytes,decomp_us,load_time_ms\n";
+            for (const auto& r : s_traceRecords) {
+                double loadTimeMs = (s_freq.QuadPart > 0) ? ((double)r.loadTimestampUs / 1000.0) : 0.0;
+                ofs << r.seq << "," << r.pakName << ",0x" << std::hex << std::uppercase << r.offset << std::dec
+                    << "," << r.inBytes << "," << r.outBytes << "," << r.decompTimeUs
+                    << "," << std::fixed << std::setprecision(2) << loadTimeMs << "\n";
+            }
+            ofs.close();
+            Log("G3O", "[PakTracer] Fresh baseline trace written to '%s' (%u records)", csvName, totalMatched);
         }
-        fclose(fp);
-        Log("G3O", "[PakTracer] Full trace written to '%s' (%u records)", csvName, totalMatched);
     }
+    ReleaseSRWLockShared(&s_traceLock);
 
     std::vector<TraceRecord> sorted = s_traceRecords;
-    ReleaseSRWLockShared(&s_traceLock);
 
     std::sort(sorted.begin(), sorted.end(), [](const TraceRecord& a, const TraceRecord& b) {
         return a.decompTimeUs > b.decompTimeUs;

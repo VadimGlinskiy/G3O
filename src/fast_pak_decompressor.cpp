@@ -95,9 +95,27 @@ static int __stdcall Hooked_ZlibDecompress(
     DWORD outCapacity,
     DWORD* pOutWritten
 ) {
-    if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0 && s_fnZlib) {
-        void* dec = GetThreadDecompressor();
-        if (dec) {
+    if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0) {
+        // Step 2.3: Fast speculative pre-decompression cache lookup
+        DWORD cachedOut = 0;
+        LARGE_INTEGER t0_cache, t1_cache;
+        QueryPerformanceCounter(&t0_cache);
+        if (PakTracer_TryGetPredecompressed(inBuffer, inSize, outBuffer, outCapacity, &cachedOut)) {
+            QueryPerformanceCounter(&t1_cache);
+            LONG64 us = (s_timerFreq.QuadPart > 0) ? ((t1_cache.QuadPart - t0_cache.QuadPart) * 1000000LL / s_timerFreq.QuadPart) : 0;
+            InterlockedExchangeAdd64(&s_decompTimeUs, us);
+            if (pOutWritten) {
+                *pOutWritten = cachedOut;
+            }
+            InterlockedIncrement(&s_decompCount);
+            InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
+            InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)cachedOut);
+            return 0; // Instant cache hit!
+        }
+
+        if (s_fnZlib) {
+            void* dec = GetThreadDecompressor();
+            if (dec) {
             LARGE_INTEGER t0, t1;
             QueryPerformanceCounter(&t0);
 
@@ -141,6 +159,7 @@ static int __stdcall Hooked_ZlibDecompress(
                 return 0; // Success
             }
         }
+    }
     }
 
     // Fallback to original engine decompressor

@@ -24,6 +24,14 @@ void PakTracer_RecordDecompress(
     const void* outBuffer
 );
 
+bool PakTracer_TryGetPredecompressed(
+    const void* inBuffer,
+    DWORD inSize,
+    void* outBuffer,
+    DWORD outCapacity,
+    DWORD* pActualOut
+);
+
 bool PakTracer_IsActive();
 
 } // namespace G3O
