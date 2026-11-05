@@ -766,6 +766,85 @@ typedef void (__thiscall* WorldOnActivate_t)(void* pWorld);
 static WorldOnActivate_t Real_WorldOnActivate = nullptr;
 static void* s_targetWorldOnActivate = nullptr;
 
+typedef int (__thiscall* WorldDoLoadData_t)(void* pWorld, void* pStream);
+static WorldDoLoadData_t Real_WorldDoLoadData = nullptr;
+static void* s_targetWorldDoLoadData = nullptr;
+
+static int __fastcall Hooked_WorldDoLoadData(void* pWorld, void* /*edx*/, void* pStream) {
+    int res = Real_WorldDoLoadData(pWorld, pStream);
+
+    int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
+    Log("G3O", "[ParallelSector] World DoLoadData returned res=%d, totalSectors=%d, isLoadActive=%d",
+        res, numSectors, (int)s_isLoadActive);
+
+    const Config& cfg = GetConfig();
+    if (s_isLoadActive && cfg.enableParallelSectorActivation && Real_GetSectorAt && Real_ElementActivate && numSectors > 0) {
+        LARGE_INTEGER pt0, pt1;
+        QueryPerformanceCounter(&pt0);
+
+        std::vector<void*> sectorsToActivate;
+        sectorsToActivate.reserve(numSectors);
+        void* pSysSector = Real_GetSystemSector ? Real_GetSystemSector(pWorld) : nullptr;
+        void* foundSys = nullptr;
+
+        for (int i = 0; i < numSectors; i++) {
+            void* pSec = Real_GetSectorAt(pWorld, i);
+            if (pSec) {
+                // In gCSector, byte offset 0x4c is bool m_bEnabled (1 = enabled)
+                BYTE enabled = *((const BYTE*)pSec + 0x4c);
+                if (enabled == 1) {
+                    if (pSec == pSysSector || (SafeGetSectorName(pSec) && strstr(SafeGetSectorName(pSec), "SysDyn"))) {
+                        foundSys = pSec;
+                    } else {
+                        sectorsToActivate.push_back(pSec);
+                    }
+                }
+            }
+        }
+
+        // Prioritize SysDyn on Worker 0!
+        if (foundSys) {
+            sectorsToActivate.insert(sectorsToActivate.begin(), foundSys);
+        }
+
+        int numWorkers = cfg.sectorActivationWorkers;
+        if (numWorkers <= 0) {
+            unsigned int hc = std::thread::hardware_concurrency();
+            numWorkers = (hc > 2) ? (int)(hc - 1) : 2;
+            if (numWorkers > 6) numWorkers = 6;
+        }
+
+        Log("G3O", "[ParallelSector] Pre-activating %zu enabled sectors (out of %d total, SysDyn prioritized=%s) across %d worker threads...",
+            sectorsToActivate.size(), numSectors, foundSys ? "YES" : "NO", numWorkers);
+
+        std::atomic<size_t> nextIndex(0);
+        std::vector<std::thread> workers;
+        workers.reserve(numWorkers);
+
+        for (int w = 0; w < numWorkers; w++) {
+            workers.emplace_back([&]() {
+                while (true) {
+                    size_t idx = nextIndex.fetch_add(1);
+                    if (idx >= sectorsToActivate.size()) break;
+                    void* pSec = sectorsToActivate[idx];
+                    SafeActivateSector(Real_ElementActivate, pSec);
+                }
+            });
+        }
+
+        for (auto& t : workers) {
+            if (t.joinable()) t.join();
+        }
+
+        QueryPerformanceCounter(&pt1);
+        LONG64 us = (s_freq.QuadPart > 0) ? ((pt1.QuadPart - pt0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+        Log("G3O", "[ParallelSector] Parallel activation completed in %.3f s! All sectors active for engine OnActivate loop.",
+            (double)us / 1000000.0);
+    }
+
+    return res;
+}
+
 static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
     const Config& cfg = GetConfig();
     int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
@@ -1153,6 +1232,14 @@ bool InitializeSavegameProfiler() {
             MH_CreateHook(pOnAct, (LPVOID)Hooked_WorldOnActivate, (LPVOID*)&Real_WorldOnActivate);
             MH_EnableHook(pOnAct);
             Log("G3O", "Savegame Profiler: Hooked gCWorld::OnActivate (0x%p)", pOnAct);
+        }
+
+        void* pWorldDoLoad = (void*)GetProcAddress(hGame, "?DoLoadData@gCWorld@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z");
+        if (pWorldDoLoad) {
+            s_targetWorldDoLoadData = pWorldDoLoad;
+            MH_CreateHook(pWorldDoLoad, (LPVOID)Hooked_WorldDoLoadData, (LPVOID*)&Real_WorldDoLoadData);
+            MH_EnableHook(pWorldDoLoad);
+            Log("G3O", "Savegame Profiler: Hooked gCWorld::DoLoadData (0x%p)", pWorldDoLoad);
         }
 
         void* pDoAfter = (void*)GetProcAddress(hGame, "?DoAfterWorldActivate@gCWorld@@IAEXXZ");
