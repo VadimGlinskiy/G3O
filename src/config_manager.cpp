@@ -1,4 +1,4 @@
-#include "config_manager.h"
+﻿#include "config_manager.h"
 #include "diagnostic_logger.h"
 #include <fstream>
 #include <algorithm>
@@ -226,8 +226,8 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnableFastPakDecompressor=true\n\n"
         << "; O(1) хэш-кэш свойств сущностей для ускорения загрузки сохранений\n"
         << "EnablePropertyCache=true\n\n"
-        << "; Пропуск избыточной реактивации старого мира перед загрузкой (экономит 11.7 секунд)\n"
-        << "SkipRedundantPreLoadActivate=true\n\n"
+        << "; ЭКСПЕРИМЕНТАЛЬНО: пропуск активации секторов при загрузке из меню (нестабильно, вылеты в Engine.dll)\n"
+        << "SkipRedundantPreLoadActivate=false\n\n"
         << "; Аппаратная фильтрация избыточных вызовов состояний Direct3D 9 (SetRenderState/SetSamplerState)\n"
         << "EnableD3D9StateFilter=true\n\n"
         << "; Fast Texture Loader (d3dx9_40.dll)\n"
@@ -339,7 +339,7 @@ void LoadConfig() {
     s_config.enableSIMDFrustumCulling = ReadIniBool("Performance", "EnableSIMDFrustumCulling", true, path);
     s_config.enableFastPakDecompressor = ReadIniBool("Performance", "EnableFastPakDecompressor", true, path);
     s_config.enablePropertyCache = ReadIniBool("Performance", "EnablePropertyCache", true, path);
-    s_config.skipRedundantPreLoadActivate = ReadIniBool("Performance", "SkipRedundantPreLoadActivate", true, path);
+    s_config.skipRedundantPreLoadActivate = ReadIniBool("Performance", "SkipRedundantPreLoadActivate", false, path);
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", false, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);
     s_config.enableVegetationOptimizer = ReadIniBool("Performance", "EnableVegetationOptimizer", true, path);
