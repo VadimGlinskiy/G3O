@@ -603,6 +603,12 @@ static int __fastcall Hooked_Deactivate(void* pThis, void* /*edx*/) {
 typedef void* (__thiscall* GetSystemSector_t)(void* pWorld);
 static GetSystemSector_t Real_GetSystemSector = nullptr;
 
+typedef int (__thiscall* GetDynamicLayerCount_t)(void* pSector);
+static GetDynamicLayerCount_t Real_GetDynamicLayerCount = nullptr;
+
+typedef void* (__thiscall* GetDynamicLayerAt_t)(void* pSector, int index);
+static GetDynamicLayerAt_t Real_GetDynamicLayerAt = nullptr;
+
 typedef int (__thiscall* GetSectorCount_t)(void* pWorld);
 static GetSectorCount_t Real_GetSectorCount = nullptr;
 
@@ -662,6 +668,60 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
         Real_SectorOnActivate(pSector);
         return;
     }
+
+    const Config& cfg = GetConfig();
+    int dynCount = (Real_GetDynamicLayerCount && cfg.enableParallelSectorActivation) ? Real_GetDynamicLayerCount(pSector) : 0;
+
+    if (dynCount > 4 && Real_GetDynamicLayerAt && Real_ElementActivate) {
+        LARGE_INTEGER lt0, lt1;
+        QueryPerformanceCounter(&lt0);
+
+        std::vector<void*> layers;
+        layers.reserve(dynCount);
+        for (int i = 0; i < dynCount; ++i) {
+            void* pLayer = Real_GetDynamicLayerAt(pSector, i);
+            if (pLayer) {
+                layers.push_back(pLayer);
+            }
+        }
+
+        if (layers.size() > 4) {
+            int numWorkers = cfg.sectorActivationWorkers;
+            if (numWorkers <= 0) {
+                unsigned int hc = std::thread::hardware_concurrency();
+                numWorkers = (hc > 2) ? (int)(hc - 1) : 2;
+                if (numWorkers > 8) numWorkers = 8;
+            }
+
+            const char* secName = SafeGetSectorName(pSector);
+            Log("G3O", "[ParallelLayer] Sector '%s': pre-activating %zu dynamic layers across %d worker threads...",
+                secName ? secName : "unknown", layers.size(), numWorkers);
+
+            std::atomic<size_t> nextIdx(0);
+            std::vector<std::thread> workers;
+            workers.reserve(numWorkers);
+
+            for (int w = 0; w < numWorkers; ++w) {
+                workers.emplace_back([&]() {
+                    while (true) {
+                        size_t idx = nextIdx.fetch_add(1);
+                        if (idx >= layers.size()) break;
+                        SafeActivateSector(Real_ElementActivate, layers[idx]);
+                    }
+                });
+            }
+
+            for (auto& t : workers) {
+                if (t.joinable()) t.join();
+            }
+
+            QueryPerformanceCounter(&lt1);
+            LONG64 lus = (s_freq.QuadPart > 0) ? ((lt1.QuadPart - lt0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+            Log("G3O", "[ParallelLayer] Sector '%s': %zu dynamic layers completed in %.3f s!",
+                secName ? secName : "unknown", layers.size(), (double)lus / 1000000.0);
+        }
+    }
+
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     Real_SectorOnActivate(pSector);
@@ -673,12 +733,6 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     double ms = (double)us / 1000.0;
     const char* secName = SafeGetSectorName(pSector);
     RecordSectorTiming(secName, ms);
-
-    if (s_sectorActivateCount == 1) {
-        DWORD* stackPtr = nullptr;
-        __asm { mov stackPtr, esp }
-        DumpSectorCallStack(secName, pSector, stackPtr);
-    }
 }
 
 // 5.4. WorldOnActivate hook (Game.dll: ?OnActivate@gCWorld@@MAEXXZ)
@@ -1085,6 +1139,18 @@ bool InitializeSavegameProfiler() {
         if (pAt) {
             Real_GetSectorAt = (GetSectorAt_t)pAt;
             Log("G3O", "Savegame Profiler: Found gCWorld::GetSectorAt (0x%p)", pAt);
+        }
+
+        void* pDynCount = (void*)GetProcAddress(hGame, "?GetDynamicLayerCount@gCSector@@QBEHXZ");
+        if (pDynCount) {
+            Real_GetDynamicLayerCount = (GetDynamicLayerCount_t)pDynCount;
+            Log("G3O", "Savegame Profiler: Found gCSector::GetDynamicLayerCount (0x%p)", pDynCount);
+        }
+
+        void* pDynAt = (void*)GetProcAddress(hGame, "?GetDynamicLayerAt@gCSector@@QAEPAVgCDynamicLayer@@H@Z");
+        if (pDynAt) {
+            Real_GetDynamicLayerAt = (GetDynamicLayerAt_t)pDynAt;
+            Log("G3O", "Savegame Profiler: Found gCSector::GetDynamicLayerAt (0x%p)", pDynAt);
         }
     }
 
