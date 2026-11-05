@@ -59,7 +59,7 @@ static SRWLOCK s_handleLock = SRWLOCK_INIT;
 static std::unordered_map<HANDLE, std::string> s_handlePathCache;
 
 // -----------------------------------------------------------------------------
-// Step 2.3: Bounded Speculative Pre-Decompression Cache
+// Step 2.3: Bounded Speculative Pre-Decompression Cache (Sliding Window)
 // -----------------------------------------------------------------------------
 struct PrefetchCandidate {
     uint32_t seq = 0;
@@ -71,6 +71,7 @@ struct PrefetchCandidate {
 };
 
 struct CachedBlock {
+    uint32_t seq = 0;
     std::string pakName;
     uint64_t offset = 0;
     uint32_t outBytes = 0;
@@ -78,9 +79,10 @@ struct CachedBlock {
     std::vector<BYTE> data;
 };
 
-static const size_t MAX_CACHE_MEMORY_BYTES = 96 * 1024 * 1024; // 96 MB strict budget
+static const size_t MAX_CACHE_MEMORY_BYTES = 128 * 1024 * 1024; // 128 MB strict budget
 static std::atomic<size_t> s_currentMemoryBytes{ 0 };
 static std::atomic<size_t> s_peakMemoryBytes{ 0 };
+static std::atomic<uint32_t> s_currentMainSeq{ 0 };
 
 static SRWLOCK s_cacheLock = SRWLOCK_INIT;
 static std::unordered_map<uint64_t, std::shared_ptr<CachedBlock>> s_predecompCache;
@@ -103,6 +105,17 @@ static inline uint64_t MakeCacheKey(const std::string& pakName, uint64_t offset)
     }
     hash ^= (offset * 0x9E3779B97F4A7C15ULL);
     return hash;
+}
+
+static void PurgeStaleBlocksUnderLock(uint32_t minSeq) {
+    for (auto it = s_predecompCache.begin(); it != s_predecompCache.end(); ) {
+        if (it->second->seq < minSeq) {
+            s_currentMemoryBytes.fetch_sub(it->second->outBytes, std::memory_order_relaxed);
+            it = s_predecompCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 static std::string ResolveArchiveName(HANDLE h) {
@@ -206,13 +219,31 @@ static DWORD WINAPI BgPredecompWorker(LPVOID /*lpParam*/) {
 
         const auto& cand = s_candidates[i];
 
-        // Memory budget check: wait if adding this block exceeds 96 MB
+        // Skip immediately if main thread has already passed this candidate
+        if (cand.seq <= s_currentMainSeq.load(std::memory_order_relaxed)) {
+            continue;
+        }
+
+        // Memory budget check: wait if adding this block exceeds budget
         while (s_currentMemoryBytes.load(std::memory_order_relaxed) + cand.outBytes > MAX_CACHE_MEMORY_BYTES &&
                s_currentMemoryBytes.load(std::memory_order_relaxed) > 0) {
             if (!s_isActive.load(std::memory_order_relaxed)) break;
-            WaitForSingleObject(s_memAvailableEvent, 10);
+
+            uint32_t curSeq = s_currentMainSeq.load(std::memory_order_relaxed);
+            if (cand.seq <= curSeq) {
+                break; // Stale candidate, skip
+            }
+
+            AcquireSRWLockExclusive(&s_cacheLock);
+            PurgeStaleBlocksUnderLock(curSeq);
+            ReleaseSRWLockExclusive(&s_cacheLock);
+
+            WaitForSingleObject(s_memAvailableEvent, 5);
         }
         if (!s_isActive.load(std::memory_order_relaxed)) break;
+        if (cand.seq <= s_currentMainSeq.load(std::memory_order_relaxed)) {
+            continue;
+        }
 
         // Get or open archive handle
         HANDLE hFile = INVALID_HANDLE_VALUE;
@@ -241,6 +272,7 @@ static DWORD WINAPI BgPredecompWorker(LPVOID /*lpParam*/) {
 
         // Allocate block buffer
         auto block = std::make_shared<CachedBlock>();
+        block->seq = cand.seq;
         block->pakName = cand.pakName;
         block->offset = cand.offset;
         block->outBytes = cand.outBytes;
@@ -321,6 +353,7 @@ void PakTracer_OnLoadStart(const char* saveName) {
     s_cacheSavedTimeUs.store(0, std::memory_order_relaxed);
     s_currentMemoryBytes.store(0, std::memory_order_relaxed);
     s_peakMemoryBytes.store(0, std::memory_order_relaxed);
+    s_currentMainSeq.store(0, std::memory_order_relaxed);
 
     s_candidates.clear();
     tl_lastRead.valid = false;
@@ -363,7 +396,7 @@ void PakTracer_OnLoadStart(const char* saveName) {
         }
 
         if (!s_candidates.empty()) {
-            Log("G3O", "[PakCache] Loaded %zu prefetch candidates (budget: 96 MB) for savegame '%s'",
+            Log("G3O", "[PakCache] Loaded %zu prefetch candidates (budget: 128 MB) for savegame '%s'",
                 s_candidates.size(), s_currentSaveName.c_str());
             s_bgWorkerThread = CreateThread(nullptr, 0, BgPredecompWorker, nullptr, 0, nullptr);
         }
@@ -476,6 +509,8 @@ bool PakTracer_TryGetPredecompressed(
     rec.decompTimeUs = 50; // served from cache
     rec.loadTimestampUs = tl_lastRead.timestampUs;
 
+    s_currentMainSeq.store(rec.seq, std::memory_order_relaxed);
+
     AcquireSRWLockExclusive(&s_traceLock);
     s_traceRecords.push_back(rec);
     ReleaseSRWLockExclusive(&s_traceLock);
@@ -510,6 +545,13 @@ void PakTracer_RecordDecompress(
         rec.outBytes = actualOut ? actualOut : outCapacity;
         rec.decompTimeUs = decompTimeUs;
         rec.loadTimestampUs = tl_lastRead.timestampUs;
+
+        // Update main thread sequence and purge any stale blocks older than rec.seq
+        s_currentMainSeq.store(rec.seq, std::memory_order_relaxed);
+        AcquireSRWLockExclusive(&s_cacheLock);
+        PurgeStaleBlocksUnderLock(rec.seq);
+        ReleaseSRWLockExclusive(&s_cacheLock);
+        if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
 
         tl_lastRead.valid = false;
 
@@ -582,7 +624,7 @@ void PakTracer_OnLoadEnd() {
         Log("G3O", "  Cache MISSES:             %u (%.1f%%)", misses, 100.0 - hitPct);
         Log("G3O", "  Data Served from Cache:   %.2f MB", hitMb);
         Log("G3O", "  Estimated CPU Time Saved: %.2f s", savedSec);
-        Log("G3O", "  Peak Cache Memory Used:   %.2f MB (Budget: 96.00 MB)", peakMb);
+        Log("G3O", "  Peak Cache Memory Used:   %.2f MB (Budget: 128.00 MB)", peakMb);
     }
 
     // Write trace to CSV only if there was no valid trace (so we preserve golden baseline trace)
