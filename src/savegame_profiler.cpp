@@ -8,6 +8,9 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string>
+#include <map>
+#include <vector>
+#include <algorithm>
 
 namespace G3O {
 
@@ -226,6 +229,135 @@ static void LogLoadReport(double totalSec) {
 // -----------------------------------------------------------------------------
 // Hooks
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Stack sampler: finds where the main thread spends time during a load.
+// Samples every ~20 ms; counts inclusive call-site return addresses per phase.
+// -----------------------------------------------------------------------------
+static volatile int s_samplePhase = 0; // 0=PreLoad 1=LoadGameWorld 2=GotoLoadedPosition 3=Session::Start
+static const char* const kPhaseNames[4] = { "Pre-Load", "LoadGameWorld", "GotoLoadedPosition", "Session::Start" };
+static HANDLE s_sampleTarget = nullptr;
+static HANDLE s_sampleThread = nullptr;
+static volatile bool s_sampleStop = false;
+static std::map<DWORD, int> s_sampleInclusive[4];
+static std::map<DWORD, int> s_sampleLeaf[4];
+static int s_sampleCount[4] = { 0, 0, 0, 0 };
+
+static bool LooksLikeReturnAddr(DWORD a) {
+    // Only trust addresses inside loaded image modules and preceded by a CALL instruction.
+    const BYTE* p = (const BYTE*)a;
+    if (a < 0x10000) return false;
+    HMODULE hm = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &hm) || !hm) return false;
+    bool ok = false;
+    __try {
+        if (p[-5] == 0xE8) ok = true;
+        else if (p[-6] == 0xFF && ((p[-5] >> 3) & 7) == 2) ok = true;
+        else if (p[-2] == 0xFF && ((p[-1] >> 3) & 7) == 2) ok = true;
+        else if (p[-3] == 0xFF && ((p[-2] >> 3) & 7) == 2) ok = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    return ok;
+}
+
+// Runs while target thread is suspended: no allocations, no locks, no logging.
+static int CaptureStackRaw(HANDLE hThread, DWORD* outEip, DWORD* outFrames, int maxFrames) {
+    CONTEXT ctx = {};
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (!GetThreadContext(hThread, &ctx)) return -1;
+    *outEip = ctx.Eip;
+    int n = 0;
+    DWORD sp = ctx.Esp;
+    __try {
+        for (int i = 0; i < 4096 / 4 && n < maxFrames; ++i) {
+            DWORD v = ((DWORD*)sp)[i];
+            outFrames[n++] = v; // raw candidates; filtered after resume
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+
+static DWORD WINAPI SamplerThreadProc(LPVOID) {
+    static DWORD raw[1024];
+    while (!s_sampleStop) {
+        Sleep(20);
+        if (s_sampleStop) break;
+        DWORD eip = 0;
+        int n = 0;
+        if (SuspendThread(s_sampleTarget) == (DWORD)-1) continue;
+        n = CaptureStackRaw(s_sampleTarget, &eip, raw, 1024);
+        ResumeThread(s_sampleTarget);
+        if (n < 0) continue;
+
+        int ph = s_samplePhase;
+        if (ph < 0 || ph > 3) ph = 0;
+        s_sampleCount[ph]++;
+        s_sampleLeaf[ph][eip]++;
+        std::map<DWORD, int>& inc = s_sampleInclusive[ph];
+        DWORD seen[64]; int seenN = 0;
+        for (int i = 0; i < n && seenN < 64; ++i) {
+            DWORD v = raw[i];
+            if (!LooksLikeReturnAddr(v)) continue;
+            bool dup = false;
+            for (int k = 0; k < seenN; ++k) if (seen[k] == v) { dup = true; break; }
+            if (dup) continue;
+            seen[seenN++] = v;
+            inc[v]++;
+        }
+    }
+    return 0;
+}
+
+static std::string DescribeAddr(DWORD a) {
+    char buf[320] = { 0 };
+    HMODULE hm = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &hm) && hm) {
+        char path[MAX_PATH] = { 0 };
+        GetModuleFileNameA(hm, path, MAX_PATH);
+        const char* base = strrchr(path, '\\');
+        base = base ? base + 1 : path;
+        snprintf(buf, sizeof(buf), "%s+0x%X", base, (unsigned)(a - (DWORD)hm));
+    } else {
+        snprintf(buf, sizeof(buf), "0x%08X", (unsigned)a);
+    }
+    return buf;
+}
+
+static void StartSampler() {
+    for (int i = 0; i < 4; ++i) { s_sampleInclusive[i].clear(); s_sampleLeaf[i].clear(); s_sampleCount[i] = 0; }
+    s_samplePhase = 0;
+    s_sampleStop = false;
+    if (!s_sampleTarget) {
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &s_sampleTarget,
+                        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0);
+    }
+    if (s_sampleTarget) s_sampleThread = CreateThread(nullptr, 0, SamplerThreadProc, nullptr, 0, nullptr);
+}
+
+static void StopSamplerAndReport() {
+    if (!s_sampleThread) return;
+    s_sampleStop = true;
+    WaitForSingleObject(s_sampleThread, 2000);
+    CloseHandle(s_sampleThread);
+    s_sampleThread = nullptr;
+
+    for (int ph = 0; ph < 4; ++ph) {
+        int total = s_sampleCount[ph];
+        if (total < 5) continue;
+        Log("G3O", "[Sampler] ===== %s: %d samples (~%.2f s) =====", kPhaseNames[ph], total, total * 0.02);
+        std::vector<std::pair<int, DWORD>> v;
+        for (auto& kv : s_sampleInclusive[ph]) v.push_back({ kv.second, kv.first });
+        std::sort(v.begin(), v.end(), [](const std::pair<int, DWORD>& a, const std::pair<int, DWORD>& b) { return a.first > b.first; });
+        Log("G3O", "[Sampler]  -- inclusive call sites (top 25) --");
+        for (size_t i = 0; i < v.size() && i < 25; ++i)
+            Log("G3O", "[Sampler]   %5.1f%%  %s", 100.0 * v[i].first / total, DescribeAddr(v[i].second).c_str());
+        std::vector<std::pair<int, DWORD>> l;
+        for (auto& kv : s_sampleLeaf[ph]) l.push_back({ kv.second, kv.first });
+        std::sort(l.begin(), l.end(), [](const std::pair<int, DWORD>& a, const std::pair<int, DWORD>& b) { return a.first > b.first; });
+        Log("G3O", "[Sampler]  -- leaf (EIP) (top 12) --");
+        for (size_t i = 0; i < l.size() && i < 12; ++i)
+            Log("G3O", "[Sampler]   %5.1f%%  %s", 100.0 * l[i].first / total, DescribeAddr(l[i].second).c_str());
+    }
+}
+
 typedef bool (__thiscall* HUDLoadGame_t)(void* pThis, void* a, void* b);
 static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 
@@ -261,7 +393,13 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     s_statWorldActivate = {};
     s_preWorldTotalSec = 0.0;
 
+    if (GetConfig().enableProfiler) {
+        StartSampler();
+    }
     bool r = Real_HUDLoadGame(pThis, a, b);
+    if (GetConfig().enableProfiler) {
+        StopSamplerAndReport();
+    }
 
     LARGE_INTEGER t1;
     QueryPerformanceCounter(&t1);
@@ -377,6 +515,24 @@ static int __fastcall Hooked_WorldActivateElem(void* pThis, void* /*edx*/) {
     return res;
 }
 
+// 5.4. WorldOnActivate hook (Game.dll: ?OnActivate@gCWorld@@MAEXXZ)
+// Loops through all 80+ sectors of the world, taking ~10.5 seconds on Main Menu loads.
+typedef void (__thiscall* WorldOnActivate_t)(void* pWorld);
+static WorldOnActivate_t Real_WorldOnActivate = nullptr;
+static void* s_targetWorldOnActivate = nullptr;
+
+static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
+    if (s_isLoadActive && s_inPreLoad) {
+        const Config& cfg = GetConfig();
+        if (cfg.skipRedundantPreLoadActivate) {
+            s_skippedPreLoadActivate = true;
+            Log("G3O", "[LoadProfile] Skipped redundant gCWorld::OnActivate in Pre-Load (saved ~10.5 s!)");
+            return;
+        }
+    }
+    Real_WorldOnActivate(pWorld);
+}
+
 // 5.5. DoAfterWorldActivate hook (Game.dll: ?DoAfterWorldActivate@gCWorld@@IAEXXZ)
 typedef void (__thiscall* DoAfterWorldActivate_t)(void* pWorld);
 static DoAfterWorldActivate_t Real_DoAfterWorldActivate = nullptr;
@@ -437,6 +593,7 @@ static LoadGameWorld_t Real_LoadGameWorld = nullptr;
 
 static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const void* pSaveName, bool isNewGame) {
     s_inPreLoad = false;
+    s_samplePhase = 1;
     QueryPerformanceCounter(&s_tWorldStart);
     if (s_tHUDStart.QuadPart > 0) {
         s_preWorldTotalSec = (double)(s_tWorldStart.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
@@ -469,6 +626,7 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
     QueryPerformanceCounter(&t0);
     Log("G3O", "[LoadProfile] -> gCSession::GotoLoadedPosition START (Resource Streaming / Scene Init)");
 
+    s_samplePhase = 2;
     Real_GotoLoadedPosition(pThis, pEntity, a);
 
     QueryPerformanceCounter(&t1);
@@ -489,6 +647,7 @@ static void __fastcall Hooked_SessionStart(void* pThis, void* /*edx*/, int mode)
     QueryPerformanceCounter(&t0);
     Log("G3O", "[LoadProfile] -> gCSession::Start (mode=%d) START", mode);
 
+    s_samplePhase = 3;
     Real_SessionStart(pThis, mode);
 
     QueryPerformanceCounter(&t1);
@@ -665,6 +824,14 @@ bool InitializeSavegameProfiler() {
             Log("G3O", "Savegame Profiler: Hooked gCWorld::Activate (0x%p)", pWorldAct);
         }
 
+        void* pOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCWorld@@MAEXXZ");
+        if (pOnAct) {
+            s_targetWorldOnActivate = pOnAct;
+            MH_CreateHook(pOnAct, (LPVOID)Hooked_WorldOnActivate, (LPVOID*)&Real_WorldOnActivate);
+            MH_EnableHook(pOnAct);
+            Log("G3O", "Savegame Profiler: Hooked gCWorld::OnActivate (0x%p)", pOnAct);
+        }
+
         void* pDoAfter = (void*)GetProcAddress(hGame, "?DoAfterWorldActivate@gCWorld@@IAEXXZ");
         if (pDoAfter) {
             s_targetDoAfterWorldActivate = pDoAfter;
@@ -712,6 +879,7 @@ void ShutdownSavegameProfiler() {
     if (s_targetClearEntities) MH_DisableHook(s_targetClearEntities);
     if (s_targetDeactivate) MH_DisableHook(s_targetDeactivate);
     if (s_targetWorldActivateElem) MH_DisableHook(s_targetWorldActivateElem);
+    if (s_targetWorldOnActivate) MH_DisableHook(s_targetWorldOnActivate);
     if (s_targetDoAfterWorldActivate) MH_DisableHook(s_targetDoAfterWorldActivate);
     if (s_targetForceROIUpdate) MH_DisableHook(s_targetForceROIUpdate);
     if (s_targetUnloadCaches) MH_DisableHook(s_targetUnloadCaches);
