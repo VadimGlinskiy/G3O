@@ -101,6 +101,55 @@ static TemplateCacheSlot s_templateCache[TEMPLATE_CACHE_SIZE] = {};
 static uint32_t s_templateHits = 0;
 static uint32_t s_templateMisses = 0;
 static uintptr_t s_cachedEngineBase = 0;
+static uintptr_t s_cachedSharedBase = 0;
+static DWORD s_loadThreadId = 0;
+
+// -----------------------------------------------------------------------------
+// Core Accelerator 1: Flat-Memory Stream Buffering (bCMemoryStream)
+// -----------------------------------------------------------------------------
+#pragma pack(push, 4)
+struct G3MemoryStream {
+    void* vptr_IStream; // SharedBase.dll + 0x8BD94 (??_7bCMemoryStream@@6BbCIStream@@@)
+    void* vptr_OStream; // SharedBase.dll + 0x8BDB8 (??_7bCMemoryStream@@6BbCOStream@@@)
+    uint8_t* pBuffer;
+    uint32_t position;
+    uint32_t size;
+};
+#pragma pack(pop)
+
+static uint32_t s_memStreamBufferedLayers = 0;
+static uint64_t s_memStreamBufferedBytes = 0;
+
+// -----------------------------------------------------------------------------
+// Core Accelerator 2: Critical Section Bypass for 0x1060B4AC (entity registry)
+// -----------------------------------------------------------------------------
+static uint32_t s_csBypassedAcquires = 0;
+static uint32_t s_csBypassedReleases = 0;
+
+using CS_AcquireFn = void (__thiscall*)(void*);
+using CS_ReleaseFn = void (__thiscall*)(void*);
+static CS_AcquireFn Real_CS_Acquire = nullptr;
+static CS_ReleaseFn Real_CS_Release = nullptr;
+
+static void __fastcall Hooked_CS_Acquire(void* self, void* /*edx*/) {
+    if (s_isLoadActive && self == reinterpret_cast<void*>(s_cachedEngineBase + 0x60B4AC)) {
+        if (s_loadThreadId == 0 || GetCurrentThreadId() == s_loadThreadId) {
+            ++s_csBypassedAcquires;
+            return;
+        }
+    }
+    Real_CS_Acquire(self);
+}
+
+static void __fastcall Hooked_CS_Release(void* self, void* /*edx*/) {
+    if (s_isLoadActive && self == reinterpret_cast<void*>(s_cachedEngineBase + 0x60B4AC)) {
+        if (s_loadThreadId == 0 || GetCurrentThreadId() == s_loadThreadId) {
+            ++s_csBypassedReleases;
+            return;
+        }
+    }
+    Real_CS_Release(self);
+}
 
 static void* LookupTemplateEntity(uintptr_t engineBase, const void* pGuid) {
     if (!engineBase) return nullptr;
@@ -218,12 +267,65 @@ static bool __fastcall Hooked_EntityCreateFromTemplate(
 // Detailed Context Sub-phase Hooks
 // -----------------------------------------------------------------------------
 static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, void* pStream, void* pLayer, bool directRead) {
-    if (!s_isLoadActive) return Real_OnLoadDynamicContext(self, pStream, pLayer, directRead);
+    if (!s_isLoadActive || !pStream) return Real_OnLoadDynamicContext(self, pStream, pLayer, directRead);
 
     const ContextAuditMetrics before = s_contextAuditMetrics;
     const std::uint64_t start = BeginLayerMetric();
 
-    const bool result = Real_OnLoadDynamicContext(self, pStream, pLayer, directRead);
+    bool result = false;
+    bool usedMemStream = false;
+
+    // Core Accelerator: Batch stream buffering via flat-memory bCMemoryStream
+    void** streamVtbl = *reinterpret_cast<void***>(pStream);
+    const void* archiveVtbl = reinterpret_cast<const void*>(s_cachedEngineBase + 0x48460C);
+
+    if (streamVtbl == archiveVtbl && s_cachedSharedBase != 0) {
+        void* pContext = pLayer ? *reinterpret_cast<void**>(reinterpret_cast<char*>(pLayer) + 0x40) : nullptr;
+        if (pContext) {
+            // ContextBase::SetFilePath from archive m_strFilePath (archive + 8)
+            using SetFilePathFn = void (__thiscall*)(void*, const void*);
+            SetFilePathFn setFilePath = reinterpret_cast<SetFilePathFn>(s_cachedEngineBase + 0x21A000);
+            setFilePath(pContext, reinterpret_cast<const char*>(pStream) + 8);
+        }
+
+        using GetPositionFn = __int64 (__thiscall*)(const void*);
+        GetPositionFn getPos = reinterpret_cast<GetPositionFn>(s_cachedEngineBase + 0x2A6DA0);
+        const __int64 curPos = getPos(pStream);
+
+        using GetFileSizeFn = __int64 (__thiscall*)(const void*);
+        GetFileSizeFn getFileSize = reinterpret_cast<GetFileSizeFn>(s_cachedEngineBase + 0x2A7200);
+        const __int64 totalSize = getFileSize(pStream);
+
+        const __int64 remaining = totalSize - curPos;
+        if (remaining > 0 && remaining <= 64 * 1024 * 1024) {
+            static std::vector<uint8_t> s_sectorBuffer;
+            if (s_sectorBuffer.size() < static_cast<size_t>(remaining)) {
+                s_sectorBuffer.resize(static_cast<size_t>(remaining));
+            }
+
+            using ReadFn = uint32_t (__thiscall*)(void*, void*, uint32_t);
+            ReadFn readFn = reinterpret_cast<ReadFn>(streamVtbl[1]);
+            const uint32_t bytesRead = readFn(pStream, s_sectorBuffer.data(), static_cast<uint32_t>(remaining));
+
+            if (bytesRead > 0) {
+                G3MemoryStream memStream{};
+                memStream.vptr_IStream = reinterpret_cast<void*>(s_cachedSharedBase + 0x8BD94);
+                memStream.vptr_OStream = reinterpret_cast<void*>(s_cachedSharedBase + 0x8BDB8);
+                memStream.pBuffer = s_sectorBuffer.data();
+                memStream.position = 0;
+                memStream.size = bytesRead;
+
+                result = Real_OnLoadDynamicContext(self, &memStream, pLayer, directRead);
+                usedMemStream = true;
+                ++s_memStreamBufferedLayers;
+                s_memStreamBufferedBytes += bytesRead;
+            }
+        }
+    }
+
+    if (!usedMemStream) {
+        result = Real_OnLoadDynamicContext(self, pStream, pLayer, directRead);
+    }
 
     const std::uint64_t elapsedTicks = BeginLayerMetric() - start;
     const double totalMs = LayerMetricMs(elapsedTicks);
@@ -260,8 +362,8 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
         const double childMs = LayerMetricMs(s_contextAuditMetrics.childrenAvailable.qpcTicks - before.childrenAvailable.qpcTicks);
         const uint64_t childCalls = s_contextAuditMetrics.childrenAvailable.calls - before.childrenAvailable.calls;
 
-        Log("G3O", "[DynamicContextAudit] Layer %p ('%s') directRead=%d | Total=%.2f ms | CPOReadFile=%.2f ms (%llu calls) | Entities=%llu (Create=%.2f ms, DynRead=%.2f ms [EntRead=%.2f ms (ReadObj=%.2f ms in %llu calls), Patch=%.2f ms (Cache: %u hits, %u miss)]) | ReadDep=%.2f ms (%llu calls)",
-            pLayer, filePath, (int)directRead, totalMs,
+        Log("G3O", "[DynamicContextAudit] Layer %p ('%s') directRead=%d buffered=%d | Total=%.2f ms | CPOReadFile=%.2f ms (%llu calls) | Entities=%llu (Create=%.2f ms, DynRead=%.2f ms [EntRead=%.2f ms (ReadObj=%.2f ms in %llu calls), Patch=%.2f ms (Cache: %u hits, %u miss)]) | ReadDep=%.2f ms (%llu calls)",
+            pLayer, filePath, (int)directRead, (int)usedMemStream, totalMs,
             cpoMs, cpoCalls,
             createCalls, createMs, dynReadMs,
             entReadMs, readObjMs, readObjCalls,
@@ -379,7 +481,7 @@ static bool InstallHookTarget(LPVOID target, LPVOID detour, LPVOID* original, co
         Log("G3O", "[LayerAudit] Target address is null for: %s", name);
         return false;
     }
-    if (s_numMetricsHooks >= 16) {
+    if (s_numMetricsHooks >= 32) {
         Log("G3O", "[LayerAudit] Hook slots exhausted for: %s", name);
         return false;
     }
@@ -416,13 +518,15 @@ static void RemoveCreatedMetricsHooks() {
     Real_PropertyObjectReadObject = nullptr;
     Real_ReadDependency = nullptr;
     Real_ChildrenAvailable = nullptr;
+    Real_CS_Acquire = nullptr;
+    Real_CS_Release = nullptr;
 
     s_metricsHooksInitialized = false;
 }
 
 static bool InitMetricsHooks() {
     if (s_metricsHooksInitialized) return true;
-    if (!IsTelemetryActive()) return true;
+    if (!GetConfig().enableSavegameAccelerators && !IsTelemetryActive()) return true;
 
     if (!s_qpcFrequencyInitialized) {
         if (!QueryPerformanceFrequency(&s_freq) || s_freq.QuadPart <= 0) {
@@ -442,6 +546,7 @@ static bool InitMetricsHooks() {
 
     uintptr_t engineBase = reinterpret_cast<uintptr_t>(hEngine);
     s_cachedEngineBase = engineBase;
+    s_cachedSharedBase = reinterpret_cast<uintptr_t>(hSharedBase);
     bool created = true;
 
     // 1. Layer base / Sector hooks
@@ -524,6 +629,19 @@ static bool InitMetricsHooks() {
         reinterpret_cast<LPVOID*>(&Real_ChildrenAvailable),
         "eCEntity::ChildrenAvailable") && created;
 
+    // 3. Critical Section bypass on entity lock (0x1060B4AC)
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?Acquire@bCCriticalSectionWin32@@QAEXXZ")),
+        reinterpret_cast<LPVOID>(Hooked_CS_Acquire),
+        reinterpret_cast<LPVOID*>(&Real_CS_Acquire),
+        "bCCriticalSectionWin32::Acquire") && created;
+
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?Release@bCCriticalSectionWin32@@QAEXXZ")),
+        reinterpret_cast<LPVOID>(Hooked_CS_Release),
+        reinterpret_cast<LPVOID*>(&Real_CS_Release),
+        "bCCriticalSectionWin32::Release") && created;
+
     if (!created) {
         Log("G3O", "[LayerAudit] One or more metrics hooks failed to install; removing all.");
         RemoveCreatedMetricsHooks();
@@ -581,6 +699,8 @@ static void ShutdownMetricsHooks() {
     Real_PropertyObjectReadObject = nullptr;
         Real_ReadDependency = nullptr;
         Real_ChildrenAvailable = nullptr;
+        Real_CS_Acquire = nullptr;
+        Real_CS_Release = nullptr;
         s_metricsHooksInitialized = false;
     }
     if (hadHooks) Log("G3O", "[LayerAudit] Metrics hooks shutdown completed.");
@@ -797,6 +917,10 @@ static void LogLoadReport(double totalSec) {
     double tmplHitRate = (tmplTotal > 0) ? (static_cast<double>(s_templateHits) * 100.0 / static_cast<double>(tmplTotal)) : 0.0;
     Log("G3O", "  - Template Resolution Cache:        %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
         tmplTotal, s_templateHits, s_templateMisses, tmplHitRate);
+    Log("G3O", "  - Batch Stream Buffering:           %u layers (%.2f MB streamed from flat buffer)",
+        s_memStreamBufferedLayers, (double)s_memStreamBufferedBytes / (1024.0 * 1024.0));
+    Log("G3O", "  - Entity Lock CS Bypass:            %u acquires, %u releases bypassed (0x1060B4AC)",
+        s_csBypassedAcquires, s_csBypassedReleases);
     Log("G3O", "================================================================================");
 
     FILE* fp = IsTelemetryActive() ? fopen("G3O_LoadProfiler.log", "w") : nullptr;
@@ -864,6 +988,14 @@ static void LogLoadReport(double totalSec) {
             GetDecompCacheHits(), (double)GetDecompCacheBytesSaved() / (1024.0 * 1024.0));
         fprintf(fp, "  - Property Resolution Cache (load-thread counters): %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
             totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
+        uint32_t tmplTotalFp = s_templateHits + s_templateMisses;
+        double tmplHitRateFp = (tmplTotalFp > 0) ? (static_cast<double>(s_templateHits) * 100.0 / static_cast<double>(tmplTotalFp)) : 0.0;
+        fprintf(fp, "  - Template Resolution Cache:        %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
+            tmplTotalFp, s_templateHits, s_templateMisses, tmplHitRateFp);
+        fprintf(fp, "  - Batch Stream Buffering:           %u layers (%.2f MB streamed from flat buffer)\n",
+            s_memStreamBufferedLayers, (double)s_memStreamBufferedBytes / (1024.0 * 1024.0));
+        fprintf(fp, "  - Entity Lock CS Bypass:            %u acquires, %u releases bypassed (0x1060B4AC)\n",
+            s_csBypassedAcquires, s_csBypassedReleases);
         fprintf(fp, "================================================================================\n");
         fclose(fp);
     }
@@ -1009,6 +1141,7 @@ static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 
 static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, void* b) {
     s_isLoadActive = true;
+    s_loadThreadId = GetCurrentThreadId();
     s_layerAuditMetrics = {};
     s_inPreLoad = true;
     s_skippedPreLoadActivate = false;
@@ -1021,6 +1154,10 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     s_templateHits = 0;
     s_templateMisses = 0;
     memset(s_templateCache, 0, sizeof(s_templateCache));
+    s_memStreamBufferedLayers = 0;
+    s_memStreamBufferedBytes = 0;
+    s_csBypassedAcquires = 0;
+    s_csBypassedReleases = 0;
     ResetVFSCacheTelemetry();
     InterlockedExchange(&s_readCalls, 0);
     InterlockedExchange64(&s_readBytes, 0);
@@ -1063,6 +1200,7 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     LARGE_INTEGER t1;
     QueryPerformanceCounter(&t1);
     s_isLoadActive = false;
+    s_loadThreadId = 0;
     if (Real_EnableSectorActivation) {
         Real_EnableSectorActivation(true);
     }

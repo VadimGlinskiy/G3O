@@ -38,6 +38,7 @@ struct Config {
     bool enablePropertyCache = true;
     bool enablePakPrefetch = true;
     bool skipRedundantPreLoadActivate = false;
+    bool enableSavegameAccelerators = true;
     bool enableD3D9StateFilter = false;
     bool enableFastTextureLoader = true;
     bool enableVegetationOptimizer = true;
