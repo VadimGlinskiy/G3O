@@ -19,6 +19,10 @@ set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
 set(LIBDEFLATE_BUILD_GZIP OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/libdeflate)
 
+if(MSVC)
+    target_compile_options(libdeflate_static PRIVATE /arch:AVX2 /Oi /O2)
+endif()
+
 # Main dinput8.dll Proxy library
 add_library(dinput8 SHARED
     src/main.cpp
