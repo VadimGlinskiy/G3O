@@ -12,6 +12,8 @@
 #include <map>
 #include <vector>
 #include <algorithm>
+#include <thread>
+#include <atomic>
 
 namespace G3O {
 
@@ -89,6 +91,36 @@ static volatile LONG64 s_worldActivateElemTimeUs = 0;
 static volatile LONG64 s_forceROIUpdateTimeUs = 0;
 static volatile LONG   s_sectorActivateCount = 0;
 static volatile LONG64 s_sectorActivateTotalUs = 0;
+
+struct SectorTimingRecord {
+    std::string name;
+    double durationMs;
+};
+static std::vector<SectorTimingRecord> s_sectorTimings;
+static CRITICAL_SECTION s_sectorTimingCs;
+static bool s_sectorTimingCsInit = false;
+
+static const char* SafeGetSectorName(void* pSector) {
+    if (!pSector) return "(null)";
+    __try {
+        const char* str = *(const char**)((const BYTE*)pSector + 0x14);
+        if (!str || !*str) return "(unnamed)";
+        return str;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "(invalid_ptr)";
+    }
+}
+
+static void RecordSectorTiming(const char* name, double ms) {
+    if (ms < 0.2) return;
+    if (!s_sectorTimingCsInit) {
+        InitializeCriticalSection(&s_sectorTimingCs);
+        s_sectorTimingCsInit = true;
+    }
+    EnterCriticalSection(&s_sectorTimingCs);
+    s_sectorTimings.push_back({ name ? name : "unknown", ms });
+    LeaveCriticalSection(&s_sectorTimingCs);
+}
 
 static double s_preWorldTotalSec = 0.0;
 static volatile LONG   s_cellsProcessed = 0;
@@ -168,6 +200,23 @@ static void LogLoadReport(double totalSec) {
     Log("G3O", "       * gCWorld::UnloadCaches:     %6.3f s [%ld pak blocks, %.2f MB read]",
         s_statUnloadCaches.durationSec, s_statUnloadCaches.pakBlocks, s_statUnloadCaches.readMb);
     Log("G3O", "       * Other Pre-Load Overhead:   %6.3f s", preOther);
+    if (s_sectorTimingCsInit) {
+        EnterCriticalSection(&s_sectorTimingCs);
+        std::vector<SectorTimingRecord> records = s_sectorTimings;
+        LeaveCriticalSection(&s_sectorTimingCs);
+
+        std::sort(records.begin(), records.end(), [](const SectorTimingRecord& a, const SectorTimingRecord& b) {
+            return a.durationMs > b.durationMs;
+        });
+
+        size_t topN = (records.size() < 15) ? records.size() : 15;
+        if (topN > 0) {
+            Log("G3O", "       * Top %zu Slowest Sectors in Activation:", topN);
+            for (size_t i = 0; i < topN; ++i) {
+                Log("G3O", "           [%2zu] %-32s %7.2f ms", i + 1, records[i].name.c_str(), records[i].durationMs);
+            }
+        }
+    }
     Log("G3O", "  2. gCWorld::LoadGameWorld:        %6.3f s (%5.1f%%) [%ld pak blocks, %.2f MB decomp, %.2f MB read]",
         s_statLoadGameWorld.durationSec, totalSec > 0 ? (s_statLoadGameWorld.durationSec * 100.0 / totalSec) : 0.0,
         s_statLoadGameWorld.pakBlocks, s_statLoadGameWorld.pakOutMb, s_statLoadGameWorld.readMb);
@@ -211,11 +260,28 @@ static void LogLoadReport(double totalSec) {
         fprintf(fp, "       * Elements Deactivation:     %6.3f s [%ld calls]\n", deactSec, s_deactivateCount);
         fprintf(fp, "       * gCWorld::Activate:         %6.3f s [%ld sectors, %.3f s, avg %.1f ms/sector]\n",
             worldActElemSec, s_sectorActivateCount, secTotalSec,
-            s_sectorActivateCount > 0 ? (secTotalSec * 100.0 / (double)s_sectorActivateCount) : 0.0);
+            s_sectorActivateCount > 0 ? (secTotalSec * 1000.0 / (double)s_sectorActivateCount) : 0.0);
         fprintf(fp, "       * ForceFullROIUpdate:        %6.3f s\n", roiSec);
         fprintf(fp, "       * gCWorld::UnloadCaches:     %6.3f s [%ld pak blocks, %.2f MB read]\n",
             s_statUnloadCaches.durationSec, s_statUnloadCaches.pakBlocks, s_statUnloadCaches.readMb);
         fprintf(fp, "       * Other Pre-Load Overhead:   %6.3f s\n", preOther);
+        if (s_sectorTimingCsInit) {
+            EnterCriticalSection(&s_sectorTimingCs);
+            std::vector<SectorTimingRecord> records = s_sectorTimings;
+            LeaveCriticalSection(&s_sectorTimingCs);
+
+            std::sort(records.begin(), records.end(), [](const SectorTimingRecord& a, const SectorTimingRecord& b) {
+                return a.durationMs > b.durationMs;
+            });
+
+            size_t topN = (records.size() < 15) ? records.size() : 15;
+            if (topN > 0) {
+                fprintf(fp, "       * Top %zu Slowest Sectors in Activation:\n", topN);
+                for (size_t i = 0; i < topN; ++i) {
+                    fprintf(fp, "           [%2zu] %-32s %7.2f ms\n", i + 1, records[i].name.c_str(), records[i].durationMs);
+                }
+            }
+        }
         fprintf(fp, "  2. gCWorld::LoadGameWorld:        %6.3f s (%5.1f%%) [%ld pak blocks, %.2f MB decomp, %.2f MB read]\n",
             s_statLoadGameWorld.durationSec, totalSec > 0 ? (s_statLoadGameWorld.durationSec * 100.0 / totalSec) : 0.0,
             s_statLoadGameWorld.pakBlocks, s_statLoadGameWorld.pakOutMb, s_statLoadGameWorld.readMb);
@@ -420,6 +486,11 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     s_statSessionStart = {};
     s_statWorldActivate = {};
     s_preWorldTotalSec = 0.0;
+    if (s_sectorTimingCsInit) {
+        EnterCriticalSection(&s_sectorTimingCs);
+        s_sectorTimings.clear();
+        LeaveCriticalSection(&s_sectorTimingCs);
+    }
 
     if (GetConfig().enableProfiler) {
         StartSampler();
@@ -565,6 +636,29 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
     InterlockedIncrement(&s_sectorActivateCount);
     InterlockedExchangeAdd64(&s_sectorActivateTotalUs, us);
+
+    double ms = (double)us / 1000.0;
+    const char* secName = SafeGetSectorName(pSector);
+    RecordSectorTiming(secName, ms);
+}
+
+typedef int (__thiscall* GetSectorCount_t)(void* pWorld);
+static GetSectorCount_t Real_GetSectorCount = nullptr;
+
+typedef void* (__thiscall* GetSectorAt_t)(void* pWorld, int index);
+static GetSectorAt_t Real_GetSectorAt = nullptr;
+
+typedef int (__thiscall* ElementActivate_t)(void* pElement);
+static ElementActivate_t Real_ElementActivate = nullptr;
+
+static bool SafeActivateSector(ElementActivate_t pfnActivate, void* pSec) {
+    if (!pfnActivate || !pSec) return false;
+    __try {
+        pfnActivate(pSec);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 // 5.4. WorldOnActivate hook (Game.dll: ?OnActivate@gCWorld@@MAEXXZ)
@@ -586,6 +680,61 @@ static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
             }
             Log("G3O", "[LoadProfile] Pre-Load gCWorld::OnActivate executed with SectorActivation=false (saved ~10.5 s!)");
             return;
+        }
+
+        if (cfg.enableParallelSectorActivation && Real_GetSectorCount && Real_GetSectorAt && Real_ElementActivate) {
+            int numSectors = Real_GetSectorCount(pWorld);
+            if (numSectors > 0) {
+                LARGE_INTEGER pt0, pt1;
+                QueryPerformanceCounter(&pt0);
+
+                std::vector<void*> sectorsToActivate;
+                sectorsToActivate.reserve(numSectors);
+                for (int i = 0; i < numSectors; i++) {
+                    void* pSec = Real_GetSectorAt(pWorld, i);
+                    if (pSec) {
+                        // In gCSector, byte offset 0x4c is bool m_bEnabled (1 = enabled)
+                        BYTE enabled = *((const BYTE*)pSec + 0x4c);
+                        if (enabled == 1) {
+                            sectorsToActivate.push_back(pSec);
+                        }
+                    }
+                }
+
+                int numWorkers = cfg.sectorActivationWorkers;
+                if (numWorkers <= 0) {
+                    unsigned int hc = std::thread::hardware_concurrency();
+                    numWorkers = (hc > 2) ? (int)(hc - 1) : 2;
+                    if (numWorkers > 6) numWorkers = 6;
+                }
+
+                Log("G3O", "[ParallelSector] Pre-activating %zu enabled sectors (out of %d total) across %d worker threads...",
+                    sectorsToActivate.size(), numSectors, numWorkers);
+
+                std::atomic<size_t> nextIndex(0);
+                std::vector<std::thread> workers;
+                workers.reserve(numWorkers);
+
+                for (int w = 0; w < numWorkers; w++) {
+                    workers.emplace_back([&]() {
+                        while (true) {
+                            size_t idx = nextIndex.fetch_add(1);
+                            if (idx >= sectorsToActivate.size()) break;
+                            void* pSec = sectorsToActivate[idx];
+                            SafeActivateSector(Real_ElementActivate, pSec);
+                        }
+                    });
+                }
+
+                for (auto& t : workers) {
+                    if (t.joinable()) t.join();
+                }
+
+                QueryPerformanceCounter(&pt1);
+                LONG64 us = (s_freq.QuadPart > 0) ? ((pt1.QuadPart - pt0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+                Log("G3O", "[ParallelSector] Parallel activation completed in %.3f s! Passing to engine OnActivate...",
+                    (double)us / 1000000.0);
+            }
         }
     }
     Real_WorldOnActivate(pWorld);
@@ -906,6 +1055,18 @@ bool InitializeSavegameProfiler() {
             MH_EnableHook(pDoAfter);
             Log("G3O", "Savegame Profiler: Hooked gCWorld::DoAfterWorldActivate (0x%p)", pDoAfter);
         }
+
+        void* pCount = (void*)GetProcAddress(hGame, "?GetSectorCount@gCWorld@@QBEHXZ");
+        if (pCount) {
+            Real_GetSectorCount = (GetSectorCount_t)pCount;
+            Log("G3O", "Savegame Profiler: Found gCWorld::GetSectorCount (0x%p)", pCount);
+        }
+
+        void* pAt = (void*)GetProcAddress(hGame, "?GetSectorAt@gCWorld@@QAEPAVgCSector@@H@Z");
+        if (pAt) {
+            Real_GetSectorAt = (GetSectorAt_t)pAt;
+            Log("G3O", "Savegame Profiler: Found gCWorld::GetSectorAt (0x%p)", pAt);
+        }
     }
 
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
@@ -931,6 +1092,12 @@ bool InitializeSavegameProfiler() {
             MH_CreateHook(pROI, (LPVOID)Hooked_ForceROIUpdate, (LPVOID*)&Real_ForceROIUpdate);
             MH_EnableHook(pROI);
             Log("G3O", "Savegame Profiler: Hooked eCEntityAdmin::ForceFullROIUpdate (0x%p)", pROI);
+        }
+
+        void* pAct = (void*)GetProcAddress(hEngine, "?Activate@eCProcessibleElement@@UAE?AW4eEResult@1@XZ");
+        if (pAct) {
+            Real_ElementActivate = (ElementActivate_t)pAct;
+            Log("G3O", "Savegame Profiler: Found eCProcessibleElement::Activate (0x%p)", pAct);
         }
     }
 

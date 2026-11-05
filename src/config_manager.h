@@ -52,6 +52,8 @@ struct Config {
     DWORD_PTR cpuAffinityMask = 0;     // 0 = Auto-detect
     int pakCacheBudgetMB = 192;        // Rolling pre-decompression memory budget (MB)
     int pakPrefetchWorkers = 0;        // 0 = Auto-detect based on CPU cores (up to 6)
+    bool enableParallelSectorActivation = true; // Multi-threaded parallel world sector activation
+    int sectorActivationWorkers = 0;   // 0 = Auto-detect based on CPU cores (up to 6)
 
     // [Logging]
     bool enableDiagnosticLog = true;
