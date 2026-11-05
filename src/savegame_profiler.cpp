@@ -1393,6 +1393,10 @@ static void* s_targetWorldActivate = nullptr;
 static void* s_targetBuildStatic = nullptr;
 
 bool InitializeSavegameProfiler() {
+    if (!GetConfig().enableSavegameAudit && !GetConfig().enableProfiler) {
+        Log("G3O", "Savegame Profiler disabled via config (EnableSavegameAudit=false).");
+        return true;
+    }
     if (s_freq.QuadPart <= 0) {
         QueryPerformanceFrequency(&s_freq);
     }
