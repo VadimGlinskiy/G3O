@@ -663,6 +663,21 @@ typedef void (__thiscall* SectorOnActivate_t)(void* pSector);
 static SectorOnActivate_t Real_SectorOnActivate = nullptr;
 static void* s_targetSectorOnActivate = nullptr;
 
+typedef int (__thiscall* SectorDoLoadData_t)(void* pSector, void* pStream);
+static SectorDoLoadData_t Real_SectorDoLoadData = nullptr;
+static void* s_targetSectorDoLoadData = nullptr;
+static LONG64 s_lastSectorDoLoadDataUs = 0;
+
+static int __fastcall Hooked_SectorDoLoadData(void* pSector, void* /*edx*/, void* pStream) {
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    int res = Real_SectorDoLoadData(pSector, pStream);
+    QueryPerformanceCounter(&t1);
+    LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+    s_lastSectorDoLoadDataUs = us;
+    return res;
+}
+
 static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     if (!s_isLoadActive) {
         Real_SectorOnActivate(pSector);
@@ -722,6 +737,9 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
         }
     }
 
+    s_lastSectorDoLoadDataUs = 0;
+    int dynBefore = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
+
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     Real_SectorOnActivate(pSector);
@@ -730,9 +748,17 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     InterlockedIncrement(&s_sectorActivateCount);
     InterlockedExchangeAdd64(&s_sectorActivateTotalUs, us);
 
-    double ms = (double)us / 1000.0;
+    double totalMs = (double)us / 1000.0;
+    double loadMs = (double)s_lastSectorDoLoadDataUs / 1000.0;
+    double loopMs = totalMs - loadMs;
+    int dynAfter = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
     const char* secName = SafeGetSectorName(pSector);
-    RecordSectorTiming(secName, ms);
+    RecordSectorTiming(secName, totalMs);
+
+    if (totalMs >= 50.0) {
+        Log("G3O", "[SectorAudit] Sector '%s': Total=%.2f ms (DoLoadData=%.2f ms, LayerLoop=%.2f ms), dynLayers: %d -> %d",
+            secName ? secName : "unknown", totalMs, loadMs, loopMs, dynBefore, dynAfter);
+    }
 }
 
 // 5.4. WorldOnActivate hook (Game.dll: ?OnActivate@gCWorld@@MAEXXZ)
@@ -1111,6 +1137,14 @@ bool InitializeSavegameProfiler() {
             MH_CreateHook(pSecOnAct, (LPVOID)Hooked_SectorOnActivate, (LPVOID*)&Real_SectorOnActivate);
             MH_EnableHook(pSecOnAct);
             Log("G3O", "Savegame Profiler: Hooked gCSector::OnActivate (0x%p)", pSecOnAct);
+        }
+
+        void* pSecDoLoad = (void*)GetProcAddress(hGame, "?DoLoadData@gCSector@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z");
+        if (pSecDoLoad) {
+            s_targetSectorDoLoadData = pSecDoLoad;
+            MH_CreateHook(pSecDoLoad, (LPVOID)Hooked_SectorDoLoadData, (LPVOID*)&Real_SectorDoLoadData);
+            MH_EnableHook(pSecDoLoad);
+            Log("G3O", "Savegame Profiler: Hooked gCSector::DoLoadData (0x%p)", pSecDoLoad);
         }
 
         void* pOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCWorld@@MAEXXZ");
