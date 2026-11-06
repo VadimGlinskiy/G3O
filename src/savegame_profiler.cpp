@@ -730,19 +730,20 @@ static void LogLoadReport(double totalSec) {
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // Stack sampler: finds where the main thread spends time during a load.
-// Samples every ~20 ms; counts inclusive call-site return addresses per phase.
+// Samples every ~20 ms; counts EIP samples and heuristic return-address candidates per phase.
 // -----------------------------------------------------------------------------
-static volatile int s_samplePhase = 0; // 0=PreLoad 1=LoadGameWorld 2=GotoLoadedPosition 3=Session::Start
-static const char* const kPhaseNames[4] = { "Pre-Load", "LoadGameWorld", "GotoLoadedPosition", "Session::Start" };
+static constexpr int kSamplePhaseCount = G3O::kSysDynSamplePhase + 1;
+static volatile int s_samplePhase = 0; // 0=PreLoad 1=LoadGameWorld 2=GotoLoadedPosition 3=Session::Start 4=SysDyn sector
+static const char* const kPhaseNames[kSamplePhaseCount] = { "Pre-Load", "LoadGameWorld", "GotoLoadedPosition", "Session::Start", "SysDyn sector" };
 static HANDLE s_sampleTarget = nullptr;
 static HANDLE s_sampleThread = nullptr;
 static volatile bool s_sampleStop = false;
-static std::map<DWORD, int> s_sampleInclusive[4];
-static std::map<DWORD, int> s_sampleLeaf[4];
-static int s_sampleCount[4] = { 0, 0, 0, 0 };
+static std::map<DWORD, int> s_sampleInclusive[kSamplePhaseCount];
+static std::map<DWORD, int> s_sampleLeaf[kSamplePhaseCount];
+static int s_sampleCount[kSamplePhaseCount] = { 0, 0, 0, 0, 0 };
 
 static bool LooksLikeReturnAddr(DWORD a) {
-    // Only trust addresses inside loaded image modules and preceded by a CALL instruction.
+    // Raw stack scan yields candidates only; it does not unwind the call stack.
     const BYTE* p = (const BYTE*)a;
     if (a < 0x10000) return false;
     HMODULE hm = nullptr;
@@ -782,12 +783,12 @@ static DWORD WINAPI SamplerThreadProc(LPVOID) {
         DWORD eip = 0;
         int n = 0;
         if (SuspendThread(s_sampleTarget) == (DWORD)-1) continue;
+        int ph = s_samplePhase;
         n = CaptureStackRaw(s_sampleTarget, &eip, raw, 1024);
         ResumeThread(s_sampleTarget);
         if (n < 0) continue;
 
-        int ph = s_samplePhase;
-        if (ph < 0 || ph > 3) ph = 0;
+        if (ph < 0 || ph >= kSamplePhaseCount) ph = 0;
         s_sampleCount[ph]++;
         s_sampleLeaf[ph][eip]++;
         std::map<DWORD, int>& inc = s_sampleInclusive[ph];
@@ -821,7 +822,7 @@ static std::string DescribeAddr(DWORD a) {
 }
 
 static void StartSampler() {
-    for (int i = 0; i < 4; ++i) { s_sampleInclusive[i].clear(); s_sampleLeaf[i].clear(); s_sampleCount[i] = 0; }
+    for (int i = 0; i < kSamplePhaseCount; ++i) { s_sampleInclusive[i].clear(); s_sampleLeaf[i].clear(); s_sampleCount[i] = 0; }
     s_samplePhase = 0;
     s_sampleStop = false;
     if (!s_sampleTarget) {
@@ -838,14 +839,14 @@ static void StopSamplerAndReport() {
     CloseHandle(s_sampleThread);
     s_sampleThread = nullptr;
 
-    for (int ph = 0; ph < 4; ++ph) {
+    for (int ph = 0; ph < kSamplePhaseCount; ++ph) {
         int total = s_sampleCount[ph];
         if (total < 5) continue;
         Log("G3O", "[Sampler] ===== %s: %d samples (~%.2f s) =====", kPhaseNames[ph], total, total * 0.02);
         std::vector<std::pair<int, DWORD>> v;
         for (auto& kv : s_sampleInclusive[ph]) v.push_back({ kv.second, kv.first });
         std::sort(v.begin(), v.end(), [](const std::pair<int, DWORD>& a, const std::pair<int, DWORD>& b) { return a.first > b.first; });
-        Log("G3O", "[Sampler]  -- inclusive call sites (top 25) --");
+        Log("G3O", "[Sampler]  -- heuristic stack candidates (not unwound) --");
         for (size_t i = 0; i < v.size() && i < 25; ++i)
             Log("G3O", "[Sampler]   %5.1f%%  %s", 100.0 * v[i].first / total, DescribeAddr(v[i].second).c_str());
         std::vector<std::pair<int, DWORD>> l;
@@ -1092,9 +1093,14 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     int dynBefore = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
 
     const LayerAuditMetrics metricsBefore = s_layerAuditMetrics;
+    const int previousSamplePhase = s_samplePhase;
+    if (s_sampleThread) {
+        s_samplePhase = G3O::ResolveSamplePhaseForSector(previousSamplePhase, SafeGetSectorName(pSector));
+    }
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     Real_SectorOnActivate(pSector);
+    if (s_sampleThread) s_samplePhase = previousSamplePhase;
     QueryPerformanceCounter(&t1);
     const LayerAuditMetrics metricsDelta = SubtractLayerMetrics(s_layerAuditMetrics, metricsBefore);
     LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;

@@ -14,6 +14,12 @@ int main() {
     config.enablePakPrefetch = false;
     bool ok = true;
     ok &= Expect(!G3O::ShouldInstallSavegameProfilerHooks(config), "all savegame hooks should be off when all related features are off");
+    ok &= Expect(G3O::ResolveSamplePhaseForSector(0, "SysDyn_{fixture}") == G3O::kSysDynSamplePhase,
+                 "SysDyn activation should use its isolated sample phase");
+    ok &= Expect(G3O::ResolveSamplePhaseForSector(2, "WorldSector") == 2,
+                 "other sectors should preserve the enclosing sample phase");
+    ok &= Expect(G3O::ResolveSamplePhaseForSector(2, nullptr) == 2,
+                 "unknown sector names should preserve the enclosing sample phase");
 
     config.enableSavegameAudit = true;
     ok &= Expect(G3O::ShouldInstallSavegameProfilerHooks(config) && G3O::ShouldCollectSavegameAudit(config),
