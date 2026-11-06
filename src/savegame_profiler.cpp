@@ -57,6 +57,7 @@ struct ContextAuditMetrics {
     LayerAuditMetric dynEntityRead;        // eCDynamicEntity::Read (Engine.dll RVA 0x2295C0)
     LayerAuditMetric entityRead;           // eCEntity::Read (Engine.dll RVA 0x2257F0)
     LayerAuditMetric readObject;           // bCPropertyObjectSingleton::ReadObject (SharedBase.dll)
+    LayerAuditMetric propertyFactoryReadObject; // bCPropertyObjectFactory::ReadObject (SharedBase.dll)
     LayerAuditMetric patchWithTemplate;    // eCEntity::PatchWithTemplate (Engine.dll RVA 0x224350)
     LayerAuditMetric readDependency;       // eCContextBase::ReadDependency (Engine.dll RVA 0x21A150)
     LayerAuditMetric childrenAvailable;    // eCEntity::ChildrenAvailable (Engine.dll)
@@ -79,7 +80,9 @@ using DynamicEntityReadFn = int (__thiscall*)(void*, void*);
 using EntityReadFn = int (__thiscall*)(void*, void*);
 using PatchWithTemplateFn = bool (__thiscall*)(void*, const void*, bool);
 using PropertyObjectReadObjectFn = bool (__thiscall*)(void*, void*, void*);
+using PropertyFactoryReadObjectFn = bool (__thiscall*)(void*, void*, void*);
 static PropertyObjectReadObjectFn Real_PropertyObjectReadObject = nullptr;
+static PropertyFactoryReadObjectFn Real_PropertyFactoryReadObject = nullptr;
 
 using ReadDependencyFn = int (__thiscall*)(void*, void*, void*);
 using ChildrenAvailableFn = void (__thiscall*)(void*, bool);
@@ -190,6 +193,8 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
         const uint64_t entReadCalls = s_contextAuditMetrics.entityRead.calls - before.entityRead.calls;
         const double readObjectMs = LayerMetricMs(s_contextAuditMetrics.readObject.qpcTicks - before.readObject.qpcTicks);
         const uint64_t readObjectCalls = s_contextAuditMetrics.readObject.calls - before.readObject.calls;
+        const double propertyFactoryReadObjectMs = LayerMetricMs(s_contextAuditMetrics.propertyFactoryReadObject.qpcTicks - before.propertyFactoryReadObject.qpcTicks);
+        const uint64_t propertyFactoryReadObjectCalls = s_contextAuditMetrics.propertyFactoryReadObject.calls - before.propertyFactoryReadObject.calls;
         const double readDependencyMs = LayerMetricMs(s_contextAuditMetrics.readDependency.qpcTicks - before.readDependency.qpcTicks);
         const uint64_t readDependencyCalls = s_contextAuditMetrics.readDependency.calls - before.readDependency.calls;
         const double patchWithTemplateMs = LayerMetricMs(s_contextAuditMetrics.patchWithTemplate.qpcTicks - before.patchWithTemplate.qpcTicks);
@@ -205,13 +210,15 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
             " | DynamicEntityRead=%.2f ms (%llu calls, inclusive)"
             " | EntityRead=%.2f ms (%llu calls, inclusive)"
             " | PropertyObjectRead=%.2f ms (%llu calls, inclusive)"
+            " | PropertyFactoryReadObject=%.2f ms (%llu calls, inclusive)"
             " | ReadDependency=%.2f ms (%llu calls, inclusive)"
             " | PatchWithTemplate(PropertyID)=%.2f ms (%llu calls, inclusive)"
             " | ChildrenAvailable=%.2f ms (%llu calls, inclusive)"
             " | CreateSpecificEntity=%.2f ms (%llu calls, inclusive)",
             pLayer, filePath, (int)directRead, totalMs,
             contextReadMs, contextReadCalls, dynReadMs, dynReadCalls, entReadMs, entReadCalls,
-            readObjectMs, readObjectCalls, readDependencyMs, readDependencyCalls,
+            readObjectMs, readObjectCalls, propertyFactoryReadObjectMs, propertyFactoryReadObjectCalls,
+            readDependencyMs, readDependencyCalls,
             patchWithTemplateMs, patchWithTemplateCalls, childrenAvailableMs, childrenAvailableCalls,
             createSpecificEntityMs, createSpecificEntityCalls);
     }
@@ -265,6 +272,14 @@ static bool __fastcall Hooked_PropertyObjectReadObject(void* self, void* /*edx*/
     const bool res = Real_PropertyObjectReadObject(self, pStream, pObject);
     EndLayerMetric(s_contextAuditMetrics.readObject, start);
     return res;
+}
+
+static bool __fastcall Hooked_PropertyFactoryReadObject(void* self, void* /*edx*/, void* pStream, void* pObject) {
+    if (!s_isLoadActive) return Real_PropertyFactoryReadObject(self, pStream, pObject);
+    const std::uint64_t start = BeginLayerMetric();
+    const bool result = Real_PropertyFactoryReadObject(self, pStream, pObject);
+    EndLayerMetric(s_contextAuditMetrics.propertyFactoryReadObject, start);
+    return result;
 }
 
 static bool __fastcall Hooked_PatchWithTemplate(void* self, void* /*edx*/, const void* pGuid, bool flag) {
@@ -334,6 +349,7 @@ static void RemoveCreatedMetricsHooks() {
     Real_EntityRead = nullptr;
     Real_PatchWithTemplate = nullptr;
     Real_PropertyObjectReadObject = nullptr;
+    Real_PropertyFactoryReadObject = nullptr;
     Real_ReadDependency = nullptr;
     Real_ChildrenAvailable = nullptr;
 
@@ -364,7 +380,7 @@ static bool InitMetricsHooks() {
     }
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
     if (!hSharedBase) {
-        Log("G3O", "[LayerAudit] SharedBase.dll unavailable; property object read timing hook not installed.");
+        Log("G3O", "[LayerAudit] SharedBase.dll unavailable; property object read timing hooks not installed.");
     }
 
     bool created = true;
@@ -405,6 +421,11 @@ static bool InitMetricsHooks() {
             reinterpret_cast<LPVOID>(Hooked_PropertyObjectReadObject),
             reinterpret_cast<LPVOID*>(&Real_PropertyObjectReadObject),
             "bCPropertyObjectSingleton::ReadObject");
+        (void)InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?ReadObject@bCPropertyObjectFactory@@IAE_NAAVbCIStream@@AAVbCPropertyObjectBase@@@Z")),
+            reinterpret_cast<LPVOID>(Hooked_PropertyFactoryReadObject),
+            reinterpret_cast<LPVOID*>(&Real_PropertyFactoryReadObject),
+            "bCPropertyObjectFactory::ReadObject");
     }
     (void)InstallHookTarget(
         reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?ReadDependency@eCContextBase@@IAE?AW4bEResult@@AAVbCIStream@@AAV?$bTValArray@PAVeCNode@@@@@Z")),
@@ -482,7 +503,8 @@ static void ShutdownMetricsHooks() {
         Real_DynamicEntityRead = nullptr;
         Real_EntityRead = nullptr;
         Real_PatchWithTemplate = nullptr;
-    Real_PropertyObjectReadObject = nullptr;
+        Real_PropertyObjectReadObject = nullptr;
+        Real_PropertyFactoryReadObject = nullptr;
         Real_ReadDependency = nullptr;
         Real_ChildrenAvailable = nullptr;
         s_metricsHooksInitialized = false;
