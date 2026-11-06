@@ -51,6 +51,7 @@ static inline bool IsTelemetryActive() { return GetConfig().enableSavegameAudit 
 #endif
 
 struct ContextAuditMetrics {
+    LayerAuditMetric dynamicContextRead;    // eCEntityDynamicContext::Read (Engine.dll)
     LayerAuditMetric cpoReadFile;          // bCPOStream::ReadFile (SharedBase.dll)
     LayerAuditMetric createSpecificEntity; // eCEntityDynamicContext::CreateSpecificEntity (Engine.dll)
     LayerAuditMetric dynEntityRead;        // eCDynamicEntity::Read (Engine.dll RVA 0x2295C0)
@@ -71,6 +72,7 @@ using DynamicLayerCreateEntityFn = void* (__thiscall*)(void*);
 using EntityCreateFromTemplateFn = bool (__thiscall*)(void*, const void*);
 
 using OnLoadDynamicContextFn = bool (__thiscall*)(void*, void*, void*, bool);
+using DynamicContextReadFn = int (__thiscall*)(void*, void*);
 using CPOStreamReadFileFn = bool (__thiscall*)(void*, void*);
 using CreateSpecificEntityFn = void* (__thiscall*)(void*);
 using DynamicEntityReadFn = int (__thiscall*)(void*, void*);
@@ -88,6 +90,7 @@ static DynamicLayerCreateEntityFn Real_DynamicLayerCreateEntity = nullptr;
 static EntityCreateFromTemplateFn Real_EntityCreateFromTemplate = nullptr;
 
 static OnLoadDynamicContextFn Real_OnLoadDynamicContext = nullptr;
+static DynamicContextReadFn Real_DynamicContextRead = nullptr;
 static CPOStreamReadFileFn Real_CPOStreamReadFile = nullptr;
 static CreateSpecificEntityFn Real_CreateSpecificEntity = nullptr;
 static DynamicEntityReadFn Real_DynamicEntityRead = nullptr;
@@ -179,39 +182,26 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
             if (ppStr && *ppStr) filePath = *ppStr;
         }
 
-        const double cpoMs = LayerMetricMs(s_contextAuditMetrics.cpoReadFile.qpcTicks - before.cpoReadFile.qpcTicks);
-        const uint64_t cpoCalls = s_contextAuditMetrics.cpoReadFile.calls - before.cpoReadFile.calls;
-
-        const double createMs = LayerMetricMs(s_contextAuditMetrics.createSpecificEntity.qpcTicks - before.createSpecificEntity.qpcTicks);
-        const uint64_t createCalls = s_contextAuditMetrics.createSpecificEntity.calls - before.createSpecificEntity.calls;
-
+        const double contextReadMs = LayerMetricMs(s_contextAuditMetrics.dynamicContextRead.qpcTicks - before.dynamicContextRead.qpcTicks);
+        const uint64_t contextReadCalls = s_contextAuditMetrics.dynamicContextRead.calls - before.dynamicContextRead.calls;
         const double dynReadMs = LayerMetricMs(s_contextAuditMetrics.dynEntityRead.qpcTicks - before.dynEntityRead.qpcTicks);
         const uint64_t dynReadCalls = s_contextAuditMetrics.dynEntityRead.calls - before.dynEntityRead.calls;
-
         const double entReadMs = LayerMetricMs(s_contextAuditMetrics.entityRead.qpcTicks - before.entityRead.qpcTicks);
         const uint64_t entReadCalls = s_contextAuditMetrics.entityRead.calls - before.entityRead.calls;
 
-        const double patchMs = LayerMetricMs(s_contextAuditMetrics.patchWithTemplate.qpcTicks - before.patchWithTemplate.qpcTicks);
-        const uint64_t patchCalls = s_contextAuditMetrics.patchWithTemplate.calls - before.patchWithTemplate.calls;
-
-        const double readObjMs = LayerMetricMs(s_contextAuditMetrics.readObject.qpcTicks - before.readObject.qpcTicks);
-        const uint64_t readObjCalls = s_contextAuditMetrics.readObject.calls - before.readObject.calls;
-
-        const double depMs = LayerMetricMs(s_contextAuditMetrics.readDependency.qpcTicks - before.readDependency.qpcTicks);
-        const uint64_t depCalls = s_contextAuditMetrics.readDependency.calls - before.readDependency.calls;
-
-        const double childMs = LayerMetricMs(s_contextAuditMetrics.childrenAvailable.qpcTicks - before.childrenAvailable.qpcTicks);
-        const uint64_t childCalls = s_contextAuditMetrics.childrenAvailable.calls - before.childrenAvailable.calls;
-
-        Log("G3O", "[DynamicContextAudit] Layer %p ('%s') directRead=%d | Total=%.2f ms | CPOReadFile=%.2f ms (%llu calls) | Entities=%llu (Create=%.2f ms, DynRead=%.2f ms [EntRead=%.2f ms (ReadObj=%.2f ms in %llu calls), Patch=%.2f ms]) | ReadDep=%.2f ms (%llu calls)",
+        Log("G3O", "[DynamicContextAudit] Layer %p ('%s') directRead=%d | OnLoad=%.2f ms | ContextRead=%.2f ms (%llu calls, inclusive) | DynamicEntityRead=%.2f ms (%llu calls, inclusive) | EntityRead=%.2f ms (%llu calls, inclusive)",
             pLayer, filePath, (int)directRead, totalMs,
-            cpoMs, cpoCalls,
-            createCalls, createMs, dynReadMs,
-            entReadMs, readObjMs, readObjCalls,
-            patchMs,
-            depMs, depCalls);
+            contextReadMs, contextReadCalls, dynReadMs, dynReadCalls, entReadMs, entReadCalls);
     }
 
+    return result;
+}
+
+static int __fastcall Hooked_DynamicContextRead(void* self, void* /*edx*/, void* pStream) {
+    if (!s_isLoadActive) return Real_DynamicContextRead(self, pStream);
+    const std::uint64_t start = BeginLayerMetric();
+    const int result = Real_DynamicContextRead(self, pStream);
+    EndLayerMetric(s_contextAuditMetrics.dynamicContextRead, start);
     return result;
 }
 
@@ -315,6 +305,7 @@ static void RemoveCreatedMetricsHooks() {
     Real_DynamicLayerCreateEntity = nullptr;
     Real_EntityCreateFromTemplate = nullptr;
     Real_OnLoadDynamicContext = nullptr;
+    Real_DynamicContextRead = nullptr;
     Real_CPOStreamReadFile = nullptr;
     Real_CreateSpecificEntity = nullptr;
     Real_DynamicEntityRead = nullptr;
@@ -344,6 +335,11 @@ static bool InitMetricsHooks() {
         Log("G3O", "[LayerAudit] Game.dll unavailable; layer timing hooks not installed.");
         return false;
     }
+    HMODULE hEngine = GetModuleHandleA("Engine.dll");
+    if (!hEngine) {
+        Log("G3O", "[LayerAudit] Engine.dll unavailable; context timing hooks not installed.");
+        return false;
+    }
 
     bool created = true;
     created = InstallHookTarget(
@@ -356,6 +352,26 @@ static bool InitMetricsHooks() {
         reinterpret_cast<LPVOID>(Hooked_DynamicLayerDoLoadData),
         reinterpret_cast<LPVOID*>(&Real_DynamicLayerDoLoadData),
         "gCDynamicLayer::DoLoadData") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?OnLoadDynamicContext@gCWorld@@IAE_NAAVbCIStream@@AAVgCDynamicLayer@@_N@Z")),
+        reinterpret_cast<LPVOID>(Hooked_OnLoadDynamicContext),
+        reinterpret_cast<LPVOID*>(&Real_OnLoadDynamicContext),
+        "gCWorld::OnLoadDynamicContext") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?Read@eCEntityDynamicContext@@UAE?AW4bEResult@@AAVbCIStream@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_DynamicContextRead),
+        reinterpret_cast<LPVOID*>(&Real_DynamicContextRead),
+        "eCEntityDynamicContext::Read") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?Read@eCDynamicEntity@@UAE?AW4bEResult@@AAVbCIStream@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_DynamicEntityRead),
+        reinterpret_cast<LPVOID*>(&Real_DynamicEntityRead),
+        "eCDynamicEntity::Read") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?Read@eCEntity@@UAE?AW4bEResult@@AAVbCIStream@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_EntityRead),
+        reinterpret_cast<LPVOID*>(&Real_EntityRead),
+        "eCEntity::Read") && created;
 
     if (!created) {
         Log("G3O", "[LayerAudit] Layer timing hook installation failed; removing all registered hooks.");
@@ -373,7 +389,7 @@ static bool InitMetricsHooks() {
     }
 
     s_metricsHooksInitialized = true;
-    Log("G3O", "[LayerAudit] %d layer-boundary QPC hooks enabled; entity/visual-mesh hooks remain off (frequency=%lld Hz).",
+    Log("G3O", "[LayerAudit] %d layer/context QPC hooks enabled; nested read timings are inclusive (frequency=%lld Hz).",
         s_numMetricsHooks, s_freq.QuadPart);
     return true;
 }
@@ -406,6 +422,7 @@ static void ShutdownMetricsHooks() {
         Real_DynamicLayerCreateEntity = nullptr;
         Real_EntityCreateFromTemplate = nullptr;
         Real_OnLoadDynamicContext = nullptr;
+        Real_DynamicContextRead = nullptr;
         Real_CPOStreamReadFile = nullptr;
         Real_CreateSpecificEntity = nullptr;
         Real_DynamicEntityRead = nullptr;
