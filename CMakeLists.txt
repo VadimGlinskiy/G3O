@@ -58,6 +58,7 @@ add_library(dinput8 SHARED
     src/pak_cache_budget.h
     src/pak_read_at.h
     src/savegame_profiler_policy.h
+    src/layer_audit_metrics.h
     src/d3d9_hook.cpp
     src/d3d9_hook.h
     src/profiler.cpp

@@ -2,6 +2,7 @@
 #include "diagnostic_logger.h"
 #include "config_manager.h"
 #include "savegame_profiler_policy.h"
+#include "layer_audit_metrics.h"
 #include "timestamped_path.h"
 #include "g3o_output_path.h"
 #include "fast_pak_decompressor.h"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <intrin.h>
+#include <atomic>
 
 namespace G3O {
 
@@ -35,7 +37,7 @@ static ReadFile_t Real_ReadFile = nullptr;
 static volatile LONG   s_readCalls = 0;
 static volatile LONG64 s_readBytes = 0;
 static volatile LONG64 s_readTimeUs = 0;
-static volatile bool   s_isLoadActive = false;
+static std::atomic<bool> s_isLoadActive{ false };
 static volatile bool   s_inPreLoad = false;
 static volatile bool   s_skippedPreLoadActivate = false;
 
@@ -47,18 +49,6 @@ static inline bool IsTelemetryActive() { return true; }
 #else
 static inline bool IsTelemetryActive() { return GetConfig().enableSavegameAudit || GetConfig().enableProfiler; }
 #endif
-
-struct LayerAuditMetric {
-    std::uint64_t calls = 0;
-    std::uint64_t qpcTicks = 0;
-};
-
-struct LayerAuditMetrics {
-    LayerAuditMetric createData;
-    LayerAuditMetric doLoadData;
-    LayerAuditMetric createDynamicEntity;
-    LayerAuditMetric createFromTemplate;
-};
 
 struct ContextAuditMetrics {
     LayerAuditMetric cpoReadFile;          // bCPOStream::ReadFile (SharedBase.dll)
@@ -119,8 +109,7 @@ static std::uint64_t BeginLayerMetric() {
 static void EndLayerMetric(LayerAuditMetric& metric, std::uint64_t start) {
     LARGE_INTEGER t{};
     QueryPerformanceCounter(&t);
-    metric.qpcTicks += static_cast<std::uint64_t>(t.QuadPart) - start;
-    ++metric.calls;
+    RecordLayerAuditDuration(metric, start, static_cast<std::uint64_t>(t.QuadPart));
 }
 
 static double LayerMetricMs(std::uint64_t ticks) {
@@ -131,16 +120,7 @@ static double LayerMetricMs(std::uint64_t ticks) {
 
 static LayerAuditMetrics SubtractLayerMetrics(
     const LayerAuditMetrics& after, const LayerAuditMetrics& before) {
-    LayerAuditMetrics delta{};
-    delta.createData.calls = after.createData.calls - before.createData.calls;
-    delta.createData.qpcTicks = after.createData.qpcTicks - before.createData.qpcTicks;
-    delta.doLoadData.calls = after.doLoadData.calls - before.doLoadData.calls;
-    delta.doLoadData.qpcTicks = after.doLoadData.qpcTicks - before.doLoadData.qpcTicks;
-    delta.createDynamicEntity.calls = after.createDynamicEntity.calls - before.createDynamicEntity.calls;
-    delta.createDynamicEntity.qpcTicks = after.createDynamicEntity.qpcTicks - before.createDynamicEntity.qpcTicks;
-    delta.createFromTemplate.calls = after.createFromTemplate.calls - before.createFromTemplate.calls;
-    delta.createFromTemplate.qpcTicks = after.createFromTemplate.qpcTicks - before.createFromTemplate.qpcTicks;
-    return delta;
+    return DifferenceLayerAuditMetrics(after, before);
 }
 
 static std::int32_t __fastcall Hooked_LayerCreateData(void* self, void* /*edx*/) {
@@ -348,111 +328,37 @@ static void RemoveCreatedMetricsHooks() {
 }
 
 static bool InitMetricsHooks() {
-    return true; // Disabled: micro-audit hooks interfere with entity visual mesh attachment
     if (s_metricsHooksInitialized) return true;
     if (!IsTelemetryActive()) return true;
 
     if (!s_qpcFrequencyInitialized) {
         if (!QueryPerformanceFrequency(&s_freq) || s_freq.QuadPart <= 0) {
-            Log("G3O", "[LayerAudit] QueryPerformanceFrequency failed; metrics hooks not installed.");
+            Log("G3O", "[LayerAudit] QueryPerformanceFrequency failed; layer timing hooks not installed.");
             return false;
         }
         s_qpcFrequencyInitialized = true;
     }
 
     HMODULE hGame = GetModuleHandleA("Game.dll");
-    HMODULE hEngine = GetModuleHandleA("Engine.dll");
-    HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
-    if (!hGame || !hEngine || !hSharedBase) {
-        Log("G3O", "[LayerAudit] Required game DLLs unavailable; metrics hooks not installed.");
+    if (!hGame) {
+        Log("G3O", "[LayerAudit] Game.dll unavailable; layer timing hooks not installed.");
         return false;
     }
 
-    uintptr_t engineBase = reinterpret_cast<uintptr_t>(hEngine);
     bool created = true;
-
-    // 1. Layer base / Sector hooks
     created = InstallHookTarget(
         reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?CreateData@gCLayerBase@@MAE?AW4eEResult@eCProcessibleElement@@XZ")),
         reinterpret_cast<LPVOID>(Hooked_LayerCreateData),
         reinterpret_cast<LPVOID*>(&Real_LayerCreateData),
         "gCLayerBase::CreateData") && created;
-
     created = InstallHookTarget(
         reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?DoLoadData@gCDynamicLayer@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z")),
         reinterpret_cast<LPVOID>(Hooked_DynamicLayerDoLoadData),
         reinterpret_cast<LPVOID*>(&Real_DynamicLayerDoLoadData),
         "gCDynamicLayer::DoLoadData") && created;
 
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?CreateDynamicEntity@gCDynamicLayer@@QAEPAVeCDynamicEntity@@XZ")),
-        reinterpret_cast<LPVOID>(Hooked_DynamicLayerCreateEntity),
-        reinterpret_cast<LPVOID*>(&Real_DynamicLayerCreateEntity),
-        "gCDynamicLayer::CreateDynamicEntity") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?CreateFromTemplate@eCEntity@@QAE_NABVeCTemplateEntity@@@Z")),
-        reinterpret_cast<LPVOID>(Hooked_EntityCreateFromTemplate),
-        reinterpret_cast<LPVOID*>(&Real_EntityCreateFromTemplate),
-        "eCEntity::CreateFromTemplate") && created;
-
-    // 2. Dynamic context sub-phase hooks
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?OnLoadDynamicContext@gCWorld@@IAE_NAAVbCIStream@@AAVgCDynamicLayer@@_N@Z")),
-        reinterpret_cast<LPVOID>(Hooked_OnLoadDynamicContext),
-        reinterpret_cast<LPVOID*>(&Real_OnLoadDynamicContext),
-        "gCWorld::OnLoadDynamicContext") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?ReadFile@bCPOStream@@QAE_NAAVbCIStream@@@Z")),
-        reinterpret_cast<LPVOID>(Hooked_CPOStreamReadFile),
-        reinterpret_cast<LPVOID*>(&Real_CPOStreamReadFile),
-        "bCPOStream::ReadFile") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?CreateSpecificEntity@eCEntityDynamicContext@@UAEPAVeCDynamicEntity@@XZ")),
-        reinterpret_cast<LPVOID>(Hooked_CreateSpecificEntity),
-        reinterpret_cast<LPVOID*>(&Real_CreateSpecificEntity),
-        "eCEntityDynamicContext::CreateSpecificEntity") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(engineBase + 0x2295C0),
-        reinterpret_cast<LPVOID>(Hooked_DynamicEntityRead),
-        reinterpret_cast<LPVOID*>(&Real_DynamicEntityRead),
-        "eCDynamicEntity::Read") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(engineBase + 0x2257F0),
-        reinterpret_cast<LPVOID>(Hooked_EntityRead),
-        reinterpret_cast<LPVOID*>(&Real_EntityRead),
-        "eCEntity::Read") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(engineBase + 0x224350),
-        reinterpret_cast<LPVOID>(Hooked_PatchWithTemplate),
-        reinterpret_cast<LPVOID*>(&Real_PatchWithTemplate),
-        "eCEntity::PatchWithTemplate") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?ReadObject@bCPropertyObjectSingleton@@QAE_NAAVbCIStream@@AAVbCPropertyObjectBase@@@Z")),
-        reinterpret_cast<LPVOID>(Hooked_PropertyObjectReadObject),
-        reinterpret_cast<LPVOID*>(&Real_PropertyObjectReadObject),
-        "bCPropertyObjectSingleton::ReadObject") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(engineBase + 0x21A150),
-        reinterpret_cast<LPVOID>(Hooked_ReadDependency),
-        reinterpret_cast<LPVOID*>(&Real_ReadDependency),
-        "eCContextBase::ReadDependency") && created;
-
-    created = InstallHookTarget(
-        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?ChildrenAvailable@eCEntity@@UAEX_N@Z")),
-        reinterpret_cast<LPVOID>(Hooked_ChildrenAvailable),
-        reinterpret_cast<LPVOID*>(&Real_ChildrenAvailable),
-        "eCEntity::ChildrenAvailable") && created;
-
     if (!created) {
-        Log("G3O", "[LayerAudit] One or more metrics hooks failed to install; removing all.");
+        Log("G3O", "[LayerAudit] Layer timing hook installation failed; removing all registered hooks.");
         RemoveCreatedMetricsHooks();
         return false;
     }
@@ -467,7 +373,7 @@ static bool InitMetricsHooks() {
     }
 
     s_metricsHooksInitialized = true;
-    Log("G3O", "[LayerAudit] %d QPC metrics hooks successfully enabled (frequency=%lld Hz).",
+    Log("G3O", "[LayerAudit] %d layer-boundary QPC hooks enabled; entity/visual-mesh hooks remain off (frequency=%lld Hz).",
         s_numMetricsHooks, s_freq.QuadPart);
     return true;
 }
@@ -694,6 +600,11 @@ static void LogLoadReport(double totalSec) {
             }
         }
     }
+    if (s_metricsHooksInitialized) {
+        Log("G3O", "[LayerAudit] Load-thread inclusive totals: gCLayerBase::CreateData=%llu calls / %.2f ms; gCDynamicLayer::DoLoadData=%llu calls / %.2f ms",
+            static_cast<unsigned long long>(s_layerAuditMetrics.createData.calls), LayerMetricMs(s_layerAuditMetrics.createData.qpcTicks),
+            static_cast<unsigned long long>(s_layerAuditMetrics.doLoadData.calls), LayerMetricMs(s_layerAuditMetrics.doLoadData.qpcTicks));
+    }
     Log("G3O", "  2. gCWorld::LoadGameWorld:        %6.3f s (%5.1f%%) [%ld pak blocks, %.2f MB decomp, %.2f MB read]",
         s_statLoadGameWorld.durationSec, totalSec > 0 ? (s_statLoadGameWorld.durationSec * 100.0 / totalSec) : 0.0,
         s_statLoadGameWorld.pakBlocks, s_statLoadGameWorld.pakOutMb, s_statLoadGameWorld.readMb);
@@ -776,6 +687,11 @@ static void LogLoadReport(double totalSec) {
                     fprintf(fp, "           [%2zu] %-32s %7.2f ms\n", i + 1, records[i].name.c_str(), records[i].durationMs);
                 }
             }
+        }
+        if (s_metricsHooksInitialized) {
+            fprintf(fp, "[LayerAudit] Load-thread inclusive totals: gCLayerBase::CreateData=%llu calls / %.2f ms; gCDynamicLayer::DoLoadData=%llu calls / %.2f ms\n",
+                static_cast<unsigned long long>(s_layerAuditMetrics.createData.calls), LayerMetricMs(s_layerAuditMetrics.createData.qpcTicks),
+                static_cast<unsigned long long>(s_layerAuditMetrics.doLoadData.calls), LayerMetricMs(s_layerAuditMetrics.doLoadData.qpcTicks));
         }
         fprintf(fp, "  2. gCWorld::LoadGameWorld:        %6.3f s (%5.1f%%) [%ld pak blocks, %.2f MB decomp, %.2f MB read]\n",
             s_statLoadGameWorld.durationSec, totalSec > 0 ? (s_statLoadGameWorld.durationSec * 100.0 / totalSec) : 0.0,
@@ -1148,15 +1064,18 @@ static void* s_targetSectorOnActivate = nullptr;
 typedef int (__thiscall* SectorDoLoadData_t)(void* pSector, void* pStream);
 static SectorDoLoadData_t Real_SectorDoLoadData = nullptr;
 static void* s_targetSectorDoLoadData = nullptr;
-static LONG64 s_lastSectorDoLoadDataUs = 0;
+static thread_local LONG64 s_sectorDoLoadDataUs = 0;
+static thread_local LONG s_sectorDoLoadDataCalls = 0;
 
 static int __fastcall Hooked_SectorDoLoadData(void* pSector, void* /*edx*/, void* pStream) {
+    if (!s_isLoadActive) return Real_SectorDoLoadData(pSector, pStream);
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     int res = Real_SectorDoLoadData(pSector, pStream);
     QueryPerformanceCounter(&t1);
     LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
-    s_lastSectorDoLoadDataUs = us;
+    s_sectorDoLoadDataUs += us;
+    ++s_sectorDoLoadDataCalls;
     return res;
 }
 
@@ -1168,7 +1087,8 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
 
 
 
-    s_lastSectorDoLoadDataUs = 0;
+    s_sectorDoLoadDataUs = 0;
+    s_sectorDoLoadDataCalls = 0;
     int dynBefore = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
 
     const LayerAuditMetrics metricsBefore = s_layerAuditMetrics;
@@ -1182,21 +1102,22 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     InterlockedExchangeAdd64(&s_sectorActivateTotalUs, us);
 
     double totalMs = (double)us / 1000.0;
-    double loadMs = (double)s_lastSectorDoLoadDataUs / 1000.0;
-    double loopMs = totalMs - loadMs;
+    const LONG64 sectorDoLoadDataUs = s_sectorDoLoadDataUs;
+    const LONG sectorDoLoadDataCalls = s_sectorDoLoadDataCalls;
+    double sectorDoLoadDataMs = (double)sectorDoLoadDataUs / 1000.0;
+    double otherOnActivateMs = totalMs - sectorDoLoadDataMs;
+    if (otherOnActivateMs < 0.0) otherOnActivateMs = 0.0;
     int dynAfter = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
     const char* secName = SafeGetSectorName(pSector);
     RecordSectorTiming(secName, totalMs);
 
     if (IsTelemetryActive() && totalMs >= 50.0) {
-        Log("G3O", "[SectorAudit] Sector '%s': Total=%.2f ms (DoLoadData=%.2f ms, LayerLoop=%.2f ms), dynLayers: %d -> %d",
-            secName ? secName : "unknown", totalMs, loadMs, loopMs, dynBefore, dynAfter);
-        Log("G3O", "[LayerAudit] Sector '%s': Total=%.2f ms | CreateData: %llu calls, %.2f ms | DoLoadData: %llu calls, %.2f ms | CreateDynamicEntity: %llu calls, %.2f ms | CreateFromTemplate: %llu calls, %.2f ms",
-            secName ? secName : "unknown", totalMs,
+        Log("G3O", "[SectorAudit] Sector '%s': OnActivate=%.2f ms | Sector::DoLoadData=%.2f ms (%ld calls) | Other OnActivate work=%.2f ms | dynLayers: %d -> %d",
+            secName ? secName : "unknown", totalMs, sectorDoLoadDataMs, sectorDoLoadDataCalls, otherOnActivateMs, dynBefore, dynAfter);
+        Log("G3O", "[LayerAudit] Sector '%s': gCLayerBase::CreateData=%llu calls / %.2f ms | gCDynamicLayer::DoLoadData=%llu calls / %.2f ms",
+            secName ? secName : "unknown",
             static_cast<unsigned long long>(metricsDelta.createData.calls), LayerMetricMs(metricsDelta.createData.qpcTicks),
-            static_cast<unsigned long long>(metricsDelta.doLoadData.calls), LayerMetricMs(metricsDelta.doLoadData.qpcTicks),
-            static_cast<unsigned long long>(metricsDelta.createDynamicEntity.calls), LayerMetricMs(metricsDelta.createDynamicEntity.qpcTicks),
-            static_cast<unsigned long long>(metricsDelta.createFromTemplate.calls), LayerMetricMs(metricsDelta.createFromTemplate.qpcTicks));
+            static_cast<unsigned long long>(metricsDelta.doLoadData.calls), LayerMetricMs(metricsDelta.doLoadData.qpcTicks));
     }
 }
 
@@ -1619,13 +1540,13 @@ bool InitializeSavegameProfiler() {
     }
     }
 
-    const char* auditHookState = metricsHooksReady ? "enabled" :
-        (cfg.enableSavegameAudit ? "unavailable" : "disabled");
+    const LayerAuditHookState auditHookState = ResolveLayerAuditHookState(
+        cfg.enableSavegameAudit, metricsHooksReady && s_metricsHooksInitialized);
     Log("G3O", "Savegame hooks initialized (audit=%s, profiler=%s, PAK prefetch=%s, LayerAudit hooks=%s).",
         cfg.enableSavegameAudit ? "enabled" : "disabled",
         cfg.enableProfiler ? "enabled" : "disabled",
         cfg.enablePakPrefetch ? "enabled" : "disabled",
-        auditHookState);
+        LayerAuditHookStateName(auditHookState));
     return true;
 }
 
