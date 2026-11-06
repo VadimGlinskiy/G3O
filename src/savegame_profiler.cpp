@@ -188,10 +188,32 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
         const uint64_t dynReadCalls = s_contextAuditMetrics.dynEntityRead.calls - before.dynEntityRead.calls;
         const double entReadMs = LayerMetricMs(s_contextAuditMetrics.entityRead.qpcTicks - before.entityRead.qpcTicks);
         const uint64_t entReadCalls = s_contextAuditMetrics.entityRead.calls - before.entityRead.calls;
+        const double readObjectMs = LayerMetricMs(s_contextAuditMetrics.readObject.qpcTicks - before.readObject.qpcTicks);
+        const uint64_t readObjectCalls = s_contextAuditMetrics.readObject.calls - before.readObject.calls;
+        const double readDependencyMs = LayerMetricMs(s_contextAuditMetrics.readDependency.qpcTicks - before.readDependency.qpcTicks);
+        const uint64_t readDependencyCalls = s_contextAuditMetrics.readDependency.calls - before.readDependency.calls;
+        const double patchWithTemplateMs = LayerMetricMs(s_contextAuditMetrics.patchWithTemplate.qpcTicks - before.patchWithTemplate.qpcTicks);
+        const uint64_t patchWithTemplateCalls = s_contextAuditMetrics.patchWithTemplate.calls - before.patchWithTemplate.calls;
+        const double childrenAvailableMs = LayerMetricMs(s_contextAuditMetrics.childrenAvailable.qpcTicks - before.childrenAvailable.qpcTicks);
+        const uint64_t childrenAvailableCalls = s_contextAuditMetrics.childrenAvailable.calls - before.childrenAvailable.calls;
+        const double createSpecificEntityMs = LayerMetricMs(s_contextAuditMetrics.createSpecificEntity.qpcTicks - before.createSpecificEntity.qpcTicks);
+        const uint64_t createSpecificEntityCalls = s_contextAuditMetrics.createSpecificEntity.calls - before.createSpecificEntity.calls;
 
-        Log("G3O", "[DynamicContextAudit] Layer %p ('%s') directRead=%d | OnLoad=%.2f ms | ContextRead=%.2f ms (%llu calls, inclusive) | DynamicEntityRead=%.2f ms (%llu calls, inclusive) | EntityRead=%.2f ms (%llu calls, inclusive)",
+        Log("G3O",
+            "[DynamicContextAudit] Layer %p ('%s') directRead=%d | OnLoad=%.2f ms"
+            " | ContextRead=%.2f ms (%llu calls, inclusive)"
+            " | DynamicEntityRead=%.2f ms (%llu calls, inclusive)"
+            " | EntityRead=%.2f ms (%llu calls, inclusive)"
+            " | PropertyObjectRead=%.2f ms (%llu calls, inclusive)"
+            " | ReadDependency=%.2f ms (%llu calls, inclusive)"
+            " | PatchWithTemplate(PropertyID)=%.2f ms (%llu calls, inclusive)"
+            " | ChildrenAvailable=%.2f ms (%llu calls, inclusive)"
+            " | CreateSpecificEntity=%.2f ms (%llu calls, inclusive)",
             pLayer, filePath, (int)directRead, totalMs,
-            contextReadMs, contextReadCalls, dynReadMs, dynReadCalls, entReadMs, entReadCalls);
+            contextReadMs, contextReadCalls, dynReadMs, dynReadCalls, entReadMs, entReadCalls,
+            readObjectMs, readObjectCalls, readDependencyMs, readDependencyCalls,
+            patchWithTemplateMs, patchWithTemplateCalls, childrenAvailableMs, childrenAvailableCalls,
+            createSpecificEntityMs, createSpecificEntityCalls);
     }
 
     return result;
@@ -340,6 +362,10 @@ static bool InitMetricsHooks() {
         Log("G3O", "[LayerAudit] Engine.dll unavailable; context timing hooks not installed.");
         return false;
     }
+    HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
+    if (!hSharedBase) {
+        Log("G3O", "[LayerAudit] SharedBase.dll unavailable; property object read timing hook not installed.");
+    }
 
     bool created = true;
     created = InstallHookTarget(
@@ -372,6 +398,34 @@ static bool InitMetricsHooks() {
         reinterpret_cast<LPVOID>(Hooked_EntityRead),
         reinterpret_cast<LPVOID*>(&Real_EntityRead),
         "eCEntity::Read") && created;
+
+    if (hSharedBase) {
+        (void)InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?ReadObject@bCPropertyObjectSingleton@@QAE_NAAVbCIStream@@AAVbCPropertyObjectBase@@@Z")),
+            reinterpret_cast<LPVOID>(Hooked_PropertyObjectReadObject),
+            reinterpret_cast<LPVOID*>(&Real_PropertyObjectReadObject),
+            "bCPropertyObjectSingleton::ReadObject");
+    }
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?ReadDependency@eCContextBase@@IAE?AW4bEResult@@AAVbCIStream@@AAV?$bTValArray@PAVeCNode@@@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_ReadDependency),
+        reinterpret_cast<LPVOID*>(&Real_ReadDependency),
+        "eCContextBase::ReadDependency");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?PatchWithTemplate@eCEntity@@QAE_NABVbCPropertyID@@_N@Z")),
+        reinterpret_cast<LPVOID>(Hooked_PatchWithTemplate),
+        reinterpret_cast<LPVOID*>(&Real_PatchWithTemplate),
+        "eCEntity::PatchWithTemplate(PropertyID)");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?ChildrenAvailable@eCEntity@@UAEX_N@Z")),
+        reinterpret_cast<LPVOID>(Hooked_ChildrenAvailable),
+        reinterpret_cast<LPVOID*>(&Real_ChildrenAvailable),
+        "eCEntity::ChildrenAvailable");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?CreateSpecificEntity@eCEntityDynamicContext@@UAEPAVeCDynamicEntity@@XZ")),
+        reinterpret_cast<LPVOID>(Hooked_CreateSpecificEntity),
+        reinterpret_cast<LPVOID*>(&Real_CreateSpecificEntity),
+        "eCEntityDynamicContext::CreateSpecificEntity");
 
     if (!created) {
         Log("G3O", "[LayerAudit] Layer timing hook installation failed; removing all registered hooks.");
