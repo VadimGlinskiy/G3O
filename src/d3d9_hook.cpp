@@ -2,6 +2,7 @@
 #include "diagnostic_logger.h"
 #include "config_manager.h"
 #include "profiler.h"
+#include "d3d_state_cache.h"
 #include <minhook.h>
 #include <d3d9.h>
 #include <stdio.h>
@@ -22,9 +23,11 @@ static BYTE  s_stageStateValid[MAX_STAGES][MAX_STAGE_STATES] = { { 0 } };
 
 static DWORD s_samplerStateCache[MAX_SAMPLERS][MAX_SAMPLER_STATES];
 static BYTE  s_samplerStateValid[MAX_SAMPLERS][MAX_SAMPLER_STATES] = { { 0 } };
+static IDirect3DDevice9* s_cachedDevice = nullptr;
 
 static bool s_deviceFilterInstalled = false;
 static bool s_presentHooked = false;
+static void* s_deviceHookTargets[4] = {};
 
 typedef HRESULT (STDMETHODCALLTYPE* SetRenderState_t)(IDirect3DDevice9* This, D3DRENDERSTATETYPE State, DWORD Value);
 static SetRenderState_t Real_SetRenderState = NULL;
@@ -42,39 +45,38 @@ void InvalidateD3D9StateCaches() {
     memset(s_renderStateValid, 0, sizeof(s_renderStateValid));
     memset(s_stageStateValid, 0, sizeof(s_stageStateValid));
     memset(s_samplerStateValid, 0, sizeof(s_samplerStateValid));
+    s_cachedDevice = nullptr;
+}
+
+static void PrepareD3D9StateCacheForDevice(IDirect3DDevice9* device) {
+    PrepareD3DStateCacheForDevice(device, s_cachedDevice, [] {
+        InvalidateD3D9StateCaches();
+    });
 }
 
 static HRESULT STDMETHODCALLTYPE Hooked_SetRenderState(IDirect3DDevice9* This, D3DRENDERSTATETYPE State, DWORD Value) {
-    if ((DWORD)State < MAX_RENDER_STATES) {
-        if (s_renderStateValid[State] && s_renderStateCache[State] == Value) {
-            return D3D_OK;
-        }
-        s_renderStateCache[State] = Value;
-        s_renderStateValid[State] = 1;
-    }
-    return Real_SetRenderState(This, State, Value);
+    if ((DWORD)State >= MAX_RENDER_STATES) return Real_SetRenderState(This, State, Value);
+    PrepareD3D9StateCacheForDevice(This);
+    return ApplyCachedD3DState(Value, s_renderStateCache[State], s_renderStateValid[State],
+        [&]() { return Real_SetRenderState(This, State, Value); });
 }
 
 static HRESULT STDMETHODCALLTYPE Hooked_SetTextureStageState(IDirect3DDevice9* This, DWORD Stage, D3DTEXTURESTAGESTATETYPE Type, DWORD Value) {
-    if (Stage < MAX_STAGES && (DWORD)Type < MAX_STAGE_STATES) {
-        if (s_stageStateValid[Stage][Type] && s_stageStateCache[Stage][Type] == Value) {
-            return D3D_OK;
-        }
-        s_stageStateCache[Stage][Type] = Value;
-        s_stageStateValid[Stage][Type] = 1;
+    if (Stage >= MAX_STAGES || (DWORD)Type >= MAX_STAGE_STATES) {
+        return Real_SetTextureStageState(This, Stage, Type, Value);
     }
-    return Real_SetTextureStageState(This, Stage, Type, Value);
+    PrepareD3D9StateCacheForDevice(This);
+    return ApplyCachedD3DState(Value, s_stageStateCache[Stage][Type], s_stageStateValid[Stage][Type],
+        [&]() { return Real_SetTextureStageState(This, Stage, Type, Value); });
 }
 
 static HRESULT STDMETHODCALLTYPE Hooked_SetSamplerState(IDirect3DDevice9* This, DWORD Sampler, D3DSAMPLERSTATETYPE Type, DWORD Value) {
-    if (Sampler < MAX_SAMPLERS && (DWORD)Type < MAX_SAMPLER_STATES) {
-        if (s_samplerStateValid[Sampler][Type] && s_samplerStateCache[Sampler][Type] == Value) {
-            return D3D_OK;
-        }
-        s_samplerStateCache[Sampler][Type] = Value;
-        s_samplerStateValid[Sampler][Type] = 1;
+    if (Sampler >= MAX_SAMPLERS || (DWORD)Type >= MAX_SAMPLER_STATES) {
+        return Real_SetSamplerState(This, Sampler, Type, Value);
     }
-    return Real_SetSamplerState(This, Sampler, Type, Value);
+    PrepareD3D9StateCacheForDevice(This);
+    return ApplyCachedD3DState(Value, s_samplerStateCache[Sampler][Type], s_samplerStateValid[Sampler][Type],
+        [&]() { return Real_SetSamplerState(This, Sampler, Type, Value); });
 }
 
 static HRESULT STDMETHODCALLTYPE Hooked_Reset(IDirect3DDevice9* This, D3DPRESENT_PARAMETERS* pPresentationParameters) {
@@ -207,8 +209,38 @@ static HRESULT WINAPI Hooked_D3DXCreateTextureFromFileExA(
     );
 }
 
+static bool CreateEnableDeviceHook(void* target, LPVOID detour, LPVOID* original, void** installedTarget) {
+    if (!target || MH_CreateHook(target, detour, original) != MH_OK) return false;
+    if (MH_EnableHook(target) != MH_OK) {
+        MH_RemoveHook(target);
+        *original = nullptr;
+        return false;
+    }
+    *installedTarget = target;
+    return true;
+}
+
+static void RemoveDeviceStateFilterHooks() {
+    for (void*& target : s_deviceHookTargets) {
+        if (!target) continue;
+        MH_DisableHook(target);
+        MH_RemoveHook(target);
+        target = nullptr;
+    }
+    Real_SetRenderState = nullptr;
+    Real_SetTextureStageState = nullptr;
+    Real_SetSamplerState = nullptr;
+    Real_Reset = nullptr;
+    s_deviceFilterInstalled = false;
+    InvalidateD3D9StateCaches();
+}
+
 static void InstallDeviceStateFilter(IDirect3DDevice9* pDevice) {
-    if (s_deviceFilterInstalled || !pDevice) return;
+    if (!pDevice) return;
+    ResetD3DStateCacheForNewDevice(pDevice, s_cachedDevice, [] {
+        InvalidateD3D9StateCaches();
+    });
+    if (s_deviceFilterInstalled) return;
 
     void** vtbl = *(void***)pDevice;
     if (!vtbl) return;
@@ -218,19 +250,22 @@ static void InstallDeviceStateFilter(IDirect3DDevice9* pDevice) {
     // 67: SetTextureStageState
     // 69: SetSamplerState
     // 16: Reset
-    if (MH_CreateHook(vtbl[57], (LPVOID)Hooked_SetRenderState, (LPVOID*)&Real_SetRenderState) == MH_OK) {
-        MH_EnableHook(vtbl[57]);
-    }
-    if (MH_CreateHook(vtbl[67], (LPVOID)Hooked_SetTextureStageState, (LPVOID*)&Real_SetTextureStageState) == MH_OK) {
-        MH_EnableHook(vtbl[67]);
-    }
-    if (MH_CreateHook(vtbl[69], (LPVOID)Hooked_SetSamplerState, (LPVOID*)&Real_SetSamplerState) == MH_OK) {
-        MH_EnableHook(vtbl[69]);
-    }
-    if (MH_CreateHook(vtbl[16], (LPVOID)Hooked_Reset, (LPVOID*)&Real_Reset) == MH_OK) {
-        MH_EnableHook(vtbl[16]);
+    const bool installed =
+        CreateEnableDeviceHook(vtbl[57], (LPVOID)Hooked_SetRenderState,
+                               (LPVOID*)&Real_SetRenderState, &s_deviceHookTargets[0]) &&
+        CreateEnableDeviceHook(vtbl[67], (LPVOID)Hooked_SetTextureStageState,
+                               (LPVOID*)&Real_SetTextureStageState, &s_deviceHookTargets[1]) &&
+        CreateEnableDeviceHook(vtbl[69], (LPVOID)Hooked_SetSamplerState,
+                               (LPVOID*)&Real_SetSamplerState, &s_deviceHookTargets[2]) &&
+        CreateEnableDeviceHook(vtbl[16], (LPVOID)Hooked_Reset,
+                               (LPVOID*)&Real_Reset, &s_deviceHookTargets[3]);
+    if (!installed) {
+        RemoveDeviceStateFilterHooks();
+        Log("G3O", "Direct3D 9 state filter not installed: a required hook failed.");
+        return;
     }
 
+    InvalidateD3D9StateCaches();
     s_deviceFilterInstalled = true;
     Log("G3O", "Direct3D 9 State Redundancy Filter installed on IDirect3DDevice9.");
 }
@@ -294,6 +329,7 @@ void InitializeD3D9Optimizer() {
 }
 
 void ShutdownD3D9Optimizer() {
+    RemoveDeviceStateFilterHooks();
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
     if (hEngine) {
         void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");

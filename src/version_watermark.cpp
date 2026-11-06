@@ -1,3 +1,4 @@
+#include "g3o_build_info.h"
 #include "version_watermark.h"
 #include <windows.h>
 #include <cwchar>
@@ -22,7 +23,7 @@ static void __fastcall Hooked_SetWindowTextA(void* pThis, void* /*edx*/, void* p
             if (wstr[0] != L'\0' && !wcsstr(wstr, L"G3O")) {
                 if ((iswdigit(wstr[0]) && wcsstr(wstr, L"1.")) || wcsstr(wstr, L"CP ") || wcsstr(wstr, L"1.75")) {
                     wchar_t newBuf[256];
-                    swprintf_s(newBuf, L"%s | G3O v1.6.0", wstr);
+                    swprintf_s(newBuf, L"%s | G3O v%s", wstr, G3O_VERSION_WIDE);
                     Real_bCUnicodeString_Assign(pUnicodeStr, nullptr, newBuf);
                     OutputDebugStringW(L"[Gothic3Optima] Main menu version watermark injected via SetWindowTextA: ");
                     OutputDebugStringW(newBuf);

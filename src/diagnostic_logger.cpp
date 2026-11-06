@@ -1,10 +1,12 @@
 #include "diagnostic_logger.h"
+#include "recent_event_buffer.h"
+#include "diag_output_bridge.h"
+#include "timestamped_path.h"
+#include "g3o_output_path.h"
 #include <minhook.h>
 #include <cstdio>
 #include <cstdarg>
-#include <deque>
-#include <mutex>
-#include <shlobj.h>
+#include <string>
 
 namespace G3O {
 
@@ -12,9 +14,12 @@ static CRITICAL_SECTION s_logCs;
 static bool s_csInitialized = false;
 static FILE* s_logFile = nullptr;
 static char s_logPath[MAX_PATH] = { 0 };
-static std::deque<std::string> s_recentLogs;
-static const size_t MAX_RECENT_LOGS = 256;
+static RecentEventBuffer<kRecentLogEventCount, kRecentLogEventBytes> s_recentEvents;
 static thread_local bool s_inLogger = false;
+static thread_local bool s_forwardingOriginalDiagOutput = false;
+static volatile LONG s_logPathSequence = 0;
+static bool s_outputDebugStringHookInstalled = false;
+static bool s_diagOutputHookInstalled = false;
 
 typedef void (WINAPI* OutputDebugStringA_t)(LPCSTR);
 static OutputDebugStringA_t s_origOutputDebugStringA = nullptr;
@@ -29,25 +34,31 @@ static void EnsureCS() {
     }
 }
 
+static bool TryLogDirectory(const char* directory) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const unsigned long sequence = static_cast<unsigned long>(InterlockedIncrement(&s_logPathSequence));
+        if (!BuildTimestampedFilePath(s_logPath, sizeof(s_logPath), directory,
+                                      "G3O_diagnostic", "log", st,
+                                      GetCurrentProcessId(), GetCurrentThreadId(), sequence)) {
+            return false;
+        }
+        FILE* probe = fopen(s_logPath, "a");
+        if (probe) {
+            fclose(probe);
+            return true;
+        }
+    }
+    s_logPath[0] = '\0';
+    return false;
+}
+
 static void DetermineLogPath() {
-    // Try game folder first
-    char exePath[MAX_PATH] = { 0 };
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    char* lastSlash = strrchr(exePath, '\\');
-    if (lastSlash) *(lastSlash + 1) = '\0';
-
-    snprintf(s_logPath, sizeof(s_logPath), "%sG3O_diagnostic.log", exePath);
-    FILE* testF = fopen(s_logPath, "a");
-    if (testF) {
-        fclose(testF);
-        return;
-    }
-
-    // Fallback to Documents\Gothic3
-    char docPath[MAX_PATH] = { 0 };
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, docPath))) {
-        snprintf(s_logPath, sizeof(s_logPath), "%s\\Gothic3\\G3O_diagnostic.log", docPath);
-    }
+    if (s_logPath[0] != '\0') return;
+    char directory[MAX_PATH] = {};
+    if (!EnsureG3OOutputDirectory(directory, sizeof(directory))) return;
+    TryLogDirectory(directory);
 }
 
 const char* GetDiagnosticLogPath() {
@@ -62,7 +73,7 @@ void InitializeDiagnosticLogger() {
     DetermineLogPath();
 
     EnterCriticalSection(&s_logCs);
-    s_logFile = fopen(s_logPath, "w");
+    s_logFile = fopen(s_logPath, "a");
     if (s_logFile) {
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -70,6 +81,7 @@ void InitializeDiagnosticLogger() {
         fprintf(s_logFile, " Gothic 3 Optima (G3O) Diagnostic Log\n");
         fprintf(s_logFile, " Started: %04d-%02d-%02d %02d:%02d:%02d.%03d\n",
                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        fprintf(s_logFile, " PID: %lu, TID: %lu\n", GetCurrentProcessId(), GetCurrentThreadId());
         fprintf(s_logFile, "==================================================================\n\n");
         fflush(s_logFile);
     }
@@ -116,10 +128,7 @@ void LogRaw(const char* message) {
         fullLine += '\n';
     }
 
-    if (s_recentLogs.size() >= MAX_RECENT_LOGS) {
-        s_recentLogs.pop_front();
-    }
-    s_recentLogs.push_back(fullLine);
+    s_recentEvents.Append(fullLine.c_str(), fullLine.size());
 
     static int s_flushCounter = 0;
     if (s_logFile) {
@@ -153,14 +162,22 @@ void Log(const char* tag, const char* fmt, ...) {
     LogRaw(fullMsg);
 }
 
-void GetRecentLogs(std::vector<std::string>& outLogs) {
-    EnsureCS();
-    EnterCriticalSection(&s_logCs);
-    outLogs.assign(s_recentLogs.begin(), s_recentLogs.end());
-    LeaveCriticalSection(&s_logCs);
+std::size_t CopyRecentLogs(char* outBuffer, std::size_t capacity) {
+    return s_recentEvents.CopyTo(outBuffer, capacity);
+}
+
+void OutputCrashReportToDebugger(const char* report) {
+    if (report && s_origOutputDebugStringA && IsDebuggerPresent()) {
+        s_origOutputDebugStringA(report);
+    }
 }
 
 static void WINAPI HookedOutputDebugStringA(LPCSTR lpOutputString) {
+    if (ForwardNestedDiagOutputDebugString(s_forwardingOriginalDiagOutput,
+                                           s_origOutputDebugStringA, lpOutputString,
+                                           IsDebuggerPresent() != FALSE)) {
+        return;
+    }
     if (lpOutputString && lpOutputString[0] != '\0') {
         // Strip trailing newline for clean formatting
         char clean[1024];
@@ -184,8 +201,9 @@ static void WINAPI HookedOutputDebugStringA(LPCSTR lpOutputString) {
 }
 
 static void __cdecl HookedDiagOutput(const char* fmt, ...) {
+    const DWORD entryLastError = GetLastError();
+    char buffer[2048] = {};
     if (fmt) {
-        char buffer[2048];
         va_list args;
         va_start(args, fmt);
         vsnprintf(buffer, sizeof(buffer), fmt, args);
@@ -197,29 +215,43 @@ static void __cdecl HookedDiagOutput(const char* fmt, ...) {
             buffer[len - 1] = '\0';
             len--;
         }
+        ForwardDiagOutput(s_origDiagOutput, buffer, s_forwardingOriginalDiagOutput);
         Log("EngineDiag", "%s", buffer);
     }
+    SetLastError(entryLastError);
 }
 
-void HookLoggingFunctions() {
-    // 1. Hook OutputDebugStringA (captures DXVK, scripts, Windows debug)
+void HookOutputDebugStringA() {
+    if (s_outputDebugStringHookInstalled) return;
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
         void* pODS = (void*)GetProcAddress(hKernel32, "OutputDebugStringA");
         if (pODS) {
-            MH_CreateHook(pODS, (void*)&HookedOutputDebugStringA, (void**)&s_origOutputDebugStringA);
-            MH_EnableHook(pODS);
+            const MH_STATUS createStatus = MH_CreateHook(
+                pODS, (void*)&HookedOutputDebugStringA, (void**)&s_origOutputDebugStringA);
+            if (createStatus == MH_OK || createStatus == MH_ERROR_ALREADY_CREATED) {
+                const MH_STATUS enableStatus = MH_EnableHook(pODS);
+                s_outputDebugStringHookInstalled = enableStatus == MH_OK || enableStatus == MH_ERROR_ENABLED;
+            }
         }
     }
+}
 
-    // 2. Hook SharedBase.dll DiagOutput if available
+void HookEngineDiagOutput() {
+    if (s_diagOutputHookInstalled) return;
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
     if (hSharedBase) {
         void* pDiag = (void*)GetProcAddress(hSharedBase, "?DiagOutput@@YAXPBDZZ");
         if (pDiag) {
-            MH_CreateHook(pDiag, (void*)&HookedDiagOutput, (void**)&s_origDiagOutput);
-            MH_EnableHook(pDiag);
-            Log("G3O", "Hooked SharedBase.dll!DiagOutput successfully.");
+            const MH_STATUS createStatus = MH_CreateHook(
+                pDiag, (void*)&HookedDiagOutput, (void**)&s_origDiagOutput);
+            if (createStatus == MH_OK || createStatus == MH_ERROR_ALREADY_CREATED) {
+                const MH_STATUS enableStatus = MH_EnableHook(pDiag);
+                s_diagOutputHookInstalled = enableStatus == MH_OK || enableStatus == MH_ERROR_ENABLED;
+                if (s_diagOutputHookInstalled) {
+                    Log("G3O", "Hooked SharedBase.dll!DiagOutput successfully.");
+                }
+            }
         }
     }
 }

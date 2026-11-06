@@ -1,4 +1,5 @@
 #include "vfs_cache_optimizer.h"
+#include "vfs_cache_core.h"
 #include "diagnostic_logger.h"
 #include <minhook.h>
 #include <windows.h>
@@ -67,26 +68,10 @@ static inline uint64_t HashNormalizedPath(const char* str, size_t len) {
 // -----------------------------------------------------------------------------
 // 16,384 buckets * 4 slots = 65,536 cache entries (~7 MB total footprint)
 static const size_t VFS_BUCKET_COUNT = 16384;
-static const size_t VFS_BUCKET_MASK = VFS_BUCKET_COUNT - 1;
-
-struct VFSSlot {
-    uint64_t hash;
-    const void* result;
-    char path[96];
-};
-
-struct VFSBucket {
-    VFSSlot slots[4];
-    uint8_t nextVictim;
-};
-
-static VFSBucket s_buckets[VFS_BUCKET_COUNT];
-static SRWLOCK s_cacheLock = SRWLOCK_INIT;
+static VfsLookupCache<VFS_BUCKET_COUNT> s_cache;
 
 void ClearVFSCache() {
-    AcquireSRWLockExclusive(&s_cacheLock);
-    memset(s_buckets, 0, sizeof(s_buckets));
-    ReleaseSRWLockExclusive(&s_cacheLock);
+    s_cache.Clear();
 }
 
 // -----------------------------------------------------------------------------
@@ -112,17 +97,9 @@ static const void* __fastcall Hooked_GetDirCacheEntry(void* pThis, void* /*edx*/
     }
 
     uint64_t hash = HashNormalizedPath(path, len);
-    size_t bucketIdx = (size_t)(hash & VFS_BUCKET_MASK);
-    VFSBucket& bucket = s_buckets[bucketIdx];
-
-    // Read lock-free for fast path
-    for (int i = 0; i < 4; ++i) {
-        if (bucket.slots[i].result != nullptr && bucket.slots[i].hash == hash) {
-            if (_stricmp(bucket.slots[i].path, path) == 0) {
-                InterlockedIncrement(&s_vfsCacheHits);
-                return bucket.slots[i].result;
-            }
-        }
+    if (const void* cached = s_cache.Find(hash, path, len)) {
+        InterlockedIncrement(&s_vfsCacheHits);
+        return cached;
     }
 
     // Cache miss: Query original engine function
@@ -132,15 +109,7 @@ static const void* __fastcall Hooked_GetDirCacheEntry(void* pThis, void* /*edx*/
     // CRITICAL: Only cache POSITIVE findings. NEVER cache nullptr,
     // so scripts and dynamically generated files are never falsely hidden.
     if (res != nullptr) {
-        AcquireSRWLockExclusive(&s_cacheLock);
-        uint8_t slotIdx = bucket.nextVictim & 3;
-        bucket.nextVictim = (slotIdx + 1) & 3;
-
-        bucket.slots[slotIdx].hash = hash;
-        bucket.slots[slotIdx].result = res;
-        strncpy(bucket.slots[slotIdx].path, path, sizeof(bucket.slots[slotIdx].path) - 1);
-        bucket.slots[slotIdx].path[sizeof(bucket.slots[slotIdx].path) - 1] = '\0';
-        ReleaseSRWLockExclusive(&s_cacheLock);
+        s_cache.Store(hash, path, len, res);
     }
 
     return res;
@@ -152,39 +121,74 @@ static void __fastcall Hooked_RemoveFromDirCache(void* pThis, void* /*edx*/, con
 }
 
 bool InitializeVFSCacheOptimizer() {
-    HMODULE hFS = GetModuleHandleA("FileSystem.dll");
-    if (!hFS) return false;
+    if (s_targetGetDirCacheEntry && s_targetRemoveFromDirCache &&
+        Real_GetDirCacheEntry && Real_RemoveFromDirCache) {
+        return true;
+    }
 
-    ClearVFSCache();
+    HMODULE hFS = GetModuleHandleA("FileSystem.dll");
+    if (!hFS) {
+        Log("G3O", "VFS Cache Optimizer: FileSystem.dll is not loaded; cache remains disabled.");
+        return false;
+    }
 
     void* pGetDir = (void*)GetProcAddress(hFS, "?GetDirCacheEntry@CFFFileSystemModule@@ABEPBUCFFDirCacheEntry@@ABV?$basic_string@DVallocator@eastl@@@eastl@@@Z");
-    if (pGetDir) {
-        s_targetGetDirCacheEntry = pGetDir;
-        MH_CreateHook(pGetDir, (LPVOID)Hooked_GetDirCacheEntry, (LPVOID*)&Real_GetDirCacheEntry);
-        MH_EnableHook(pGetDir);
-        Log("G3O", "VFS Cache Optimizer: Hooked FileSystem.dll!GetDirCacheEntry (0x%p) with 64K O(1) verified hash cache.", pGetDir);
-    }
-
     void* pRemove = (void*)GetProcAddress(hFS, "?RemoveFromDirCache@CFFFileSystemModule@@AAEXABV?$basic_string@DVallocator@eastl@@@eastl@@_N1@Z");
-    if (pRemove) {
-        s_targetRemoveFromDirCache = pRemove;
-        MH_CreateHook(pRemove, (LPVOID)Hooked_RemoveFromDirCache, (LPVOID*)&Real_RemoveFromDirCache);
-        MH_EnableHook(pRemove);
+    if (!pGetDir || !pRemove) {
+        Log("G3O", "VFS Cache Optimizer: required lookup/invalidation export missing; cache remains disabled.");
+        return false;
     }
 
-    Log("G3O", "VFS Cache Optimizer initialized successfully.");
+    MH_STATUS getStatus = MH_CreateHook(pGetDir, (LPVOID)Hooked_GetDirCacheEntry,
+                                        (LPVOID*)&Real_GetDirCacheEntry);
+    if (getStatus != MH_OK) {
+        Log("G3O", "VFS Cache Optimizer: lookup hook creation failed (code %d).", (int)getStatus);
+        return false;
+    }
+
+    MH_STATUS removeStatus = MH_CreateHook(pRemove, (LPVOID)Hooked_RemoveFromDirCache,
+                                           (LPVOID*)&Real_RemoveFromDirCache);
+    if (removeStatus != MH_OK) {
+        MH_RemoveHook(pGetDir);
+        Real_GetDirCacheEntry = nullptr;
+        Log("G3O", "VFS Cache Optimizer: invalidation hook creation failed (code %d).", (int)removeStatus);
+        return false;
+    }
+
+    getStatus = MH_EnableHook(pGetDir);
+    removeStatus = getStatus == MH_OK ? MH_EnableHook(pRemove) : getStatus;
+    if (getStatus != MH_OK || removeStatus != MH_OK) {
+        MH_DisableHook(pGetDir);
+        MH_DisableHook(pRemove);
+        MH_RemoveHook(pGetDir);
+        MH_RemoveHook(pRemove);
+        Real_GetDirCacheEntry = nullptr;
+        Real_RemoveFromDirCache = nullptr;
+        Log("G3O", "VFS Cache Optimizer: hook activation failed (lookup=%d, invalidation=%d).",
+            (int)getStatus, (int)removeStatus);
+        return false;
+    }
+
+    s_targetGetDirCacheEntry = pGetDir;
+    s_targetRemoveFromDirCache = pRemove;
+    ClearVFSCache();
+    Log("G3O", "VFS Cache Optimizer enabled with lookup and invalidation hooks.");
     return true;
 }
 
 void ShutdownVFSCacheOptimizer() {
     if (s_targetGetDirCacheEntry) {
         MH_DisableHook(s_targetGetDirCacheEntry);
+        MH_RemoveHook(s_targetGetDirCacheEntry);
         s_targetGetDirCacheEntry = nullptr;
     }
     if (s_targetRemoveFromDirCache) {
         MH_DisableHook(s_targetRemoveFromDirCache);
+        MH_RemoveHook(s_targetRemoveFromDirCache);
         s_targetRemoveFromDirCache = nullptr;
     }
+    Real_GetDirCacheEntry = nullptr;
+    Real_RemoveFromDirCache = nullptr;
     ClearVFSCache();
 }
 

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(Gothic3Optima VERSION 1.6.0 LANGUAGES C CXX)
 
+configure_file(src/g3o_build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/g3o_build_info.h @ONLY)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -15,8 +17,7 @@ if(MSVC)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /MAP:dinput8.map /DEBUG")
 endif()
 
-# The PUP-compatible core does not replace the engine's caches, threading, audio,
-# file system, save writer or GPU capability checks.
+# G3O is a dinput8 proxy; optional hooks and optimizations are controlled by G3O.ini.
 add_subdirectory(third_party/minhook)
 
 set(LIBDEFLATE_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
@@ -34,9 +35,15 @@ add_library(dinput8 SHARED
     src/version_watermark.h
     src/diagnostic_logger.cpp
     src/diagnostic_logger.h
+    src/recent_event_buffer.h
+    src/fixed_text_buffer.h
     src/crash_handler.cpp
     src/crash_handler.h
     src/engine_fatal_report.h
+    src/applied_config_snapshot.h
+    src/timestamped_path.h
+    src/g3o_output_path.h
+    src/diag_output_bridge.h
     src/borderless_window.cpp
     src/borderless_window.h
     src/camera_controller.cpp
@@ -45,12 +52,19 @@ add_library(dinput8 SHARED
     src/config_manager.h
     src/math_simd_optimizer.cpp
     src/math_simd_optimizer.h
+    src/sharedbase_string_compare.h
+    src/window_input_policy.h
+    src/d3d_state_cache.h
+    src/pak_cache_budget.h
+    src/pak_read_at.h
+    src/savegame_profiler_policy.h
     src/d3d9_hook.cpp
     src/d3d9_hook.h
     src/profiler.cpp
     src/profiler.h
     src/cpu_topology.cpp
     src/cpu_topology.h
+    src/cpu_affinity_policy.h
     src/vegetation_optimizer.cpp
     src/vegetation_optimizer.h
     src/decompressor_avx2.c
@@ -67,6 +81,8 @@ add_library(dinput8 SHARED
     src/load_sampler.h
     src/vfs_cache_optimizer.cpp
     src/vfs_cache_optimizer.h
+    src/vfs_cache_core.h
+    src/config_value_parser.h
     src/pak_tracer.cpp
     src/pak_tracer.h
 )
@@ -78,16 +94,20 @@ endif()
 
 target_include_directories(dinput8 PRIVATE
     src
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
     third_party/minhook/include
     third_party/libdeflate
     third_party/libdeflate/lib
 )
+
+target_compile_definitions(dinput8 PRIVATE G3O_BUILD_CONFIGURATION=\"$<CONFIG>\")
 
 target_link_libraries(dinput8 PRIVATE
     minhook
     libdeflate_static
     dbghelp
     psapi
+    version
     winmm
 )
 

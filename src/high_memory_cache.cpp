@@ -1,5 +1,6 @@
 #include "high_memory_cache.h"
 #include "heavens_gate.h"
+#include "g3o_output_path.h"
 #include <windows.h>
 #include <vector>
 #include <string>
@@ -8,6 +9,20 @@
 #include <algorithm>
 
 namespace HighMemoryCache {
+
+    static char s_streamingLogPath[MAX_PATH] = { 0 };
+
+    static void InitializeStreamingLogPath() {
+        char directory[MAX_PATH] = {};
+        if (G3O::EnsureG3OOutputDirectory(directory, sizeof(directory))) {
+            G3O::BuildG3OOutputFilePath(s_streamingLogPath, sizeof(s_streamingLogPath),
+                                        directory, "G3O_Streaming.log");
+        }
+    }
+
+    static FILE* OpenStreamingLog() {
+        return s_streamingLogPath[0] ? fopen(s_streamingLogPath, "a") : nullptr;
+    }
 
     struct HighCacheEntry {
         uint64_t    bufferOffset;
@@ -40,6 +55,8 @@ namespace HighMemoryCache {
             InitializeCriticalSection(&s_cacheLock);
             s_lockInitialized = true;
         }
+
+        if (!s_streamingLogPath[0]) InitializeStreamingLogPath();
 
         if (s_highMemoryBase != 0) {
             return true;
@@ -78,7 +95,7 @@ namespace HighMemoryCache {
             s_capacityBytes / (1024ULL * 1024ULL), s_highMemoryBase);
         OutputDebugStringA(buf);
 
-        FILE* fLog = fopen("G3O_Streaming.log", "a");
+        FILE* fLog = OpenStreamingLog();
         if (fLog) {
             fprintf(fLog, "High Memory Shadow Cache: Allocated %llu MB at 0x%llX (ABOVE 4 GB boundary)\n",
                 s_capacityBytes / (1024ULL * 1024ULL), s_highMemoryBase);
@@ -170,7 +187,7 @@ namespace HighMemoryCache {
             (double)s_capacityBytes / (1024.0 * 1024.0));
         OutputDebugStringA(logBuf);
 
-        FILE* fArchLog = fopen("G3O_Streaming.log", "a");
+        FILE* fArchLog = OpenStreamingLog();
         if (fArchLog) {
             fprintf(fArchLog, "High Memory Cache: Cached '%s' (%.2f MB, total High RAM: %.2f / %.2f MB)\n",
                 filePath, (double)fileSize / (1024.0 * 1024.0),
@@ -232,7 +249,7 @@ namespace HighMemoryCache {
             LeaveCriticalSection(&s_cacheLock);
 
             if (hits % 2000 == 1) {
-                FILE* fLog = fopen("G3O_Streaming.log", "a");
+                FILE* fLog = OpenStreamingLog();
                 if (fLog) {
                     fprintf(fLog, "High Memory Streaming stats: %u RAM reads, %.2f MB read from 64-bit RAM\n",
                         hits, (double)totalRead / (1024.0 * 1024.0));

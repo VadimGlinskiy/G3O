@@ -33,11 +33,11 @@ struct Config {
     bool writeCrashLog = true;
 
     // [Performance]
-    bool enableSIMDFrustumCulling = true;
+    bool enableSharedBaseOptimizations = true;
     bool enableFastPakDecompressor = true;
-    bool enablePropertyCache = true;
+    bool enablePropertyCache = false;
     bool enablePakPrefetch = true;
-    bool skipRedundantPreLoadActivate = false;
+
     bool enableD3D9StateFilter = false;
     bool enableFastTextureLoader = true;
     bool enableVegetationOptimizer = true;
@@ -64,6 +64,7 @@ struct Config {
 
 const Config& GetConfig();
 void LoadConfig();
+void LogLoadedConfig();
 UINT ParseKeyCode(const std::string& keyStr, UINT defaultKey = 0);
 std::string KeyCodeToString(UINT vkCode);
 

@@ -1,10 +1,14 @@
 #include "savegame_profiler.h"
 #include "diagnostic_logger.h"
 #include "config_manager.h"
+#include "savegame_profiler_policy.h"
+#include "timestamped_path.h"
+#include "g3o_output_path.h"
 #include "fast_pak_decompressor.h"
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include "pak_tracer.h"
+#include "pak_read_at.h"
 #include <minhook.h>
 #include <windows.h>
 #include <stdio.h>
@@ -18,6 +22,7 @@
 namespace G3O {
 
 static std::string s_lastSaveName = "QuickSave";
+static volatile LONG s_loadProfilerPathSequence = 0;
 
 static LARGE_INTEGER s_freq = {};
 static bool s_qpcFrequencyInitialized = false;
@@ -511,26 +516,28 @@ static void ShutdownMetricsHooks() {
 
 
 static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead, LPOVERLAPPED ov) {
-    if (!s_isLoadActive) {
+    if (IsInternalPakRead()) {
         return Real_ReadFile(h, buf, n, pRead, ov);
     }
-    // Step 3: Check if block is pre-decompressed in cache (bypass disk read completely!)
-    if (ov && pRead && n > 0 && buf && PakTracer_TryBypassReadFile(h, buf, n, pRead, ov)) {
-        return TRUE;
+    const Config& cfg = GetConfig();
+    if (!s_isLoadActive) {
+        return Real_ReadFile(h, buf, n, pRead, ov);
     }
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     BOOL r = Real_ReadFile(h, buf, n, pRead, ov);
     QueryPerformanceCounter(&t1);
-    if (pRead && r) {
-        InterlockedExchangeAdd64(&s_readBytes, (LONG64)*pRead);
-        PakTracer_RecordRead(h, buf, n, *pRead, ov);
-    } else {
-        PakTracer_RecordRead(h, buf, n, 0, ov);
+    if (cfg.enableSavegameAudit) {
+        if (pRead && r) {
+            InterlockedExchangeAdd64(&s_readBytes, (LONG64)*pRead);
+        }
+        InterlockedIncrement(&s_readCalls);
+        const LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+        InterlockedExchangeAdd64(&s_readTimeUs, us);
     }
-    InterlockedIncrement(&s_readCalls);
-    LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
-    InterlockedExchangeAdd64(&s_readTimeUs, us);
+    if (ShouldTracePakPrefetch(cfg)) {
+        PakTracer_RecordRead(h, buf, n, (pRead && r) ? *pRead : 0, ov);
+    }
     return r;
 }
 
@@ -631,8 +638,6 @@ static void LogLoadReport(double totalSec) {
 
     double deactSec = (double)s_deactivateTimeUs / 1000000.0;
     double secTotalSec = (double)s_sectorActivateTotalUs / 1000000.0;
-    uint32_t bypassedReads = PakTracer_GetBypassedReads();
-    double bypassedMb = (double)PakTracer_GetBypassedReadBytes() / (1024.0 * 1024.0);
     double worldActElemSec = (double)s_worldActivateElemTimeUs / 1000000.0;
     double roiSec = (double)s_forceROIUpdateTimeUs / 1000000.0;
 
@@ -707,8 +712,7 @@ static void LogLoadReport(double totalSec) {
     Log("G3O", "Subsystem Activity:");
     Log("G3O", "  - Disk ReadFile I/O:              %6.3f s (%5.1f%%) [%ld calls, %.2f MB read, avg speed %.1f MB/s]",
         rSec, totalSec > 0 ? (rSec * 100.0 / totalSec) : 0.0, rc, rbMb, rSec > 0 ? (rbMb / rSec) : 0.0);
-    Log("G3O", "  - ReadFile Disk Bypasses:         %6.3f s saved [%u calls, %.2f MB zero disk I/O from cache]",
-        (rbMb > 0.0 && rSec > 0.0) ? (bypassedMb / (rbMb / rSec)) : 0.0, bypassedReads, bypassedMb);
+
     Log("G3O", "  - Pak Decompress (libdeflate):    %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB]",
         pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0.0, pakCount, pakInMb, pakOutMb);
     Log("G3O", "  - Save Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]",
@@ -718,7 +722,25 @@ static void LogLoadReport(double totalSec) {
 
     Log("G3O", "================================================================================");
 
-    FILE* fp = IsTelemetryActive() ? fopen("G3O_LoadProfiler.log", "w") : nullptr;
+    FILE* fp = nullptr;
+    if (IsTelemetryActive()) {
+        char directory[MAX_PATH] = {};
+        char path[MAX_PATH] = {};
+        SYSTEMTIME fileTime;
+        GetLocalTime(&fileTime);
+        const unsigned long sequence = static_cast<unsigned long>(
+            InterlockedIncrement(&s_loadProfilerPathSequence));
+        if (EnsureG3OOutputDirectory(directory, sizeof(directory)) &&
+            BuildTimestampedFilePath(path, sizeof(path), directory, "G3O_LoadProfiler", "log",
+                                     fileTime, GetCurrentProcessId(), GetCurrentThreadId(), sequence)) {
+            fp = fopen(path, "w");
+        }
+        if (fp) {
+            Log("G3O", "Load profile output: %s", path);
+        } else {
+            Log("G3O", "Could not create load profile in G3O.");
+        }
+    }
     if (fp) {
         fprintf(fp, "================================================================================\n");
         fprintf(fp, "[LoadProfile] === DETAILED SAVEGAME LOAD BENCHMARK (Total: %.3f s) ===\n", totalSec);
@@ -773,8 +795,7 @@ static void LogLoadReport(double totalSec) {
         fprintf(fp, "Subsystem Activity:\n");
         fprintf(fp, "  - Disk ReadFile I/O:              %6.3f s (%5.1f%%) [%ld calls, %.2f MB read, speed %.1f MB/s]\n",
             rSec, totalSec > 0 ? (rSec * 100.0 / totalSec) : 0.0, rc, rbMb, rSec > 0 ? (rbMb / rSec) : 0.0);
-        fprintf(fp, "  - ReadFile Disk Bypasses:         %6.3f s saved [%u calls, %.2f MB zero disk I/O from cache]\n",
-            (rbMb > 0.0 && rSec > 0.0) ? (bypassedMb / (rbMb / rSec)) : 0.0, bypassedReads, bypassedMb);
+
         fprintf(fp, "  - Pak Decompress (libdeflate):    %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB]\n",
             pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0.0, pakCount, pakInMb, pakOutMb);
         fprintf(fp, "  - Save Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]\n",
@@ -927,13 +948,16 @@ typedef bool (__thiscall* HUDLoadGame_t)(void* pThis, void* a, void* b);
 static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 
 static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, void* b) {
+    const Config& cfg = GetConfig();
     s_isLoadActive = true;
     s_layerAuditMetrics = {};
     s_inPreLoad = true;
     s_skippedPreLoadActivate = false;
     QueryPerformanceCounter(&s_tHUDStart);
-    Log("G3O", "================================================================================");
-    Log("G3O", "[LoadProfile] >>> SAVEGAME LOAD INITIATED (gCHUDFileManager::LoadGame) >>>");
+    if (ShouldCollectSavegameAudit(cfg) || cfg.enableProfiler) {
+        Log("G3O", "================================================================================");
+        Log("G3O", "[LoadProfile] >>> SAVEGAME LOAD INITIATED (gCHUDFileManager::LoadGame) >>>");
+    }
 
     ResetDecompTelemetry();
     ResetPropertyCacheTelemetry();
@@ -967,13 +991,17 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
         LeaveCriticalSection(&s_sectorTimingCs);
     }
 
-    if (GetConfig().enableProfiler) {
+    if (cfg.enableProfiler) {
         StartSampler();
     }
-    PakTracer_OnLoadStart(s_lastSaveName.c_str());
+    if (ShouldTracePakPrefetch(cfg)) {
+        PakTracer_OnLoadStart(s_lastSaveName.c_str());
+    }
     bool r = Real_HUDLoadGame(pThis, a, b);
-    PakTracer_OnLoadEnd();
-    if (GetConfig().enableProfiler) {
+    if (ShouldTracePakPrefetch(cfg)) {
+        PakTracer_OnLoadEnd();
+    }
+    if (cfg.enableProfiler) {
         StopSamplerAndReport();
     }
 
@@ -985,7 +1013,9 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     }
     double totalSec = (double)(t1.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
 
-    LogLoadReport(totalSec);
+    if (ShouldCollectSavegameAudit(cfg)) {
+        LogLoadReport(totalSec);
+    }
     return r;
 }
 
@@ -1393,26 +1423,32 @@ static void* s_targetWorldActivate = nullptr;
 static void* s_targetBuildStatic = nullptr;
 
 bool InitializeSavegameProfiler() {
-    if (!GetConfig().enableSavegameAudit && !GetConfig().enableProfiler) {
-        Log("G3O", "Savegame Profiler disabled via config (EnableSavegameAudit=false).");
+    const Config& cfg = GetConfig();
+    if (cfg.enablePakPrefetch && !cfg.enableFastPakDecompressor) {
+        Log("G3O", "[PakCache] Trace-based pre-decompression requires EnableFastPakDecompressor=true; it is disabled.");
+    }
+    if (!ShouldInstallSavegameProfilerHooks(cfg)) {
+        Log("G3O", "Savegame profiler hooks disabled by configuration.");
         return true;
     }
     if (s_freq.QuadPart <= 0) {
         QueryPerformanceFrequency(&s_freq);
     }
-    const bool metricsHooksReady = InitMetricsHooks();
+    const bool metricsHooksReady = cfg.enableSavegameAudit ? InitMetricsHooks() : false;
     if (s_freq.QuadPart <= 0) {
         Log("G3O", "Savegame Profiler initialization aborted: QPC frequency unavailable.");
         return false;
     }
 
-    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
-    if (hK32) {
+    if (cfg.enableSavegameAudit || ShouldTracePakPrefetch(cfg)) {
+        HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+        if (hK32) {
         void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
         if (pRead) {
             s_targetReadFile = pRead;
             MH_CreateHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile);
             MH_EnableHook(pRead);
+        }
         }
     }
 
@@ -1426,6 +1462,7 @@ bool InitializeSavegameProfiler() {
             Log("G3O", "Savegame Profiler: Hooked gCHUDFileManager::LoadGame (0x%p)", pHUD);
         }
 
+        if (cfg.enableSavegameAudit) {
         void* pHeader = (void*)GetProcAddress(hGame, "?GetSaveGameHeader@gCWorld@@QAE?AW4bEResult@@ABVbCString@@AAVgCSaveGameHeader@1@@Z");
         if (pHeader) {
             s_targetHeader = pHeader;
@@ -1550,8 +1587,10 @@ bool InitializeSavegameProfiler() {
             Real_GetDynamicLayerCount = (GetDynamicLayerCount_t)pDynCount;
             Log("G3O", "Savegame Profiler: Found gCSector::GetDynamicLayerCount (0x%p)", pDynCount);
         }
+        }
     }
 
+    if (cfg.enableSavegameAudit) {
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
     if (hEngine) {
         void* pBuild = (void*)GetProcAddress(hEngine, "?BuildStaticHierachy@eCPVSCellItem@@IAEXXZ");
@@ -1578,9 +1617,15 @@ bool InitializeSavegameProfiler() {
         }
 
     }
+    }
 
-    Log("G3O", "Savegame Profiler initialized with sub-phase telemetry (LayerAudit hooks=%s).",
-        metricsHooksReady ? "enabled" : "unavailable");
+    const char* auditHookState = metricsHooksReady ? "enabled" :
+        (cfg.enableSavegameAudit ? "unavailable" : "disabled");
+    Log("G3O", "Savegame hooks initialized (audit=%s, profiler=%s, PAK prefetch=%s, LayerAudit hooks=%s).",
+        cfg.enableSavegameAudit ? "enabled" : "disabled",
+        cfg.enableProfiler ? "enabled" : "disabled",
+        cfg.enablePakPrefetch ? "enabled" : "disabled",
+        auditHookState);
     return true;
 }
 

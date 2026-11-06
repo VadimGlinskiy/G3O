@@ -1,0 +1,8 @@
+#pragma once
+
+#define G3O_VERSION_STRING "@PROJECT_VERSION@"
+#define G3O_VERSION_WIDE L"@PROJECT_VERSION@"
+#define G3O_BUILD_TIMESTAMP __DATE__ " " __TIME__
+#ifndef G3O_BUILD_CONFIGURATION
+#define G3O_BUILD_CONFIGURATION "unknown"
+#endif

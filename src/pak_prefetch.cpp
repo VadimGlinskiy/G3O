@@ -1,6 +1,7 @@
 #include "pak_prefetch.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
+#include "pak_read_at.h"
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -38,7 +39,13 @@ static DWORD WINAPI PrefetchThread(LPVOID) {
                                OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         if (h == INVALID_HANDLE_VALUE) continue;
         DWORD got = 0;
-        while (ReadFile(h, buf, kBuf, &got, nullptr) && got > 0) {
+        for (;;) {
+            BOOL readOk = FALSE;
+            {
+                ScopedInternalPakRead internalRead;
+                readOk = ReadFile(h, buf, kBuf, &got, nullptr);
+            }
+            if (!readOk || got == 0) break;
             total += got;
             Sleep(0); // yield to the game's own loading
         }

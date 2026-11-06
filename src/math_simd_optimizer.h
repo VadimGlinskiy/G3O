@@ -3,7 +3,7 @@
 
 namespace G3O {
 
-void InitializeMathSIMDOptimizer();
-void ShutdownMathSIMDOptimizer();
+void InitializeSharedBaseOptimizations();
+void ShutdownSharedBaseOptimizations();
 
 } // namespace G3O

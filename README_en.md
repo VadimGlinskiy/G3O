@@ -2,21 +2,21 @@
 
 [Русский](README.md)
 
-G3O v1.3.2 is a `dinput8.dll` proxy with a version label in the menu, built-in **Crash Investigator**, and **Diagnostic Logger**. If G3SE is installed, it attempts to load its plugins. The v1.3.0 engine optimizations are absent to avoid overlap with Parallel Universe Patch (PUP). In-game compatibility with PUP has not been tested.
+G3O 1.6.0 is a 32-bit `dinput8.dll` proxy for Gothic 3. It includes borderless-window support, FOV controls, diagnostics, and optional optimization switches. It reads `G3O.ini` beside `Gothic3.exe`. In-game compatibility with PUP has not been tested.
 
-## Diagnostic Features
-- **Crash Investigator:** Catches fatal crashes (Access Violations, Stack Overflows, etc.) before the legacy "Where is the guru?" prompt and accurately blames the faulting module:
-  - Script mods (`scripts\Script_*.dll`);
-  - Third-party overlays (Bandicam `bdcamvk32.dll`, RTSS `RTSSHooks.dll`, Discord, Steam);
-  - Graphics drivers and translation layers (`amdvlk32.dll`, `nvoglv32.dll`, DXVK `d3d9.dll`);
-  - Core engine faults and 32-bit virtual address space exhaustion (>3.6 GB).
-- **Stack Walking & Root-Cause Analysis:** Identifies when a script mod provoked an engine crash higher in the call stack.
-- **Detailed Reports & MiniDumps:** Generates `G3O_CrashReport.log`, a full `.dmp` minidump, and a clear error dialog with actionable recommendations.
-- **Diagnostic Logger:** Records `G3O_diagnostic.log`, capturing engine messages (`DiagOutput`) and system debug output (`OutputDebugStringA`).
+## Diagnostic files
+
+- Crash Investigator catches some fatal engine errors and unhandled exceptions. Reports include module and call-stack details; these can help investigate a crash but do not prove its root cause.
+- `ShowCrashDialog` and `WriteCrashDump` apply to unhandled Win32 exceptions. For the engine's `FatalError` path, G3O writes a text report but does not show this dialog or create a minidump.
+- With `EnableCrashInvestigator=true` and `WriteCrashLog=true`, G3O creates `G3O_CrashReport_*.log`; with `WriteCrashDump=true`, it creates `G3O_Crash_*.dmp`. Names include the date, time, process ID, and thread ID. The report records the dump path and the result of basic dump checks.
+- `EnableProfiler=true` creates `G3O_profile_*.log`; `EnableSavegameAudit=true` enables detailed measurements in `G3O_LoadProfiler_*.log`. The PAK trace cache for a save is named `G3O_PakTrace_<save-name>.csv`; G3O rewrites it during loading when no valid trace exists and matching data is found.
+- `EnableDiagnosticLog=true` enables `G3O_diagnostic_*.log`. `DiagOutput` and `OutputDebugStringA` messages are included when interception is enabled.
+
+G3O diagnostic files are stored directly in `<game folder>\G3O\`, with no nested directories. `G3O.ini` remains beside `Gothic3.exe`. The game folder must be writable; G3O does not fall back to Documents if writing fails.
 
 ## Install
 
-- Extract `dinput8.dll` from `Gothic3Optima-v1.3.2-Core.zip` next to `Gothic3.exe`. Back up any existing `dinput8.dll` first; another mod may own it.
+- Extract `dinput8.dll` from `Gothic3Optima-v1.6.0-Core.zip` next to `Gothic3.exe`. Back up any existing `dinput8.dll` first; another mod may own it.
 - DXVK is separate. Pick **one** DXVK archive and extract it to the same folder. Back up existing `d3d9.dll`, `dxgi.dll`, and `dxvk.conf` before replacing them.
 
 ## DXVK

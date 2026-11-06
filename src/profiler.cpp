@@ -2,6 +2,8 @@
 #include "diagnostic_logger.h"
 #include "d3d9_hook.h"
 #include "config_manager.h"
+#include "timestamped_path.h"
+#include "g3o_output_path.h"
 #include <minhook.h>
 #include <d3d9.h>
 #include <tlhelp32.h>
@@ -34,6 +36,7 @@ static LARGE_INTEGER s_freq = []() {
 static LARGE_INTEGER s_lastFrame = {};
 static volatile bool s_stop = false;
 static FILE* s_file = NULL;
+static volatile LONG s_profilePathSequence = 0;
 
 // Sample ring buffer, preallocated: the sampler must never allocate while the
 // target thread is suspended.
@@ -321,11 +324,15 @@ void InitializeProfiler() {
     QueryPerformanceFrequency(&s_freq);
 
     char path[MAX_PATH] = {};
-    GetModuleFileNameA(NULL, path, MAX_PATH);
-    char* slash = strrchr(path, '\\');
-    if (slash) *(slash + 1) = '\0';
-    strcat_s(path, "G3O_profile.log");
-    s_file = fopen(path, "w");
+    char directory[MAX_PATH] = {};
+    SYSTEMTIME time;
+    GetLocalTime(&time);
+    const unsigned long sequence = static_cast<unsigned long>(InterlockedIncrement(&s_profilePathSequence));
+    if (EnsureG3OOutputDirectory(directory, sizeof(directory)) &&
+        BuildTimestampedFilePath(path, sizeof(path), directory, "G3O_profile", "log", time,
+                                 GetCurrentProcessId(), GetCurrentThreadId(), sequence)) {
+        s_file = fopen(path, "w");
+    }
     if (s_file) {
         fprintf(s_file, "# G3O profiler. fps=0 means no frames presented (loading screen / menu transition).\n"
                         "# HOT lines: sampling of the busiest thread every 15 s (share of CPU time per function).\n");
@@ -347,7 +354,7 @@ void InitializeProfiler() {
 
     CreateThread(NULL, 0, ReporterThread, NULL, 0, NULL);
     // SamplerThread disabled for zero overhead
-    Log("G3O", "Profiler enabled, writing G3O_profile.log");
+    Log("G3O", "Profiler enabled; output: %s.", s_file ? path : "unavailable");
 }
 
 void ShutdownProfiler() {

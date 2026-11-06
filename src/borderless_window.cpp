@@ -2,6 +2,7 @@
 #include "diagnostic_logger.h"
 #include "camera_controller.h"
 #include "config_manager.h"
+#include "window_input_policy.h"
 #include <minhook.h>
 
 namespace G3O {
@@ -41,13 +42,15 @@ static LRESULT CALLBACK BorderlessWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 
     case WM_KEYDOWN:
         // Hotkey: Configured key -> Toggle Borderless Fullscreen
-        if (cfg.toggleBorderlessKey != 0 && wParam == cfg.toggleBorderlessKey) {
+        if (cfg.enableBorderless && IsInitialKeyDown(lParam) &&
+            cfg.toggleBorderlessKey != 0 && wParam == cfg.toggleBorderlessKey) {
             ToggleBorderlessFullscreen();
             return 0;
         }
 
         // Hotkeys: Dynamic FOV adjustment
-        if (cfg.enableFOVHotkeys && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (cfg.enableDynamicFOV && cfg.enableFOVHotkeys &&
+            (GetKeyState(VK_CONTROL) & 0x8000)) {
             if ((cfg.decreaseFOVKey != 0 && wParam == cfg.decreaseFOVKey) || wParam == VK_SUBTRACT) {
                 AdjustDynamicFOV(-cfg.fovStep);
                 return 0;
@@ -160,14 +163,18 @@ static DWORD WINAPI WindowWatcherThread(LPVOID) {
         // If the game is already in fullscreen mode (WS_POPUP without WS_CAPTION), DXVK and the engine
         // already control presentation; calling SetWindowPos/SetWindowLongPtr triggers an abrupt
         // D3D9 device reset which causes Vulkan driver crashes (amdvlk32.dll on AMD GPUs).
-        if ((s_origStyle & WS_CAPTION) && GetConfig().autoBorderless) {
+        const Config& cfg = GetConfig();
+        if (cfg.enableBorderless && (s_origStyle & WS_CAPTION) && cfg.autoBorderless) {
             Log("G3O", "Detected windowed mode with borders. Applying Borderless Fullscreen.");
             Sleep(500);
             ApplyBorderless(s_gameHWnd);
+        } else if (cfg.enableBorderless) {
+            s_isBorderless = (s_origStyle & WS_CAPTION) == 0;
+            Log("G3O", "Window hook active (borderless=%s, ToggleKey=%s).",
+                s_isBorderless ? "yes" : "no", KeyCodeToString(cfg.toggleBorderlessKey).c_str());
         } else {
-            s_isBorderless = true;
-            Log("G3O", "Fullscreen presentation active. Alt+Tab protection and hotkeys active (ToggleKey=%s).",
-                KeyCodeToString(GetConfig().toggleBorderlessKey).c_str());
+            s_isBorderless = false;
+            Log("G3O", "Window input hook active for dynamic FOV hotkeys; borderless mode is disabled.");
         }
     }
     return 0;

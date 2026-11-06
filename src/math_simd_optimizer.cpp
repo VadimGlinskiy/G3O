@@ -1,16 +1,10 @@
 #include "math_simd_optimizer.h"
 #include "diagnostic_logger.h"
-#include "profiler.h"
+#include "sharedbase_string_compare.h"
 #include <minhook.h>
-#include <cmath>
-#include <cstring>
-#include <xmmintrin.h>
-#include <emmintrin.h>
-#include <stdio.h>
 
 namespace G3O {
 
-#pragma pack(push, 1)
 struct Vector3 {
     float x;
     float y;
@@ -18,107 +12,14 @@ struct Vector3 {
 };
 
 struct Box3 {
-    Vector3 min; // offset 0x00
-    Vector3 max; // offset 0x0C
+    Vector3 min;
+    Vector3 max;
 };
-
-struct Sphere3 {
-    float   radius; // offset 0x00 (verified from SharedBase.dll!AccessRadius)
-    Vector3 center; // offset 0x04 (verified from SharedBase.dll!AccessPosition)
-};
-
-struct Plane4 {
-    float a; // offset 0x00
-    float b; // offset 0x04
-    float c; // offset 0x08
-    float d; // offset 0x0C
-};
-#pragma pack(pop)
+static_assert(sizeof(Box3) == 0x18, "Gothic 3 bCBox layout must be 24 bytes.");
 
 // ---------------------------------------------------------------------------
-// 1. Vectorized Frustum Culling for Bounding Box (bCFrustum::Cull / Intersects)
-// In Gothic 3 SharedBase.dll:
-// - bCFrustum stores 6 planes starting at offset 0x00.
-// - ?Cull@bCFrustum@@QBE_NABVbCBox@@@Z (0x10036380) and
-//   ?Intersects@bCFrustum@@QBE_NABVbCBox@@@Z (0x100368D0) are IDENTICAL.
-// - Return convention:
-//   TRUE (1)  = Box INTERSECTS frustum (visible, keep for rendering).
-//   FALSE (0) = Box is completely OUTSIDE frustum (culled, do not render).
+// 1. Box-Box intersection (bCBox::Intersects(const bCBox&))
 // ---------------------------------------------------------------------------
-
-typedef bool (__thiscall* FrustumCullBox_t)(void* pThis, const Box3* pBox);
-static FrustumCullBox_t Real_FrustumCullBox = NULL;
-
-static bool __fastcall Hooked_FrustumCullBox(void* pThis, void* /*edx*/, const Box3* pBox) {
-    InterlockedIncrement(&g_cullCalls);
-    if (!pThis || !pBox) return false;
-
-    // The 6 bounding planes of the camera frustum start at offset 0x00
-    const Plane4* planes = (const Plane4*)pThis;
-
-    // Center and half-extents of the bounding box
-    float cx = (pBox->min.x + pBox->max.x) * 0.5f;
-    float cy = (pBox->min.y + pBox->max.y) * 0.5f;
-    float cz = (pBox->min.z + pBox->max.z) * 0.5f;
-
-    float ex = fabsf(pBox->max.x - pBox->min.x) * 0.5f;
-    float ey = fabsf(pBox->max.y - pBox->min.y) * 0.5f;
-    float ez = fabsf(pBox->max.z - pBox->min.z) * 0.5f;
-
-    for (int i = 0; i < 6; ++i) {
-        const Plane4& p = planes[i];
-
-        // Signed distance from center of box to plane: dot(N, C) + d
-        float dist = p.a * cx + p.b * cy + p.c * cz + p.d;
-
-        // Effective projection radius of box extents onto plane normal: dot(|N|, E)
-        float radius = fabsf(p.a) * ex + fabsf(p.b) * ey + fabsf(p.c) * ez;
-
-        // If dist + radius < 0, all 8 vertices of the box are behind this plane -> OUTSIDE (CULLED)!
-        if (dist + radius < 0.0f) {
-            return false; // Culled (not visible)
-        }
-    }
-
-    return true; // Inside or intersecting (visible)
-}
-
-// ---------------------------------------------------------------------------
-// 2. Vectorized Frustum Culling for Sphere (bCFrustum::Cull / Intersects)
-// Return convention:
-// TRUE (1)  = Sphere INTERSECTS frustum (visible).
-// FALSE (0) = Sphere is completely OUTSIDE frustum (culled).
-// ---------------------------------------------------------------------------
-
-typedef bool (__thiscall* FrustumCullSphere_t)(void* pThis, const Sphere3* pSphere);
-static FrustumCullSphere_t Real_FrustumCullSphere = NULL;
-
-static bool __fastcall Hooked_FrustumCullSphere(void* pThis, void* /*edx*/, const Sphere3* pSphere) {
-    InterlockedIncrement(&g_cullCalls);
-    if (!pThis || !pSphere) return false;
-
-    const Plane4* planes = (const Plane4*)pThis;
-
-    for (int i = 0; i < 6; ++i) {
-        const Plane4& p = planes[i];
-
-        float dist = p.a * pSphere->center.x + p.b * pSphere->center.y + p.c * pSphere->center.z + p.d;
-
-        // If distance from center to plane is less than -radius -> completely outside
-        if (dist + pSphere->radius < 0.0f) {
-            return false; // Culled
-        }
-    }
-
-    return true; // Visible
-}
-
-// ---------------------------------------------------------------------------
-// 3. Fast Overlap Box-Box Intersection (bCBox::Intersects(const bCBox&))
-// ---------------------------------------------------------------------------
-
-typedef bool (__thiscall* BoxIntersectsBox_t)(const Box3* pThis, const Box3* pOther);
-static BoxIntersectsBox_t Real_BoxIntersectsBox = NULL;
 
 static bool __fastcall Hooked_BoxIntersectsBox(const Box3* pThis, void* /*edx*/, const Box3* pOther) {
     if (!pThis || !pOther) return false;
@@ -131,65 +32,28 @@ static bool __fastcall Hooked_BoxIntersectsBox(const Box3* pThis, void* /*edx*/,
 }
 
 // ---------------------------------------------------------------------------
-// 4. Fast String Compare (bCString::CompareFast)
-// Avoids scalar byte loops by utilizing pointer equality, length pre-check,
-// and hardware SIMD memcmp.
+// 4. String equality replacements use the complete null-terminated text.
 // ---------------------------------------------------------------------------
-
-typedef bool (__thiscall* CompareFast_t)(const void* pThis, const void* pOther);
-static CompareFast_t Real_CompareFast = NULL;
 
 static bool __fastcall Hooked_CompareFast(const void* pThis, void* /*edx*/, const void* pOther) {
-    if (!pThis || !pOther) return pThis == pOther;
-
-    const char* str1 = *(const char* const*)pThis;
-    const char* str2 = *(const char* const*)pOther;
-
-    if (str1 == str2) return true;
-    if (!str1 || !str2) return false;
-
-    int len1 = *(const int*)(str1 - 8);
-    int len2 = *(const int*)(str2 - 8);
-    if (len1 != len2) return false;
-    if (len1 <= 0) return true;
-
-    return memcmp(str1, str2, len1) == 0;
+    const char* str1 = pThis ? *static_cast<const char* const*>(pThis) : nullptr;
+    const char* str2 = pOther ? *static_cast<const char* const*>(pOther) : nullptr;
+    return SharedBase::CompareString(str1, str2);
 }
 
 // ---------------------------------------------------------------------------
-// 5. Fast Case-Insensitive String Compare (bCString::CompareNoCaseFast)
-// Avoids _stricmp overhead by utilizing pointer equality and length pre-checks.
+// 5. Case-insensitive equality replacement uses the complete null-terminated text.
 // ---------------------------------------------------------------------------
-
-typedef bool (__thiscall* CompareNoCaseFast_t)(const void* pThis, const void* pOther);
-static CompareNoCaseFast_t Real_CompareNoCaseFast = NULL;
 
 static bool __fastcall Hooked_CompareNoCaseFast(const void* pThis, void* /*edx*/, const void* pOther) {
-    if (!pThis || !pOther) return pThis == pOther;
-
-    const char* str1 = *(const char* const*)pThis;
-    const char* str2 = *(const char* const*)pOther;
-
-    if (str1 == str2) return true;
-    if (!str1 || !str2) return false;
-
-    int len1 = *(const int*)(str1 - 8);
-    int len2 = *(const int*)(str2 - 8);
-    if (len1 != len2) return false;
-    if (len1 <= 0) return true;
-
-    return _stricmp(str1, str2) == 0;
+    const char* str1 = pThis ? *static_cast<const char* const*>(pThis) : nullptr;
+    const char* str2 = pOther ? *static_cast<const char* const*>(pOther) : nullptr;
+    return SharedBase::CompareStringNoCase(str1, str2);
 }
 
 // ---------------------------------------------------------------------------
-// 6. Windows NT Environment Detection Bypass (_IsNT@0)
-// The engine repeatedly invokes _IsNT@0 (2.8% - 3.8% of CPU frame time) to check
-// if it is running on Windows 95/98 vs NT, allocating 152 bytes of stack on every call.
-// We return TRUE immediately.
+// 6. Gothic 3 targets Windows NT; bypass the legacy platform check.
 // ---------------------------------------------------------------------------
-
-typedef BOOL (__stdcall* IsNT_t)();
-static IsNT_t Real_IsNT = NULL;
 
 static BOOL __stdcall Hooked_IsNT() {
     return TRUE;
@@ -197,116 +61,100 @@ static BOOL __stdcall Hooked_IsNT() {
 
 // ---------------------------------------------------------------------------
 // Initialization & Shutdown
-// ---------------------------------------------------------------------------
-// 7. Bypass Heap Statistics Lock Contention (MemHeap::GetUsage)
-// In Gothic 3 SharedBase.dll!0x100209B0, GetUsage invokes HeapCompact / HeapWalk
-// under a global critical section for eCPerformanceAdmin. Eliminating this eliminates
-// 14.5% of CPU time and heavy cross-thread lock contention during loading and rendering.
-// ---------------------------------------------------------------------------
+static void* s_sharedBaseHookTargets[4] = {};
 
-typedef void (__stdcall* GetUsage_t)(void* pUsage);
-static GetUsage_t Real_GetUsage = NULL;
-
-static void __stdcall Hooked_GetUsage(void* pUsage) {
-    if (pUsage) {
-        memset(pUsage, 0, 0x60);
-    }
-}
-
-// ---------------------------------------------------------------------------
-
-void InitializeMathSIMDOptimizer() {
+void InitializeSharedBaseOptimizations() {
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
     if (!hSharedBase) return;
 
-    // 1. Hook bCFrustum::Cull(const bCBox&) at 0x10036380
-    void* pCullBox = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCBox@@@Z");
-    if (pCullBox) {
-        if (MH_CreateHook(pCullBox, (LPVOID)Hooked_FrustumCullBox, (LPVOID*)&Real_FrustumCullBox) == MH_OK) {
-            MH_EnableHook(pCullBox);
-            Log("G3O", "SIMD Frustum Culling hooked (?Cull@bCFrustum(bCBox)).");
-        }
-    }
-
-    // 2. Hook bCFrustum::Cull(const bCSphere&) at 0x100362D0
-    void* pCullSphere = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCSphere@@@Z");
-    if (pCullSphere) {
-        if (MH_CreateHook(pCullSphere, (LPVOID)Hooked_FrustumCullSphere, (LPVOID*)&Real_FrustumCullSphere) == MH_OK) {
-            MH_EnableHook(pCullSphere);
-            Log("G3O", "SIMD Frustum Culling hooked (?Cull@bCFrustum(bCSphere)).");
-        }
-    }
-
-    // 3. Hook bCBox::Intersects(const bCBox&) at 0x1001C830
+    // 1. Hook bCBox::Intersects(const bCBox&)
     void* pIntersects = (void*)GetProcAddress(hSharedBase, "?Intersects@bCBox@@QBE_NABV1@@Z");
     if (pIntersects) {
-        if (MH_CreateHook(pIntersects, (LPVOID)Hooked_BoxIntersectsBox, (LPVOID*)&Real_BoxIntersectsBox) == MH_OK) {
-            MH_EnableHook(pIntersects);
-            Log("G3O", "SIMD Box Intersection hooked (?Intersects@bCBox).");
+        MH_STATUS status = MH_CreateHook(pIntersects, (LPVOID)Hooked_BoxIntersectsBox, nullptr);
+        if (status == MH_OK) {
+            status = MH_EnableHook(pIntersects);
+            if (status == MH_OK) {
+                s_sharedBaseHookTargets[0] = pIntersects;
+                Log("G3O", "SharedBase box intersection hook enabled.");
+            } else {
+                MH_RemoveHook(pIntersects);
+                Log("G3O", "SharedBase box intersection hook activation failed (code %d).", (int)status);
+            }
+        } else {
+            Log("G3O", "SharedBase box intersection hook creation failed (code %d).", (int)status);
         }
+    } else {
+        Log("G3O", "SharedBase box intersection export is missing; optimization skipped.");
     }
 
-    // 4. Hook bCString::CompareFast at 0x10001AE0
+    // 2. Hook bCString::CompareFast
     void* pCompareFast = (void*)GetProcAddress(hSharedBase, "?CompareFast@bCString@@QBE_NABV1@@Z");
     if (pCompareFast) {
-        if (MH_CreateHook(pCompareFast, (LPVOID)Hooked_CompareFast, (LPVOID*)&Real_CompareFast) == MH_OK) {
-            MH_EnableHook(pCompareFast);
-            Log("G3O", "Fast String Compare hooked (?CompareFast@bCString).");
+        MH_STATUS status = MH_CreateHook(pCompareFast, (LPVOID)Hooked_CompareFast, nullptr);
+        if (status == MH_OK) {
+            status = MH_EnableHook(pCompareFast);
+            if (status == MH_OK) {
+                s_sharedBaseHookTargets[1] = pCompareFast;
+                Log("G3O", "SharedBase string comparison hook enabled.");
+            } else {
+                MH_RemoveHook(pCompareFast);
+                Log("G3O", "SharedBase string comparison hook activation failed (code %d).", (int)status);
+            }
+        } else {
+            Log("G3O", "SharedBase string comparison hook creation failed (code %d).", (int)status);
         }
+    } else {
+        Log("G3O", "SharedBase string comparison export is missing; optimization skipped.");
     }
 
-    // 5. Hook bCString::CompareNoCaseFast at 0x10004250
+    // 3. Hook bCString::CompareNoCaseFast
     void* pCompareNoCaseFast = (void*)GetProcAddress(hSharedBase, "?CompareNoCaseFast@bCString@@QBE_NABV1@@Z");
     if (pCompareNoCaseFast) {
-        if (MH_CreateHook(pCompareNoCaseFast, (LPVOID)Hooked_CompareNoCaseFast, (LPVOID*)&Real_CompareNoCaseFast) == MH_OK) {
-            MH_EnableHook(pCompareNoCaseFast);
-            Log("G3O", "Fast Case-Insensitive String Compare hooked (?CompareNoCaseFast@bCString).");
+        MH_STATUS status = MH_CreateHook(pCompareNoCaseFast, (LPVOID)Hooked_CompareNoCaseFast, nullptr);
+        if (status == MH_OK) {
+            status = MH_EnableHook(pCompareNoCaseFast);
+            if (status == MH_OK) {
+                s_sharedBaseHookTargets[2] = pCompareNoCaseFast;
+                Log("G3O", "SharedBase case-insensitive string comparison hook enabled.");
+            } else {
+                MH_RemoveHook(pCompareNoCaseFast);
+                Log("G3O", "SharedBase case-insensitive string comparison hook activation failed (code %d).", (int)status);
+            }
+        } else {
+            Log("G3O", "SharedBase case-insensitive string comparison hook creation failed (code %d).", (int)status);
         }
+    } else {
+        Log("G3O", "SharedBase case-insensitive string comparison export is missing; optimization skipped.");
     }
 
-    // 6. Hook _IsNT@0 at 0x1006B1C0
+    // 4. Hook _IsNT@0
     void* pIsNT = (void*)GetProcAddress(hSharedBase, "_IsNT@0");
     if (pIsNT) {
-        if (MH_CreateHook(pIsNT, (LPVOID)Hooked_IsNT, (LPVOID*)&Real_IsNT) == MH_OK) {
-            MH_EnableHook(pIsNT);
-            Log("G3O", "Windows NT environment check bypassed (_IsNT@0).");
+        MH_STATUS status = MH_CreateHook(pIsNT, (LPVOID)Hooked_IsNT, nullptr);
+        if (status == MH_OK) {
+            status = MH_EnableHook(pIsNT);
+            if (status == MH_OK) {
+                s_sharedBaseHookTargets[3] = pIsNT;
+                Log("G3O", "SharedBase Windows NT check hook enabled.");
+            } else {
+                MH_RemoveHook(pIsNT);
+                Log("G3O", "SharedBase Windows NT check hook activation failed (code %d).", (int)status);
+            }
+        } else {
+            Log("G3O", "SharedBase Windows NT check hook creation failed (code %d).", (int)status);
         }
-    }
-
-    // 7. Hook MemHeap::GetUsage at 0x100209B0
-    void* pGetUsage = (void*)GetProcAddress(hSharedBase, "?GetUsage@MemHeap@@SGXPAUMemUsage@@@Z");
-    if (pGetUsage) {
-        if (MH_CreateHook(pGetUsage, (LPVOID)Hooked_GetUsage, (LPVOID*)&Real_GetUsage) == MH_OK) {
-            MH_EnableHook(pGetUsage);
-            Log("G3O", "Heap statistics walk bypassed (?GetUsage@MemHeap).");
-        }
+    } else {
+        Log("G3O", "SharedBase Windows NT check export is missing; optimization skipped.");
     }
 }
 
-void ShutdownMathSIMDOptimizer() {
-    HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
-    if (!hSharedBase) return;
-
-    void* pCullBox = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCBox@@@Z");
-    if (pCullBox) MH_DisableHook(pCullBox);
-
-    void* pCullSphere = (void*)GetProcAddress(hSharedBase, "?Cull@bCFrustum@@QBE_NABVbCSphere@@@Z");
-    if (pCullSphere) MH_DisableHook(pCullSphere);
-
-    void* pIntersects = (void*)GetProcAddress(hSharedBase, "?Intersects@bCBox@@QBE_NABV1@@Z");
-    if (pIntersects) MH_DisableHook(pIntersects);
-
-    void* pCompareFast = (void*)GetProcAddress(hSharedBase, "?CompareFast@bCString@@QBE_NABV1@@Z");
-    if (pCompareFast) MH_DisableHook(pCompareFast);
-
-    void* pCompareNoCaseFast = (void*)GetProcAddress(hSharedBase, "?CompareNoCaseFast@bCString@@QBE_NABV1@@Z");
-    if (pCompareNoCaseFast) MH_DisableHook(pCompareNoCaseFast);
-
-    void* pIsNT = (void*)GetProcAddress(hSharedBase, "_IsNT@0");
-    if (pIsNT) MH_DisableHook(pIsNT);
-
-    void* pGetUsage = (void*)GetProcAddress(hSharedBase, "?GetUsage@MemHeap@@SGXPAUMemUsage@@@Z");
-    if (pGetUsage) MH_DisableHook(pGetUsage);
+void ShutdownSharedBaseOptimizations() {
+    for (void*& target : s_sharedBaseHookTargets) {
+        if (!target) continue;
+        MH_DisableHook(target);
+        MH_RemoveHook(target);
+        target = nullptr;
+    }
 }
 
 } // namespace G3O

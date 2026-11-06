@@ -1,16 +1,19 @@
 #include "crash_handler.h"
 #include "diagnostic_logger.h"
 #include "config_manager.h"
+#include "applied_config_snapshot.h"
+#include "timestamped_path.h"
+#include "g3o_output_path.h"
 #include "engine_fatal_report.h"
+#include "g3o_build_info.h"
 #include <minhook.h>
 #include <dbghelp.h>
 #include <psapi.h>
-#include <shlobj.h>
 #include <tlhelp32.h>
+#include <winver.h>
 #include <cstdio>
-#include <string>
-#include <vector>
-#include <algorithm>
+#include <cstring>
+#include <cctype>
 
 #pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "psapi.lib")
@@ -18,9 +21,38 @@
 namespace G3O {
 
 static char s_crashLogPath[MAX_PATH] = { 0 };
-static char s_docCrashLogPath[MAX_PATH] = { 0 };
+static char s_crashLogDirectory[MAX_PATH] = { 0 };
 static char s_dumpPath[MAX_PATH] = { 0 };
-static volatile LONG s_crashHandlingActive = 0;
+static char s_crashEventSnapshot[kRecentLogSnapshotCapacity] = { 0 };
+static char s_engineFatalEventSnapshot[kRecentLogSnapshotCapacity] = { 0 };
+static char s_runtimeContextStorage[128 * 1024] = { 0 };
+static BYTE s_fileVersionStorage[64 * 1024] = { 0 };
+static volatile LONG s_reportPipelineActive = 0;
+static volatile LONG s_reportSequence = 0;
+
+struct ReportFileTargets {
+    HANDLE reportFile = INVALID_HANDLE_VALUE;
+    char reportPath[MAX_PATH] = {};
+};
+
+struct MiniDumpResult {
+    bool attempted = false;
+    bool written = false;
+    bool headerVerified = false;
+    unsigned long long sizeBytes = 0;
+    DWORD error = ERROR_SUCCESS;
+};
+
+static HANDLE s_dumpRequestEvent = nullptr;
+static HANDLE s_dumpCompleteEvent = nullptr;
+static HANDLE s_dumpWorkerThread = nullptr;
+static DWORD s_dumpWorkerThreadId = 0;
+static EXCEPTION_RECORD s_dumpExceptionRecord = {};
+static CONTEXT s_dumpExceptionContext = {};
+static EXCEPTION_POINTERS s_dumpExceptionPointers = {};
+static DWORD s_dumpExceptionThreadId = 0;
+static MiniDumpResult s_dumpWorkerResult;
+static constexpr DWORD kDumpWorkerTimeoutMs = 30000;
 
 typedef LPTOP_LEVEL_EXCEPTION_FILTER (WINAPI *SetUnhandledExceptionFilter_t)(LPTOP_LEVEL_EXCEPTION_FILTER);
 static SetUnhandledExceptionFilter_t s_origSetUnhandledExceptionFilter = nullptr;
@@ -46,37 +78,78 @@ private:
 };
 
 struct BlameResult {
-    std::string moduleName;
-    std::string modulePath;
+    char moduleName[MAX_PATH] = {};
+    char modulePath[MAX_PATH] = {};
     uintptr_t baseAddress = 0;
     uintptr_t rva = 0;
-    std::string category;
-    std::string description;
-    std::string recommendation;
+    char category[256] = {};
+    char description[768] = {};
+    char recommendation[768] = {};
     bool isKnownCulprit = false;
 };
 
 static void DetermineCrashPaths() {
-    char exePath[MAX_PATH] = { 0 };
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    char* lastSlash = strrchr(exePath, '\\');
-    if (lastSlash) *(lastSlash + 1) = '\0';
+    EnsureG3OOutputDirectory(s_crashLogDirectory, sizeof(s_crashLogDirectory));
+}
 
-    snprintf(s_crashLogPath, sizeof(s_crashLogPath), "%sG3O_CrashReport.log", exePath);
+static HANDLE ReserveUniqueReportFile(const char* directory, char* outputPath,
+                                     size_t outputCapacity, const SYSTEMTIME& time,
+                                     DWORD processId, DWORD threadId) {
+    if (!directory || !directory[0] || !outputPath || outputCapacity == 0) return INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 32; ++attempt) {
+        const unsigned long sequence = static_cast<unsigned long>(InterlockedIncrement(&s_reportSequence));
+        if (!BuildTimestampedFilePath(outputPath, outputCapacity, directory,
+                                      "G3O_CrashReport", "log", time,
+                                      processId, threadId, sequence)) {
+            return INVALID_HANDLE_VALUE;
+        }
+        HANDLE file = CreateFileA(outputPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) return file;
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) break;
+    }
+    outputPath[0] = '\0';
+    return INVALID_HANDLE_VALUE;
+}
 
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    snprintf(s_dumpPath, sizeof(s_dumpPath), "%sG3O_Crash_%04d%02d%02d_%02d%02d%02d.dmp",
-             exePath, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+static ReportFileTargets ReserveReportFiles(bool enabled) {
+    ReportFileTargets files;
+    s_crashLogPath[0] = '\0';
+    if (!enabled) return files;
+    DetermineCrashPaths();
+    if (!s_crashLogDirectory[0]) return files;
 
-    char docPath[MAX_PATH] = { 0 };
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, docPath))) {
-        snprintf(s_docCrashLogPath, sizeof(s_docCrashLogPath), "%s\\Gothic3\\G3O_CrashReport.log", docPath);
+    SYSTEMTIME time;
+    GetLocalTime(&time);
+    files.reportFile = ReserveUniqueReportFile(s_crashLogDirectory, files.reportPath,
+                                               sizeof(files.reportPath), time,
+                                               GetCurrentProcessId(), GetCurrentThreadId());
+    if (files.reportFile != INVALID_HANDLE_VALUE) {
+        snprintf(s_crashLogPath, sizeof(s_crashLogPath), "%s", files.reportPath);
+    }
+    return files;
+}
+
+static bool WriteReportToHandle(HANDLE file, const char* report) {
+    if (file == INVALID_HANDLE_VALUE || !report) return false;
+    const size_t length = strlen(report);
+    if (length > 0xFFFFFFFFu) return false;
+    const DWORD bytesToWrite = static_cast<DWORD>(length);
+    DWORD bytesWritten = 0;
+    return WriteFile(file, report, bytesToWrite, &bytesWritten, nullptr) &&
+           bytesWritten == bytesToWrite && FlushFileBuffers(file);
+}
+
+static void CloseReportFiles(ReportFileTargets& files) {
+    if (files.reportFile != INVALID_HANDLE_VALUE) {
+        CloseHandle(files.reportFile);
+        files.reportFile = INVALID_HANDLE_VALUE;
     }
 }
 
 const char* GetCrashReportPath() {
-    if (s_crashLogPath[0] == '\0') DetermineCrashPaths();
+    if (!s_crashLogDirectory[0]) DetermineCrashPaths();
     return s_crashLogPath;
 }
 
@@ -107,147 +180,167 @@ static const char* GetExceptionCodeString(DWORD code) {
     }
 }
 
-static std::string ToLower(std::string str) {
-    std::transform(str.begin(), str.end(), str.begin(), [](unsigned char c) { return (char)::tolower(c); });
-    return str;
+static void CopyText(char* destination, size_t capacity, const char* source) {
+    if (!destination || capacity == 0) return;
+    if (!source) source = "";
+    size_t length = strlen(source);
+    if (length >= capacity) length = capacity - 1;
+    if (length) memcpy(destination, source, length);
+    destination[length] = 0;
 }
 
-static BlameResult AnalyzeAddress(uintptr_t address) {
-    BlameResult result;
-    result.baseAddress = 0;
-    result.rva = 0;
+static void CopyLowercase(char* destination, size_t capacity, const char* source) {
+    CopyText(destination, capacity, source);
+    for (size_t i = 0; destination && i + 1 < capacity && destination[i]; ++i) {
+        destination[i] = static_cast<char>(tolower(static_cast<unsigned char>(destination[i])));
+    }
+}
 
-    MEMORY_BASIC_INFORMATION mbi = { 0 };
+static bool IsScriptsPath(const char* path) {
+    if (!path) return false;
+    const char separator = static_cast<char>(92);
+    for (const char* current = path; *current; ++current) {
+        const bool atSegmentStart = current == path || current[-1] == '/' || current[-1] == separator;
+        if (atSegmentStart && strncmp(current, "scripts", 7) == 0 &&
+            (current[7] == '/' || current[7] == separator)) return true;
+    }
+    return false;
+}
+
+static void AnalyzeAddress(uintptr_t address, BlameResult& result) {
+    memset(&result, 0, sizeof(result));
+    MEMORY_BASIC_INFORMATION mbi = {};
     if (VirtualQuery((LPCVOID)address, &mbi, sizeof(mbi)) && mbi.AllocationBase) {
         HMODULE hMod = (HMODULE)mbi.AllocationBase;
-        char modPath[MAX_PATH] = { 0 };
-        if (GetModuleFileNameA(hMod, modPath, MAX_PATH)) {
-            result.modulePath = modPath;
+        char modulePath[MAX_PATH] = {};
+        if (GetModuleFileNameA(hMod, modulePath, MAX_PATH)) {
+            CopyText(result.modulePath, sizeof(result.modulePath), modulePath);
             result.baseAddress = (uintptr_t)hMod;
             result.rva = address - result.baseAddress;
-
-            const char* slash = strrchr(modPath, '\\');
-            result.moduleName = slash ? (slash + 1) : modPath;
+            const char* slash = strrchr(modulePath, static_cast<char>(92));
+            const char* forwardSlash = strrchr(modulePath, '/');
+            if (!slash || (forwardSlash && forwardSlash > slash)) slash = forwardSlash;
+            CopyText(result.moduleName, sizeof(result.moduleName), slash ? slash + 1 : modulePath);
         }
     }
 
-    if (result.moduleName.empty()) {
-        result.moduleName = "<UNKNOWN MEMORY>";
-        result.category = "Неизвестная область памяти / Сбой указателя";
-        result.description = "Адрес сбоя не принадлежит ни одной загруженной библиотеке DLL (возможно, вызов по нулевому указателю или повреждённой таблице vtable).";
-        result.recommendation = "Проверьте целостность файлов игры и порядок загрузки модов.";
-        return result;
+    if (result.moduleName[0] == 0) {
+        CopyText(result.moduleName, sizeof(result.moduleName), "<UNKNOWN MEMORY>");
+        CopyText(result.category, sizeof(result.category), "Неизвестная область памяти / Сбой указателя");
+        CopyText(result.description, sizeof(result.description), "Адрес сбоя не принадлежит ни одной загруженной библиотеке DLL (возможно, вызов по нулевому указателю или повреждённой таблице vtable).");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Проверьте целостность файлов игры и порядок загрузки модов.");
+        return;
     }
 
-    std::string lowerName = ToLower(result.moduleName);
-    std::string lowerPath = ToLower(result.modulePath);
+    char lowerName[MAX_PATH] = {};
+    char lowerPath[MAX_PATH] = {};
+    CopyLowercase(lowerName, sizeof(lowerName), result.moduleName);
+    CopyLowercase(lowerPath, sizeof(lowerPath), result.modulePath);
 
-    // 1. External Screen Capture & Overlays
-    if (lowerName.find("bdcam") != std::string::npos) {
-        result.category = "Внешний оверлей (Bandicam Video Capture)";
-        result.description = "Хук оверлея Bandicam (bdcamvk32.dll / bdcam32.dll) конфликтует с трансляцией Vulkan/DXVK.";
-        result.recommendation = "Отключите функцию оверлея/захвата Vulkan в настройках Bandicam или отключите Bandicam перед запуском игры.";
+    if (strstr(lowerName, "bdcam")) {
+        CopyText(result.category, sizeof(result.category), "Внешний оверлей (Bandicam Video Capture)");
+        CopyText(result.description, sizeof(result.description), "Хук оверлея Bandicam (bdcamvk32.dll / bdcam32.dll) конфликтует с трансляцией Vulkan/DXVK.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Отключите функцию оверлея/захвата Vulkan в настройках Bandicam или отключите Bandicam перед запуском игры.");
         result.isKnownCulprit = true;
-    } else if (lowerName.find("rtss") != std::string::npos) {
-        result.category = "Внешний оверлей (RivaTuner Statistics Server / MSI Afterburner)";
-        result.description = "Оверлей RTSS конфликтует с графическим пайплайном игры.";
-        result.recommendation = "Добавьте Gothic3.exe в список RTSS и установите Application Detection Level в 'None' или 'Low'.";
+    } else if (strstr(lowerName, "rtss")) {
+        CopyText(result.category, sizeof(result.category), "Внешний оверлей (RivaTuner Statistics Server / MSI Afterburner)");
+        CopyText(result.description, sizeof(result.description), "Оверлей RTSS конфликтует с графическим пайплайном игры.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Добавьте Gothic3.exe в список RTSS и установите Application Detection Level в 'None' или 'Low'.");
         result.isKnownCulprit = true;
-    } else if (lowerName.find("discord") != std::string::npos) {
-        result.category = "Внешний оверлей (Discord In-Game Overlay)";
-        result.description = "Хук оверлея Discord вызвал сбой в графическом контексте.";
-        result.recommendation = "Отключите внутриигровой оверлей в настройках Discord.";
+    } else if (strstr(lowerName, "discord")) {
+        CopyText(result.category, sizeof(result.category), "Внешний оверлей (Discord In-Game Overlay)");
+        CopyText(result.description, sizeof(result.description), "Хук оверлея Discord вызвал сбой в графическом контексте.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Отключите внутриигровой оверлей в настройках Discord.");
         result.isKnownCulprit = true;
-    } else if (lowerName.find("gameoverlayrenderer") != std::string::npos) {
-        result.category = "Внешний оверлей (Steam Community Overlay)";
-        result.description = "Сбой в модуле оверлея Steam.";
-        result.recommendation = "Отключите оверлей Steam в свойствах Gothic 3 в библиотеке Steam.";
+    } else if (strstr(lowerName, "gameoverlayrenderer")) {
+        CopyText(result.category, sizeof(result.category), "Внешний оверлей (Steam Community Overlay)");
+        CopyText(result.description, sizeof(result.description), "Сбой в модуле оверлея Steam.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Отключите оверлей Steam в свойствах Gothic 3 в библиотеке Steam.");
         result.isKnownCulprit = true;
-    } else if (lowerName.find("action_x86") != std::string::npos) {
-        result.category = "Внешний оверлей (Mirillis Action)";
-        result.description = "Оверлей захвата экрана Mirillis Action вызвал сбой.";
-        result.recommendation = "Отключите оверлей Action для Gothic3.exe.";
+    } else if (strstr(lowerName, "action_x86")) {
+        CopyText(result.category, sizeof(result.category), "Внешний оверлей (Mirillis Action)");
+        CopyText(result.description, sizeof(result.description), "Оверлей захвата экрана Mirillis Action вызвал сбой.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Отключите оверлей Action для Gothic3.exe.");
         result.isKnownCulprit = true;
+    } else if (strstr(lowerName, "amdvlk") || strstr(lowerName, "atiogl") || strstr(lowerName, "amdxc")) {
+        CopyText(result.category, sizeof(result.category), "Видеодрайвер (AMD Radeon Vulkan/OpenGL)");
+        CopyText(result.description, sizeof(result.description), "Сбой внутри драйвера AMD Radeon при обработке команд Vulkan.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Обновите драйвер видеокарты AMD до актуального или выберите другую версию DXVK в папке игры.");
+        result.isKnownCulprit = true;
+    } else if (strstr(lowerName, "nvoglv") || strstr(lowerName, "nvwgf2um") || strstr(lowerName, "nvd3dum")) {
+        CopyText(result.category, sizeof(result.category), "Видеодрайвер (NVIDIA GeForce)");
+        CopyText(result.description, sizeof(result.description), "Сбой внутри драйвера NVIDIA.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Обновите видеодрайвер NVIDIA или настройте параметры DXVK в dxvk.conf.");
+        result.isKnownCulprit = true;
+    } else if (strstr(lowerName, "igvk")) {
+        CopyText(result.category, sizeof(result.category), "Видеодрайвер (Intel Graphics Vulkan)");
+        CopyText(result.description, sizeof(result.description), "Сбой внутри драйвера Intel Graphics.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Обновите драйвер встроенной графики Intel.");
+        result.isKnownCulprit = true;
+    } else if (strcmp(lowerName, "d3d9.dll") == 0 || strcmp(lowerName, "dxgi.dll") == 0) {
+        CopyText(result.category, sizeof(result.category), "Графический транслятор (DXVK Direct3D 9 -> Vulkan)");
+        CopyText(result.description, sizeof(result.description), "Сбой в трансляторе DXVK при обработке Direct3D 9 вызовов.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Проверьте параметры в dxvk.conf (например dxvk.enableAsync) или протестируйте другую версию DXVK (1.10.3 / 2.4.1 / 3.0.1).");
+        result.isKnownCulprit = true;
+    } else if (strncmp(lowerName, "script_", 7) == 0 || IsScriptsPath(lowerPath)) {
+        snprintf(result.category, sizeof(result.category), "Скриптовый мод Gothic 3 (%s)", result.moduleName);
+        snprintf(result.description, sizeof(result.description), "Сбой произошёл непосредственно внутри кода скриптового мода '%s'.", result.moduleName);
+        snprintf(result.recommendation, sizeof(result.recommendation), "Временно переместите файл 'scripts/%s' в другую папку для проверки, либо обновите этот мод до последней совместимой версии.", result.moduleName);
+        result.isKnownCulprit = true;
+    } else if (strstr(lowerName, "paru_")) {
+        CopyText(result.category, sizeof(result.category), "Parallel Universe Patch (PUP)");
+        snprintf(result.description, sizeof(result.description), "Сбой в модуле многопоточных оптимизаций PUP (%s).", result.moduleName);
+        CopyText(result.recommendation, sizeof(result.recommendation), "Проверьте параметры paru.ini или убедитесь в совместимости с другими установленными модами.");
+        result.isKnownCulprit = true;
+    } else if (strcmp(lowerName, "engine.dll") == 0 || strcmp(lowerName, "game.dll") == 0 || strcmp(lowerName, "sharedbase.dll") == 0 ||
+               strcmp(lowerName, "gfc.dll") == 0 || strcmp(lowerName, "gui.dll") == 0 || strcmp(lowerName, "script.dll") == 0 ||
+               strcmp(lowerName, "filesystem.dll") == 0 || strcmp(lowerName, "dialogs.dll") == 0 || strcmp(lowerName, "importer.dll") == 0) {
+        snprintf(result.category, sizeof(result.category), "Базовый движок Gothic 3 (%s)", result.moduleName);
+        CopyText(result.description, sizeof(result.description), "Сбой в основном коде движка Genome Engine.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Смотрите стек вызовов ниже — часто движок падает из-за некорректных параметров, переданных из скриптовых модов или при исчерпании 32-битной памяти.");
+    } else if (strcmp(lowerName, "dinput8.dll") == 0) {
+        CopyText(result.category, sizeof(result.category), "Gothic 3 Optima (G3O)");
+        CopyText(result.description, sizeof(result.description), "Сбой внутри прокси-модуля G3O.");
+        CopyText(result.recommendation, sizeof(result.recommendation), "Сообщите разработчику G3O с приложением данного отчёта.");
+    } else {
+        snprintf(result.category, sizeof(result.category), "Системная или сторонняя библиотека (%s)", result.moduleName);
+        snprintf(result.description, sizeof(result.description), "Сбой произошёл в библиотеке: %s", result.modulePath);
+        CopyText(result.recommendation, sizeof(result.recommendation), "Проверьте зависимости и совместимость установленного ПО.");
     }
-    // 2. GPU Drivers
-    else if (lowerName.find("amdvlk") != std::string::npos || lowerName.find("atiogl") != std::string::npos || lowerName.find("amdxc") != std::string::npos) {
-        result.category = "Видеодрайвер (AMD Radeon Vulkan/OpenGL)";
-        result.description = "Сбой внутри драйвера AMD Radeon при обработке команд Vulkan.";
-        result.recommendation = "Обновите драйвер видеокарты AMD до актуального или выберите другую версию DXVK в папке игры.";
-        result.isKnownCulprit = true;
-    } else if (lowerName.find("nvoglv") != std::string::npos || lowerName.find("nvwgf2um") != std::string::npos || lowerName.find("nvd3dum") != std::string::npos) {
-        result.category = "Видеодрайвер (NVIDIA GeForce)";
-        result.description = "Сбой внутри драйвера NVIDIA.";
-        result.recommendation = "Обновите видеодрайвер NVIDIA или настройте параметры DXVK в dxvk.conf.";
-        result.isKnownCulprit = true;
-    } else if (lowerName.find("igvk") != std::string::npos) {
-        result.category = "Видеодрайвер (Intel Graphics Vulkan)";
-        result.description = "Сбой внутри драйвера Intel Graphics.";
-        result.recommendation = "Обновите драйвер встроенной графики Intel.";
-        result.isKnownCulprit = true;
-    }
-    // 3. DXVK Graphics Wrapper
-    else if (lowerName == "d3d9.dll" || lowerName == "dxgi.dll") {
-        result.category = "Графический транслятор (DXVK Direct3D 9 -> Vulkan)";
-        result.description = "Сбой в трансляторе DXVK при обработке Direct3D 9 вызовов.";
-        result.recommendation = "Проверьте параметры в dxvk.conf (например dxvk.enableAsync) или протестируйте другую версию DXVK (1.10.3 / 2.4.1 / 3.0.1).";
-        result.isKnownCulprit = true;
-    }
-    // 4. Gothic 3 Script Mods (scripts\Script_*.dll)
-    else if (lowerName.rfind("script_", 0) == 0 || lowerPath.find("\\scripts\\") != std::string::npos) {
-        result.category = "Скриптовый мод Gothic 3 (" + result.moduleName + ")";
-        result.description = "Сбой произошёл непосредственно внутри кода скриптового мода '" + result.moduleName + "'.";
-        result.recommendation = "Временно переместите файл 'scripts\\" + result.moduleName + "' в другую папку для проверки, либо обновите этот мод до последней совместимой версии.";
-        result.isKnownCulprit = true;
-    }
-    // 5. Parallel Universe Patch (PUP)
-    else if (lowerName.find("paru_") != std::string::npos) {
-        result.category = "Parallel Universe Patch (PUP)";
-        result.description = "Сбой в модуле многопоточных оптимизаций PUP (" + result.moduleName + ").";
-        result.recommendation = "Проверьте параметры paru.ini или убедитесь в совместимости с другими установленными модами.";
-        result.isKnownCulprit = true;
-    }
-    // 6. Base Gothic 3 Engine
-    else if (lowerName == "engine.dll" || lowerName == "game.dll" || lowerName == "sharedbase.dll" ||
-             lowerName == "gfc.dll" || lowerName == "gui.dll" || lowerName == "script.dll" ||
-             lowerName == "filesystem.dll" || lowerName == "dialogs.dll" || lowerName == "importer.dll") {
-        result.category = "Базовый движок Gothic 3 (" + result.moduleName + ")";
-        result.description = "Сбой в основном коде движка Genome Engine.";
-        result.recommendation = "Смотрите стек вызовов ниже — часто движок падает из-за некорректных параметров, переданных из скриптовых модов или при исчерпании 32-битной памяти.";
-    }
-    // 7. G3O Core
-    else if (lowerName == "dinput8.dll") {
-        result.category = "Gothic 3 Optima (G3O)";
-        result.description = "Сбой внутри прокси-модуля G3O.";
-        result.recommendation = "Сообщите разработчику G3O с приложением данного отчёта.";
-    }
-    else {
-        result.category = "Системная или сторонняя библиотека (" + result.moduleName + ")";
-        result.description = "Сбой произошёл в библиотеке: " + result.modulePath;
-        result.recommendation = "Проверьте зависимости и совместимость установленного ПО.";
-    }
-
-    return result;
 }
 
 struct StackFrameInfo {
     uintptr_t address = 0;
-    std::string moduleName;
+    char moduleName[MAX_PATH] = {};
     uintptr_t rva = 0;
-    std::string symbolName;
-    std::string sourceFile;
+    char symbolName[512] = {};
+    char sourceFile[MAX_PATH] = {};
     int lineNumber = 0;
     bool isScriptMod = false;
 };
 
-static std::vector<StackFrameInfo> WalkCallStack(CONTEXT* pContext) {
-    std::vector<StackFrameInfo> frames;
-    if (!pContext) return frames;
+static constexpr size_t kMaxStackFrames = 32;
+static constexpr size_t kCrashReportCapacity = 384 * 1024;
+static constexpr size_t kEngineFatalStackCapacity = kMaxStackFrames * (MAX_PATH + 560) + 1;
+static StackFrameInfo s_crashStackFrames[kMaxStackFrames] = {};
+static StackFrameInfo s_engineFatalStackFrames[kMaxStackFrames] = {};
+static BlameResult s_crashBlame = {};
+static char s_crashReportStorage[kCrashReportCapacity] = {};
+static char s_engineFatalReportStorage[kCrashReportCapacity] = {};
+static char s_engineFatalStackStorage[kEngineFatalStackCapacity] = {};
+static char s_engineFatalCallerStorage[512] = {};
+static char s_crashDialogMessage[2048] = {};
+static wchar_t s_crashDialogWideMessage[2048] = {};
+
+static size_t WalkCallStack(CONTEXT* pContext, StackFrameInfo* frames, size_t capacity) {
+    if (!frames || capacity == 0) return 0;
+    memset(frames, 0, capacity * sizeof(*frames));
+    if (!pContext) return 0;
 
     DbgHelpLockGuard dbgHelpLock;
     if (!dbgHelpLock.acquired() ||
         InterlockedCompareExchange(&s_symbolHandlerReady, 0, 0) == 0 || !s_symbolProcess) {
-        return frames;
+        return 0;
     }
     HANDLE hProcess = s_symbolProcess;
     HANDLE hThread = GetCurrentThread();
@@ -257,12 +350,12 @@ static std::vector<StackFrameInfo> WalkCallStack(CONTEXT* pContext) {
         SymCleanup(hProcess);
         if (!SymInitialize(hProcess, nullptr, TRUE)) {
             InterlockedExchange(&s_symbolHandlerReady, 0);
-            return frames;
+            return 0;
         }
     }
 
     CONTEXT ctx = *pContext;
-    STACKFRAME64 frame = { 0 };
+    STACKFRAME64 frame = {};
     frame.AddrPC.Offset = ctx.Eip;
     frame.AddrPC.Mode = AddrModeFlat;
     frame.AddrFrame.Offset = ctx.Ebp;
@@ -270,83 +363,396 @@ static std::vector<StackFrameInfo> WalkCallStack(CONTEXT* pContext) {
     frame.AddrStack.Offset = ctx.Esp;
     frame.AddrStack.Mode = AddrModeFlat;
 
-    for (int i = 0; i < 32; ++i) {
+    size_t frameCount = 0;
+    while (frameCount < capacity) {
         if (!StackWalk64(IMAGE_FILE_MACHINE_I386, hProcess, hThread, &frame, &ctx,
                          NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
             break;
         }
-
         if (frame.AddrPC.Offset == 0) break;
 
-        StackFrameInfo sfi;
+        StackFrameInfo& sfi = frames[frameCount];
         sfi.address = (uintptr_t)frame.AddrPC.Offset;
-
-        BlameResult modInfo = AnalyzeAddress(sfi.address);
-        sfi.moduleName = modInfo.moduleName;
+        BlameResult modInfo = {};
+        AnalyzeAddress(sfi.address, modInfo);
+        CopyText(sfi.moduleName, sizeof(sfi.moduleName), modInfo.moduleName);
         sfi.rva = modInfo.rva;
+        sfi.isScriptMod = strncmp(sfi.moduleName, "script_", 7) == 0;
 
-        std::string lowerMod = ToLower(sfi.moduleName);
-        if (lowerMod.rfind("script_", 0) == 0) {
-            sfi.isScriptMod = true;
-        }
-
-        // Symbol resolution
-        char symbolBuffer[sizeof(SYMBOL_INFO) + 256] = { 0 };
+        char symbolBuffer[sizeof(SYMBOL_INFO) + 256] = {};
         PSYMBOL_INFO pSymbol = (PSYMBOL_INFO)symbolBuffer;
         pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
         pSymbol->MaxNameLen = 255;
         DWORD64 displacement = 0;
-
         if (SymFromAddr(hProcess, frame.AddrPC.Offset, &displacement, pSymbol)) {
-            sfi.symbolName = pSymbol->Name;
+            CopyText(sfi.symbolName, sizeof(sfi.symbolName), pSymbol->Name);
             if (displacement > 0) {
-                char dispBuf[32];
-                snprintf(dispBuf, sizeof(dispBuf), "+0x%llX", displacement);
-                sfi.symbolName += dispBuf;
+                const size_t symbolLength = strlen(sfi.symbolName);
+                if (symbolLength < sizeof(sfi.symbolName)) {
+                    snprintf(sfi.symbolName + symbolLength, sizeof(sfi.symbolName) - symbolLength,
+                             "+0x%llX", displacement);
+                }
             }
         }
 
-        IMAGEHLP_LINE64 line = { 0 };
+        IMAGEHLP_LINE64 line = {};
         line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
         DWORD lineDisplacement = 0;
         if (SymGetLineFromAddr64(hProcess, frame.AddrPC.Offset, &lineDisplacement, &line)) {
-            sfi.sourceFile = line.FileName;
+            CopyText(sfi.sourceFile, sizeof(sfi.sourceFile), line.FileName);
             sfi.lineNumber = (int)line.LineNumber;
         }
-
-        frames.push_back(sfi);
+        ++frameCount;
     }
-
-    return frames;
+    return frameCount;
 }
 
-static void WriteMiniDump(EXCEPTION_POINTERS* pExceptionInfo) {
-    if (!s_dumpPath[0]) DetermineCrashPaths();
+static bool RefreshCrashDumpPath() {
+    DetermineCrashPaths();
+    if (!s_crashLogDirectory[0]) return false;
+    SYSTEMTIME time;
+    GetLocalTime(&time);
+    const unsigned long sequence = static_cast<unsigned long>(InterlockedIncrement(&s_reportSequence));
+    return BuildTimestampedFilePath(s_dumpPath, sizeof(s_dumpPath), s_crashLogDirectory,
+                                   "G3O_Crash", "dmp", time,
+                                   GetCurrentProcessId(), GetCurrentThreadId(), sequence);
+}
+
+static BOOL CALLBACK ExcludeDumpWorkerThread(
+    PVOID callbackParam,
+    const PMINIDUMP_CALLBACK_INPUT callbackInput,
+    PMINIDUMP_CALLBACK_OUTPUT callbackOutput) {
+    if (!callbackInput || !callbackOutput) return TRUE;
+
+    const DWORD workerThreadId = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(callbackParam));
+    if (callbackInput->CallbackType == ThreadCallback &&
+        callbackInput->Thread.ThreadId == workerThreadId) {
+        callbackOutput->ThreadWriteFlags = 0;
+    } else if (callbackInput->CallbackType == ThreadExCallback &&
+               callbackInput->ThreadEx.ThreadId == workerThreadId) {
+        callbackOutput->ThreadWriteFlags = 0;
+    }
+    return TRUE;
+}
+
+// shortcut: this stays in-process; a helper process is needed to eliminate loader-lock deadlocks.
+static MiniDumpResult WriteMiniDump(EXCEPTION_POINTERS* pExceptionInfo,
+                                    DWORD exceptionThreadId, DWORD workerThreadId) {
+    MiniDumpResult result;
+    result.attempted = true;
+
+    if (!pExceptionInfo || !pExceptionInfo->ExceptionRecord) {
+        result.error = ERROR_INVALID_PARAMETER;
+        return result;
+    }
+    if (!s_dumpPath[0]) {
+        result.error = ERROR_PATH_NOT_FOUND;
+        return result;
+    }
 
     DbgHelpLockGuard dbgHelpLock;
-    if (!dbgHelpLock.acquired()) return;
-    HANDLE hDumpFile = CreateFileA(s_dumpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hDumpFile != INVALID_HANDLE_VALUE) {
-        MINIDUMP_EXCEPTION_INFORMATION mei;
-        mei.ThreadId = GetCurrentThreadId();
-        mei.ExceptionPointers = pExceptionInfo;
-        mei.ClientPointers = FALSE;
+    if (!dbgHelpLock.acquired()) {
+        result.error = ERROR_BUSY;
+        return result;
+    }
 
-        MiniDumpWriteDump(
-            GetCurrentProcess(),
-            GetCurrentProcessId(),
-            hDumpFile,
-            (MINIDUMP_TYPE)(MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithUnloadedModules | MiniDumpWithProcessThreadData),
-            &mei,
-            NULL,
-            NULL
-        );
-        CloseHandle(hDumpFile);
+    HANDLE hDumpFile = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        hDumpFile = CreateFileA(s_dumpPath, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hDumpFile != INVALID_HANDLE_VALUE) break;
+        const DWORD openError = GetLastError();
+        if (openError != ERROR_FILE_EXISTS && openError != ERROR_ALREADY_EXISTS) {
+            result.error = openError;
+            return result;
+        }
+        if (!RefreshCrashDumpPath()) {
+            result.error = ERROR_PATH_NOT_FOUND;
+            return result;
+        }
+    }
+    if (hDumpFile == INVALID_HANDLE_VALUE) {
+        result.error = ERROR_FILE_EXISTS;
+        return result;
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION mei = {};
+    mei.ThreadId = exceptionThreadId;
+    mei.ExceptionPointers = pExceptionInfo;
+    mei.ClientPointers = FALSE;
+
+    MINIDUMP_CALLBACK_INFORMATION callbackInfo = {};
+    callbackInfo.CallbackRoutine = ExcludeDumpWorkerThread;
+    callbackInfo.CallbackParam = reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(workerThreadId));
+
+    const BOOL dumpWritten = MiniDumpWriteDump(
+        GetCurrentProcess(),
+        GetCurrentProcessId(),
+        hDumpFile,
+        (MINIDUMP_TYPE)(MiniDumpWithDataSegs | MiniDumpWithHandleData |
+                        MiniDumpWithUnloadedModules | MiniDumpWithProcessThreadData),
+        &mei,
+        NULL,
+        &callbackInfo);
+    const DWORD dumpError = dumpWritten ? ERROR_SUCCESS : GetLastError();
+
+    const BOOL flushed = FlushFileBuffers(hDumpFile);
+    const DWORD flushError = flushed ? ERROR_SUCCESS : GetLastError();
+
+    LARGE_INTEGER fileSize = {};
+    const BOOL sizeVerified = GetFileSizeEx(hDumpFile, &fileSize);
+    const DWORD sizeError = sizeVerified ? ERROR_SUCCESS : GetLastError();
+    if (sizeVerified && fileSize.QuadPart > 0) {
+        result.sizeBytes = static_cast<unsigned long long>(fileSize.QuadPart);
+    }
+
+    MINIDUMP_HEADER dumpHeader = {};
+    DWORD headerBytesRead = 0;
+    DWORD headerError = ERROR_BAD_FORMAT;
+    BOOL headerRead = FALSE;
+    if (sizeVerified && fileSize.QuadPart >= static_cast<LONGLONG>(sizeof(dumpHeader))) {
+        LARGE_INTEGER start = {};
+        if (SetFilePointerEx(hDumpFile, start, NULL, FILE_BEGIN)) {
+            headerRead = ReadFile(hDumpFile, &dumpHeader, sizeof(dumpHeader), &headerBytesRead, NULL);
+            headerError = headerRead ? ERROR_SUCCESS : GetLastError();
+        } else {
+            headerError = GetLastError();
+        }
+    }
+    result.headerVerified = headerRead &&
+                            headerBytesRead == sizeof(dumpHeader) &&
+                            dumpHeader.Signature == MINIDUMP_SIGNATURE;
+    if (headerRead && !result.headerVerified) {
+        headerError = ERROR_BAD_FORMAT;
+    } else if (headerRead && headerBytesRead != sizeof(dumpHeader)) {
+        headerError = ERROR_BAD_FORMAT;
+    }
+
+    const BOOL closed = CloseHandle(hDumpFile);
+    const DWORD closeError = closed ? ERROR_SUCCESS : GetLastError();
+
+    if (!dumpWritten) {
+        result.error = dumpError;
+    } else if (!flushed) {
+        result.error = flushError;
+    } else if (!sizeVerified) {
+        result.error = sizeError;
+    } else if (fileSize.QuadPart <= 0) {
+        result.error = ERROR_FILE_INVALID;
+    } else if (!result.headerVerified) {
+        result.error = headerError;
+    } else if (!closed) {
+        result.error = closeError;
+    } else {
+        result.written = true;
+        result.error = ERROR_SUCCESS;
+    }
+    return result;
+}
+
+static DWORD WINAPI MiniDumpWorkerThreadProc(LPVOID) {
+    for (;;) {
+        if (WaitForSingleObject(s_dumpRequestEvent, INFINITE) != WAIT_OBJECT_0) {
+            return 0;
+        }
+        s_dumpWorkerResult = WriteMiniDump(
+            &s_dumpExceptionPointers, s_dumpExceptionThreadId, s_dumpWorkerThreadId);
+        MemoryBarrier();
+        if (!SetEvent(s_dumpCompleteEvent)) {
+            return 0;
+        }
     }
 }
 
-static void BuildReportText(std::string& outReport, EXCEPTION_POINTERS* pExceptionInfo,
-                            const BlameResult& blame, const std::vector<StackFrameInfo>& stackFrames) {
+static DWORD InitializeMiniDumpWorker() {
+    if (s_dumpWorkerThread && s_dumpRequestEvent && s_dumpCompleteEvent) {
+        return ERROR_SUCCESS;
+    }
+
+    s_dumpRequestEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    if (!s_dumpRequestEvent) {
+        return GetLastError();
+    }
+
+    s_dumpCompleteEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    if (!s_dumpCompleteEvent) {
+        const DWORD error = GetLastError();
+        CloseHandle(s_dumpRequestEvent);
+        s_dumpRequestEvent = nullptr;
+        return error;
+    }
+
+    s_dumpWorkerThread = CreateThread(
+        nullptr, 0, MiniDumpWorkerThreadProc, nullptr, 0, &s_dumpWorkerThreadId);
+    if (!s_dumpWorkerThread) {
+        const DWORD error = GetLastError();
+        CloseHandle(s_dumpCompleteEvent);
+        CloseHandle(s_dumpRequestEvent);
+        s_dumpCompleteEvent = nullptr;
+        s_dumpRequestEvent = nullptr;
+        s_dumpWorkerThreadId = 0;
+        return error;
+    }
+    return ERROR_SUCCESS;
+}
+
+static MiniDumpResult WriteMiniDumpOnWorker(EXCEPTION_POINTERS* pExceptionInfo) {
+    MiniDumpResult result;
+    result.attempted = true;
+
+    if (!pExceptionInfo || !pExceptionInfo->ExceptionRecord) {
+        result.error = ERROR_INVALID_PARAMETER;
+        return result;
+    }
+    if (!RefreshCrashDumpPath()) {
+        result.error = ERROR_PATH_NOT_FOUND;
+        return result;
+    }
+    if (!s_dumpWorkerThread || !s_dumpRequestEvent || !s_dumpCompleteEvent) {
+        result.error = ERROR_NOT_READY;
+        return result;
+    }
+
+    s_dumpExceptionRecord = *pExceptionInfo->ExceptionRecord;
+    s_dumpExceptionRecord.ExceptionRecord = nullptr;
+    s_dumpExceptionPointers.ExceptionRecord = &s_dumpExceptionRecord;
+    if (pExceptionInfo->ContextRecord) {
+        s_dumpExceptionContext = *pExceptionInfo->ContextRecord;
+        s_dumpExceptionPointers.ContextRecord = &s_dumpExceptionContext;
+    } else {
+        s_dumpExceptionPointers.ContextRecord = nullptr;
+    }
+    s_dumpExceptionThreadId = GetCurrentThreadId();
+
+    if (!ResetEvent(s_dumpCompleteEvent) || !SetEvent(s_dumpRequestEvent)) {
+        result.error = GetLastError();
+        return result;
+    }
+
+    HANDLE waitHandles[] = { s_dumpCompleteEvent, s_dumpWorkerThread };
+    const DWORD waitResult = WaitForMultipleObjects(
+        2, waitHandles, FALSE, kDumpWorkerTimeoutMs);
+    if (waitResult == WAIT_OBJECT_0) {
+        MemoryBarrier();
+        return s_dumpWorkerResult;
+    }
+    if (waitResult == WAIT_OBJECT_0 + 1) {
+        result.error = ERROR_PROCESS_ABORTED;
+    } else if (waitResult == WAIT_TIMEOUT) {
+        result.error = ERROR_TIMEOUT;
+    } else {
+        result.error = GetLastError();
+    }
+    return result;
+}
+
+static const char* GetFileVersionText(const char* path, char* output, size_t capacity) {
+    if (!output || capacity == 0) return "<нет данных>";
+    output[0] = '\0';
+    if (!path || !path[0]) {
+        snprintf(output, capacity, "<путь недоступен>");
+        return output;
+    }
+
+    DWORD ignored = 0;
+    const DWORD versionSize = GetFileVersionInfoSizeA(path, &ignored);
+    if (versionSize == 0) {
+        snprintf(output, capacity, "<нет версии>");
+        return output;
+    }
+    if (versionSize > sizeof(s_fileVersionStorage)) {
+        snprintf(output, capacity, "<ресурс версии слишком велик>");
+        return output;
+    }
+    if (!GetFileVersionInfoA(path, 0, versionSize, s_fileVersionStorage)) {
+        snprintf(output, capacity, "<ошибка чтения: %lu>", GetLastError());
+        return output;
+    }
+
+    VS_FIXEDFILEINFO* fixedInfo = nullptr;
+    UINT fixedInfoSize = 0;
+    if (!VerQueryValueA(s_fileVersionStorage, "\\",
+                        reinterpret_cast<LPVOID*>(&fixedInfo), &fixedInfoSize) ||
+        !fixedInfo || fixedInfoSize < sizeof(VS_FIXEDFILEINFO) ||
+        fixedInfo->dwSignature != 0xFEEF04BD) {
+        snprintf(output, capacity, "<версия не определена>");
+        return output;
+    }
+
+    snprintf(output, capacity, "%u.%u.%u.%u",
+             HIWORD(fixedInfo->dwFileVersionMS), LOWORD(fixedInfo->dwFileVersionMS),
+             HIWORD(fixedInfo->dwFileVersionLS), LOWORD(fixedInfo->dwFileVersionLS));
+    return output;
+}
+
+static void AppendLoadedModuleVersions(FixedTextBuffer& output) {
+    output.Append("[Версии загруженных модулей]\n");
+    HANDLE snapshot = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+        if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH) break;
+    }
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        output.AppendFormat("Список модулей недоступен (ошибка %lu).\n", error);
+        return;
+    }
+
+    MODULEENTRY32 module = {};
+    module.dwSize = sizeof(module);
+    if (Module32First(snapshot, &module)) {
+        do {
+            char version[64] = {};
+            GetFileVersionText(module.szExePath, version, sizeof(version));
+            output.AppendFormat("%s | %s | %s\n", module.szModule, version, module.szExePath);
+        } while (Module32Next(snapshot, &module));
+    } else {
+        output.AppendFormat("Список модулей пуст или недоступен (ошибка %lu).\n", GetLastError());
+    }
+    CloseHandle(snapshot);
+}
+
+static void BuildRuntimeContext(FixedTextBuffer& output, const ReportFileTargets& reportFiles,
+                                bool reportEnabled, const char* dumpStatus,
+                                const char* dumpPath, DWORD processId, DWORD threadId) {
+    output.Reset();
+    output.AppendFormat("[Версия G3O] %s\n[Сборка G3O] %s; %s\nPID: %lu\nTID: %lu\n",
+                        G3O_VERSION_STRING, G3O_BUILD_CONFIGURATION, G3O_BUILD_TIMESTAMP,
+                        processId, threadId);
+    output.Append("[Путь отчёта] ");
+    if (!reportEnabled) {
+        output.Append("файловая запись отключена (WriteCrashLog=false)\n");
+    } else {
+        output.Append(reportFiles.reportPath[0] ? reportFiles.reportPath : "не удалось создать файл в G3O");
+        output.Append(reportFiles.reportFile != INVALID_HANDLE_VALUE ? " (файл создан)\n" : "\n");
+    }
+    output.AppendFormat("[Статус дампа] %s\n[Путь дампа] %s\n",
+                        dumpStatus ? dumpStatus : "неизвестно",
+                        dumpPath && dumpPath[0] ? dumpPath : "не создавался");
+
+    DWORD_PTR processAffinity = 0;
+    DWORD_PTR systemAffinity = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &processAffinity, &systemAffinity)) {
+        output.AppendFormat("[Фактическая маска процессора] 0x%llX (доступно системе: 0x%llX)\n",
+                            static_cast<unsigned long long>(processAffinity),
+                            static_cast<unsigned long long>(systemAffinity));
+    } else {
+        output.AppendFormat("[Фактическая маска процессора] недоступна (ошибка %lu)\n", GetLastError());
+    }
+
+    char configStorage[8192] = {};
+    FixedTextBuffer configSnapshot(configStorage, sizeof(configStorage));
+    AppendAppliedConfigSnapshot(configSnapshot, GetConfig());
+    output.Append(configSnapshot.CStr());
+    output.Append("\n");
+    AppendLoadedModuleVersions(output);
+    output.Finish();
+}
+
+static void BuildReportText(FixedTextBuffer& outReport, EXCEPTION_POINTERS* pExceptionInfo,
+                            const BlameResult& blame, const StackFrameInfo* stackFrames,
+                            size_t stackFrameCount, const char* recentEvents,
+                            const char* runtimeContext) {
     char buf[1024];
     outReport.clear();
 
@@ -361,13 +767,16 @@ static void BuildReportText(std::string& outReport, EXCEPTION_POINTERS* pExcepti
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     outReport += buf;
 
+    outReport += runtimeContext ? runtimeContext : "[Контекст отчёта недоступен]\n";
+    outReport += "\n";
+
     // 1. Diagnosis Summary
     outReport += "--------------------------------------------------------------------------------\n";
     outReport += "[ДИАГНОЗ И ВИНОВНИК СБОЯ]\n";
     outReport += "--------------------------------------------------------------------------------\n";
-    snprintf(buf, sizeof(buf), "Категория:      %s\n", blame.category.c_str()); outReport += buf;
-    snprintf(buf, sizeof(buf), "Модуль:         %s\n", blame.moduleName.c_str()); outReport += buf;
-    snprintf(buf, sizeof(buf), "Путь к файлу:   %s\n", blame.modulePath.c_str()); outReport += buf;
+    snprintf(buf, sizeof(buf), "Категория:      %s\n", blame.category); outReport += buf;
+    snprintf(buf, sizeof(buf), "Модуль:         %s\n", blame.moduleName); outReport += buf;
+    snprintf(buf, sizeof(buf), "Путь к файлу:   %s\n", blame.modulePath); outReport += buf;
     snprintf(buf, sizeof(buf), "Адрес ошибки:   0x%p (смещение в модуле: +0x%X)\n",
              (void*)pExceptionInfo->ExceptionRecord->ExceptionAddress, (unsigned int)blame.rva); outReport += buf;
     snprintf(buf, sizeof(buf), "Код сбоя:       0x%08X — %s\n",
@@ -384,23 +793,23 @@ static void BuildReportText(std::string& outReport, EXCEPTION_POINTERS* pExcepti
         outReport += buf;
     }
 
-    snprintf(buf, sizeof(buf), "\nОписание проблемы:\n  %s\n", blame.description.c_str()); outReport += buf;
-    snprintf(buf, sizeof(buf), "\nРЕКОМЕНДАЦИЯ ПО ИСПРАВЛЕНИЮ:\n  %s\n\n", blame.recommendation.c_str()); outReport += buf;
+    snprintf(buf, sizeof(buf), "\nОписание проблемы:\n  %s\n", blame.description); outReport += buf;
+    snprintf(buf, sizeof(buf), "\nРЕКОМЕНДАЦИЯ ПО ИСПРАВЛЕНИЮ:\n  %s\n\n", blame.recommendation); outReport += buf;
 
     // Check if an indirect initiator was found in stack frames
-    std::string initiatorMod;
-    for (size_t i = 1; i < stackFrames.size(); ++i) {
+    char initiatorMod[MAX_PATH] = {};
+    for (size_t i = 1; i < stackFrameCount; ++i) {
         if (stackFrames[i].isScriptMod) {
-            initiatorMod = stackFrames[i].moduleName;
+            CopyText(initiatorMod, sizeof(initiatorMod), stackFrames[i].moduleName);
             break;
         }
     }
-    if (!initiatorMod.empty() && blame.moduleName != initiatorMod) {
+    if (initiatorMod[0] != 0 && strcmp(blame.moduleName, initiatorMod) != 0) {
         snprintf(buf, sizeof(buf),
                  "(!) ОБРАТИТЕ ВНИМАНИЕ:\n"
                  "    Хотя сбой произошёл в '%s', вызов в стек пришёл из скриптового мода '%s'!\n"
                  "    Проверьте именно мод '%s'.\n\n",
-                 blame.moduleName.c_str(), initiatorMod.c_str(), initiatorMod.c_str());
+                 blame.moduleName, initiatorMod, initiatorMod);
         outReport += buf;
     }
 
@@ -449,20 +858,20 @@ static void BuildReportText(std::string& outReport, EXCEPTION_POINTERS* pExcepti
     outReport += "--------------------------------------------------------------------------------\n";
     outReport += "[СТЕК ВЫЗОВОВ (CALL STACK)]\n";
     outReport += "--------------------------------------------------------------------------------\n";
-    if (stackFrames.empty()) {
+    if (stackFrameCount == 0) {
         outReport += "Стек вызовов недоступен.\n";
     } else {
-        for (size_t i = 0; i < stackFrames.size(); ++i) {
+        for (size_t i = 0; i < stackFrameCount; ++i) {
             const auto& frame = stackFrames[i];
             snprintf(buf, sizeof(buf), "#%02d 0x%p [%s+0x%X]",
-                     (int)i, (void*)frame.address, frame.moduleName.c_str(), (unsigned int)frame.rva);
+                     (int)i, (void*)frame.address, frame.moduleName, (unsigned int)frame.rva);
             outReport += buf;
-            if (!frame.symbolName.empty()) {
-                snprintf(buf, sizeof(buf), " %s", frame.symbolName.c_str());
+            if (frame.symbolName[0] != 0) {
+                snprintf(buf, sizeof(buf), " %s", frame.symbolName);
                 outReport += buf;
             }
-            if (!frame.sourceFile.empty()) {
-                snprintf(buf, sizeof(buf), " (%s:%d)", frame.sourceFile.c_str(), frame.lineNumber);
+            if (frame.sourceFile[0] != 0) {
+                snprintf(buf, sizeof(buf), " (%s:%d)", frame.sourceFile, frame.lineNumber);
                 outReport += buf;
             }
             if (frame.isScriptMod) {
@@ -474,85 +883,84 @@ static void BuildReportText(std::string& outReport, EXCEPTION_POINTERS* pExcepti
     outReport += "\n";
 
     // 5. Recent Diagnostic Logs
-    std::vector<std::string> recentLogs;
-    GetRecentLogs(recentLogs);
     outReport += "--------------------------------------------------------------------------------\n";
-    outReport += "[ПОСЛЕДНИЕ СОБЫТИЯ ПЕРЕД СБОЕМ (РЕГИСТРАТОР G3O)]\n";
+    outReport += "[ПОСЛЕДНИЕ СОБЫТИЯ ПЕРЕД СБОЕМ (ЗАГРУЗКА / GURU / G3O)]\n";
     outReport += "--------------------------------------------------------------------------------\n";
-    if (recentLogs.empty()) {
+    if (!recentEvents || recentEvents[0] == '\\0') {
         outReport += "Записей в логе нет.\n";
     } else {
-        for (const auto& line : recentLogs) {
-            outReport += line;
-        }
+        outReport += recentEvents;
     }
     outReport += "\n";
 
-    // 6. Loaded Modules Table
-    outReport += "--------------------------------------------------------------------------------\n";
-    outReport += "[ЗАГРУЖЕННЫЕ МОДУЛИ]\n";
-    outReport += "--------------------------------------------------------------------------------\n";
-    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-    if (hSnap != INVALID_HANDLE_VALUE) {
-        MODULEENTRY32 me = { sizeof(MODULEENTRY32) };
-        if (Module32First(hSnap, &me)) {
-            do {
-                snprintf(buf, sizeof(buf), "0x%p - 0x%p  %-25s  %s\n",
-                         me.modBaseAddr, me.modBaseAddr + me.modBaseSize, me.szModule, me.szExePath);
-                outReport += buf;
-            } while (Module32Next(hSnap, &me));
-        }
-        CloseHandle(hSnap);
-    }
     outReport += "\n================================================================================\n";
+    outReport.Finish();
 }
 
-static void SaveReportToFile(const std::string& report) {
-    if (!s_crashLogPath[0]) DetermineCrashPaths();
-
-    // 1. Save to game folder
-    FILE* f = fopen(s_crashLogPath, "w");
-    if (f) {
-        fputs(report.c_str(), f);
-        fclose(f);
+static bool SaveReportToFile(const char* report, ReportFileTargets& files) {
+    if (!report) {
+        CloseReportFiles(files);
+        return false;
     }
-
-    // 2. Save to Documents\Gothic3
-    if (s_docCrashLogPath[0] != '\0') {
-        FILE* fDoc = fopen(s_docCrashLogPath, "w");
-        if (fDoc) {
-            fputs(report.c_str(), fDoc);
-            fclose(fDoc);
-        }
-    }
+    const bool saved = WriteReportToHandle(files.reportFile, report);
+    CloseReportFiles(files);
+    return saved;
 }
 
 static LONG HandleCrash(EXCEPTION_POINTERS* pExceptionInfo) {
-    if (InterlockedCompareExchange(&s_crashHandlingActive, 1, 0) != 0) {
+    if (!pExceptionInfo || !pExceptionInfo->ExceptionRecord) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
+    if (InterlockedCompareExchange(&s_reportPipelineActive, 1, 0) != 0) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    struct ReportPipelineGuard {
+        ~ReportPipelineGuard() { InterlockedExchange(&s_reportPipelineActive, 0); }
+    } reportPipelineGuard;
 
-    DetermineCrashPaths();
-    FlushDiagnosticLog();
+    const Config& config = GetConfig();
+    ReportFileTargets reportFiles;
+    s_dumpPath[0] = '\0';
+
+    // Preserve the dump before symbolization, logging, or report formatting can fail.
+    MiniDumpResult dumpResult;
+    if (config.writeCrashDump) {
+        dumpResult = WriteMiniDumpOnWorker(pExceptionInfo);
+    }
+
+    char dumpStatus[256] = {};
+    if (!config.writeCrashDump) {
+        snprintf(dumpStatus, sizeof(dumpStatus), "отключён настройкой WriteCrashDump=false");
+    } else if (dumpResult.written) {
+        snprintf(dumpStatus, sizeof(dumpStatus),
+                 "записан; размер %llu байт; сигнатура MDMP проверена (полная целостность не проверялась)",
+                 dumpResult.sizeBytes);
+    } else {
+        snprintf(dumpStatus, sizeof(dumpStatus),
+                 "не создан или не прошёл проверку; ошибка 0x%08lX; размер %llu байт",
+                 static_cast<unsigned long>(dumpResult.error), dumpResult.sizeBytes);
+    }
+
+    reportFiles = ReserveReportFiles(config.writeCrashLog);
+    CopyRecentLogs(s_crashEventSnapshot, sizeof(s_crashEventSnapshot));
 
     uintptr_t faultAddr = (uintptr_t)pExceptionInfo->ExceptionRecord->ExceptionAddress;
-    BlameResult blame = AnalyzeAddress(faultAddr);
-    std::vector<StackFrameInfo> stackFrames = WalkCallStack(pExceptionInfo->ContextRecord);
+    AnalyzeAddress(faultAddr, s_crashBlame);
+    const size_t stackFrameCount = WalkCallStack(
+        pExceptionInfo->ContextRecord, s_crashStackFrames, kMaxStackFrames);
 
-    if (GetConfig().writeCrashDump) {
-        WriteMiniDump(pExceptionInfo);
-    }
+    FixedTextBuffer runtimeContext(s_runtimeContextStorage, sizeof(s_runtimeContextStorage));
+    BuildRuntimeContext(runtimeContext, reportFiles, config.writeCrashLog, dumpStatus, s_dumpPath,
+                        GetCurrentProcessId(), GetCurrentThreadId());
+    FixedTextBuffer report(s_crashReportStorage, sizeof(s_crashReportStorage));
+    BuildReportText(report, pExceptionInfo, s_crashBlame, s_crashStackFrames,
+                    stackFrameCount, s_crashEventSnapshot, runtimeContext.CStr());
+    const bool reportSaved = config.writeCrashLog
+        ? SaveReportToFile(report.CStr(), reportFiles)
+        : false;
 
-    std::string report;
-    BuildReportText(report, pExceptionInfo, blame, stackFrames);
-    if (GetConfig().writeCrashLog) {
-        SaveReportToFile(report);
-    }
-
-    if (GetConfig().showCrashDialog) {
-        // Prepare human-friendly message for popup dialog
-        char msg[2048];
-        snprintf(msg, sizeof(msg),
+    if (config.showCrashDialog) {
+        snprintf(s_crashDialogMessage, sizeof(s_crashDialogMessage),
                  "Gothic 3 Optima — Обнаружен критический сбой!\n\n"
                  "Виновник сбоя: %s\n"
                  "Категория:     %s\n"
@@ -560,27 +968,33 @@ static LONG HandleCrash(EXCEPTION_POINTERS* pExceptionInfo) {
                  "Код ошибки:    0x%08X\n\n"
                  "Описание:\n%s\n\n"
                  "Рекомендация:\n%s\n\n"
-                 "Полный отчёт сохранён в:\n%s",
-                 blame.moduleName.c_str(),
-                 blame.category.c_str(),
-                 (void*)faultAddr, (unsigned int)blame.rva,
+                 "Отчёт: %s",
+                 s_crashBlame.moduleName,
+                 s_crashBlame.category,
+                 (void*)faultAddr, (unsigned int)s_crashBlame.rva,
                  pExceptionInfo->ExceptionRecord->ExceptionCode,
-                 blame.description.c_str(),
-                 blame.recommendation.c_str(),
-                 s_crashLogPath);
+                 s_crashBlame.description,
+                 s_crashBlame.recommendation,
+                 reportSaved ? s_crashLogPath :
+                     (config.writeCrashLog ? "не удалось записать файл отчёта" : "запись файла отчёта отключена"));
 
-        int wideLen = MultiByteToWideChar(CP_UTF8, 0, msg, -1, nullptr, 0);
-        if (wideLen > 0) {
-            std::vector<wchar_t> wideMsg(wideLen);
-            MultiByteToWideChar(CP_UTF8, 0, msg, -1, wideMsg.data(), wideLen);
-            MessageBoxW(NULL, wideMsg.data(), L"Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+        int wideLen = MultiByteToWideChar(CP_UTF8, 0, s_crashDialogMessage, -1, nullptr, 0);
+        if (wideLen > 0 && wideLen <= static_cast<int>(sizeof(s_crashDialogWideMessage) / sizeof(s_crashDialogWideMessage[0]))) {
+            const int converted = MultiByteToWideChar(
+                CP_UTF8, 0, s_crashDialogMessage, -1, s_crashDialogWideMessage,
+                static_cast<int>(sizeof(s_crashDialogWideMessage) / sizeof(s_crashDialogWideMessage[0])));
+            if (converted > 0) {
+                MessageBoxW(NULL, s_crashDialogWideMessage, L"Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+            } else {
+                MessageBoxA(NULL, s_crashDialogMessage, "Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+            }
         } else {
-            MessageBoxA(NULL, msg, "Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+            MessageBoxA(NULL, s_crashDialogMessage, "Gothic 3 Optima — Crash Investigator", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
         }
     }
 
-    // Log to debugger before leaving
-    OutputDebugStringA(report.c_str());
+    // Bypass the logging hook to avoid re-entering the logger during a crash.
+    OutputCrashReportToDebugger(report.CStr());
 
     return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -678,6 +1092,14 @@ void InitializeCrashHandler() {
     FlushDiagnosticLog();
     InitializeSymbolHandler();
 
+    // Start the dedicated thread before installing the crash filter.
+    if (GetConfig().writeCrashDump) {
+        const DWORD workerError = InitializeMiniDumpWorker();
+        if (workerError != ERROR_SUCCESS) {
+            Log("Crash", "Minidump worker unavailable (%lu).", workerError);
+        }
+    }
+
     // 1. Install top-level unhandled exception filter
     s_previousFilter = SetUnhandledExceptionFilter(G3OUnhandledCrashFilter);
 
@@ -694,7 +1116,7 @@ void InitializeCrashHandler() {
     // 3. Register VEH as secondary watchdog
     s_vehHandle = AddVectoredExceptionHandler(0, G3OVectoredExceptionHandler);
 
-    Log("G3O", "Crash Investigator initialized. Crash reports will be saved to '%s'", s_crashLogPath);
+    Log("G3O", "Crash reports and dumps are written under '%s'.", s_crashLogDirectory);
 }
 
 void ShutdownCrashHandler() {
@@ -705,6 +1127,7 @@ void ShutdownCrashHandler() {
     if (s_origSetUnhandledExceptionFilter) {
         MH_DisableHook((void*)SetUnhandledExceptionFilter);
     }
+    // The dump worker is process-lifetime; joining it from DllMain can deadlock.
     ShutdownSymbolHandler();
 }
 
@@ -774,42 +1197,49 @@ void HookEngineFatalErrors() {
     Log("G3O", "Engine Fatal Error and Guru hooks installed in SharedBase.dll");
 }
 
-static void CaptureFatalCaller(std::string& callerFunction, std::string& stackTrace) {
+static void CaptureFatalCaller(FixedTextBuffer& callerFunction, FixedTextBuffer& stackTrace) {
+    callerFunction.Reset();
+    stackTrace.Reset();
     CONTEXT context = {};
     RtlCaptureContext(&context);
-    const std::vector<StackFrameInfo> frames = WalkCallStack(&context);
+    const size_t frameCount = WalkCallStack(&context, s_engineFatalStackFrames, kMaxStackFrames);
 
-    char frameText[1024];
-    for (size_t i = 0; i < frames.size(); ++i) {
-        const StackFrameInfo& frame = frames[i];
-        snprintf(frameText, sizeof(frameText), "#%02u 0x%p [%s+0x%X]%s%s\n",
-                 static_cast<unsigned>(i), (void*)frame.address, frame.moduleName.c_str(),
-                 static_cast<unsigned>(frame.rva), frame.symbolName.empty() ? "" : " ",
-                 frame.symbolName.c_str());
-        stackTrace += frameText;
+    for (size_t i = 0; i < frameCount; ++i) {
+        const StackFrameInfo& frame = s_engineFatalStackFrames[i];
+        stackTrace.AppendFormat("#%02u 0x%p [%s+0x%X]%s%s\n",
+                                static_cast<unsigned>(i), (void*)frame.address, frame.moduleName,
+                                static_cast<unsigned>(frame.rva), frame.symbolName[0] == 0 ? "" : " ",
+                                frame.symbolName);
 
-        if (callerFunction.empty() && !frame.moduleName.empty() &&
-            frame.moduleName[0] != '<' && ToLower(frame.moduleName) != "dinput8.dll") {
-            if (!frame.symbolName.empty()) {
-                callerFunction = frame.moduleName + "!" + frame.symbolName;
+        if (callerFunction.Size() == 0 && frame.moduleName[0] != 0 &&
+            frame.moduleName[0] != '<' && _stricmp(frame.moduleName, "dinput8.dll") != 0) {
+            if (frame.symbolName[0] != 0) {
+                callerFunction.AppendFormat("%s!%s", frame.moduleName, frame.symbolName);
             } else {
-                snprintf(frameText, sizeof(frameText), "%s+0x%X", frame.moduleName.c_str(),
-                         static_cast<unsigned>(frame.rva));
-                callerFunction = frameText;
+                callerFunction.AppendFormat("%s+0x%X", frame.moduleName,
+                                            static_cast<unsigned>(frame.rva));
             }
         }
     }
 
-    if (frames.empty()) {
-        stackTrace = "<стек недоступен>\n";
-    }
-    if (callerFunction.empty()) {
-        callerFunction = "<не удалось определить по стеку>";
-    }
+    if (frameCount == 0) stackTrace.Append("<стек недоступен>\n");
+    if (callerFunction.Size() == 0) callerFunction.Append("<не удалось определить по стеку>");
+    callerFunction.Finish();
+    stackTrace.Finish();
 }
 
 void ReportEngineFatalError(const char* module, const char* message, const char* file, int line) {
-    DetermineCrashPaths();
+    if (InterlockedCompareExchange(&s_reportPipelineActive, 1, 0) != 0) {
+        return;
+    }
+    struct ReportPipelineGuard {
+        ~ReportPipelineGuard() { InterlockedExchange(&s_reportPipelineActive, 0); }
+    } reportPipelineGuard;
+
+    const Config& config = GetConfig();
+    ReportFileTargets reportFiles = ReserveReportFiles(config.writeCrashLog);
+
+    CopyRecentLogs(s_engineFatalEventSnapshot, sizeof(s_engineFatalEventSnapshot));
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -817,33 +1247,23 @@ void ReportEngineFatalError(const char* module, const char* message, const char*
     snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 
-    std::string callerFunction;
-    std::string stackTrace;
-    try {
-        CaptureFatalCaller(callerFunction, stackTrace);
-    } catch (...) {
-        callerFunction = "<не удалось определить по стеку>";
-        stackTrace = "<ошибка сбора стека>\n";
-    }
+    FixedTextBuffer callerFunction(s_engineFatalCallerStorage, sizeof(s_engineFatalCallerStorage));
+    FixedTextBuffer stackTrace(s_engineFatalStackStorage, sizeof(s_engineFatalStackStorage));
+    CaptureFatalCaller(callerFunction, stackTrace);
 
-    Log("EngineFatal", "Fatal Error: module='%s', message='%s', source='%s:%d', caller='%s'.",
-        module ? module : "<unknown>", message ? message : "<not provided by overload>",
-        file ? file : "<unknown>", line, callerFunction.c_str());
-
-    std::vector<std::string> recentLogs;
-    GetRecentLogs(recentLogs);
-    std::string recentEvents;
-    for (const std::string& entry : recentLogs) {
-        recentEvents += entry;
+    FixedTextBuffer runtimeContext(s_runtimeContextStorage, sizeof(s_runtimeContextStorage));
+    BuildRuntimeContext(runtimeContext, reportFiles, config.writeCrashLog,
+                        "не создавался: движковая FatalError не передаёт EXCEPTION_POINTERS",
+                        nullptr, GetCurrentProcessId(), GetCurrentThreadId());
+    FixedTextBuffer report(s_engineFatalReportStorage, sizeof(s_engineFatalReportStorage));
+    BuildEngineFatalReport(report, timestamp, module, message, callerFunction.CStr(), file, line,
+                           stackTrace.CStr(), s_engineFatalEventSnapshot,
+                           GetCurrentProcessId(), GetCurrentThreadId(), runtimeContext.CStr());
+    if (config.writeCrashLog) {
+        SaveReportToFile(report.CStr(), reportFiles);
+    } else {
+        CloseReportFiles(reportFiles);
     }
-
-    const std::string report = BuildEngineFatalReport(
-        timestamp, module, message, callerFunction.c_str(), file, line, stackTrace.c_str(),
-        recentEvents.c_str(), GetCurrentProcessId(), GetCurrentThreadId());
-    if (GetConfig().writeCrashLog) {
-        SaveReportToFile(report);
-    }
-    FlushDiagnosticLog();
 }
 
 } // namespace G3O

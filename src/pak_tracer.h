@@ -32,17 +32,6 @@ bool PakTracer_TryGetPredecompressed(
     DWORD* pActualOut
 );
 
-bool PakTracer_TryBypassReadFile(
-    HANDLE hFile,
-    void* buffer,
-    DWORD bytesRequested,
-    DWORD* pBytesRead,
-    LPOVERLAPPED ov
-);
-
-uint32_t PakTracer_GetBypassedReads();
-uint64_t PakTracer_GetBypassedReadBytes();
-
 bool PakTracer_IsActive();
 
 } // namespace G3O

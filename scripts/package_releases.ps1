@@ -35,7 +35,7 @@ Copy-Item $bin (Join-Path $stageCore "dinput8.dll") -Force
 
 $readmeCore = @"
 ================================================================================
-GOTHIC 3 OPTIMA - PUP-COMPATIBLE DEVELOPMENT CORE ($Version)
+GOTHIC 3 OPTIMA - DEVELOPMENT CORE ($Version)
 ================================================================================
 
 FEATURES INCLUDED:
@@ -44,21 +44,20 @@ FEATURES INCLUDED:
 - G3O version label in the main menu.
 - Optional legacy G3SE plugin discovery when its DLL is installed.
 
-PUP owns background resource work, caches, prefetching, file system,
-FMOD audio and asynchronous save writing. This core does not modify them.
-The older 1.3.0 release had different features; see README.md.
 Back up an existing game-folder dinput8.dll before installing this build.
-In-game compatibility testing is still required.
 
 INSTALLATION:
 1. Extract 'dinput8.dll' from this archive directly into your Gothic 3 game folder
    (where 'Gothic3.exe' is located).
 2. [OPTIONAL]: DXVK is an independent graphics component, not part of G3O.
 
+CONFIGURATION AND DIAGNOSTICS:
+- Keep 'G3O.ini' beside 'Gothic3.exe'.
+- G3O logs, reports, dumps and traces go in a flat 'G3O' folder beside the executable.
+- The game folder must be writable for G3O to save these files.
+
 COMPATIBILITY:
-- Gothic 3 v1.75.14 (Community Patch)
-- Designed to avoid overlap with installed Parallel Universe Patch 1.1.1.
-- In-game compatibility with modpacks and Update Pack is not yet verified.
+- In-game compatibility with PUP and modpacks has not been tested.
 ================================================================================
 "@
 Set-Content -Path (Join-Path $stageCore "README_INSTALL.txt") -Value $readmeCore -Encoding UTF8

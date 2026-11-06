@@ -3,7 +3,7 @@
 
 namespace G3O {
 
-// Lightweight passive profiler. Writes one line per second to G3O_profile.log:
+// Lightweight passive profiler. Writes one line per second to a timestamped file in G3O:
 // FPS, worst frame time, ReadFile volume/time, culling call count, CPU usage
 // of the process and of its busiest thread. Does not alter game behaviour.
 void InitializeProfiler();
