@@ -1,0 +1,11 @@
+import pefile
+from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+
+pe = pefile.PE(r'E:\SteamLibrary\steamapps\common\Gothic 3\Game.dll')
+md = Cs(CS_ARCH_X86, CS_MODE_32)
+
+rva = 0x19C420
+code = pe.get_data(rva, 64)
+print(f"=== Game.dll RVA 0x{rva:X} ===")
+for ins in md.disasm(code, 0x10000000 + rva):
+    print(f"0x{ins.address:X}:  {ins.mnemonic} {ins.op_str}")

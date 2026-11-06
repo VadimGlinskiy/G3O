@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+project(load_sampler_test LANGUAGES CXX)
+add_executable(load_sampler_test test.cpp ../../src/load_sampler.cpp)
+target_include_directories(load_sampler_test PRIVATE ../../src)
+target_compile_features(load_sampler_test PRIVATE cxx_std_17)
