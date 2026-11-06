@@ -1,6 +1,7 @@
 #include "crash_handler.h"
 #include "diagnostic_logger.h"
 #include "config_manager.h"
+#include "engine_fatal_report.h"
 #include <minhook.h>
 #include <dbghelp.h>
 #include <psapi.h>
@@ -25,6 +26,24 @@ typedef LPTOP_LEVEL_EXCEPTION_FILTER (WINAPI *SetUnhandledExceptionFilter_t)(LPT
 static SetUnhandledExceptionFilter_t s_origSetUnhandledExceptionFilter = nullptr;
 static LPTOP_LEVEL_EXCEPTION_FILTER s_previousFilter = nullptr;
 static PVOID s_vehHandle = nullptr;
+typedef BOOL (WINAPI *SymRefreshModuleList_t)(HANDLE hProcess);
+static SymRefreshModuleList_t s_symRefreshModuleList = nullptr;
+
+static volatile LONG s_dbgHelpActive = 0;
+static HANDLE s_symbolProcess = nullptr;
+static volatile LONG s_symbolHandlerReady = 0;
+
+class DbgHelpLockGuard {
+public:
+    DbgHelpLockGuard() : m_acquired(InterlockedCompareExchange(&s_dbgHelpActive, 1, 0) == 0) {}
+    ~DbgHelpLockGuard() {
+        if (m_acquired) InterlockedExchange(&s_dbgHelpActive, 0);
+    }
+    bool acquired() const { return m_acquired; }
+
+private:
+    bool m_acquired;
+};
 
 struct BlameResult {
     std::string moduleName;
@@ -225,10 +244,22 @@ static std::vector<StackFrameInfo> WalkCallStack(CONTEXT* pContext) {
     std::vector<StackFrameInfo> frames;
     if (!pContext) return frames;
 
-    HANDLE hProcess = GetCurrentProcess();
+    DbgHelpLockGuard dbgHelpLock;
+    if (!dbgHelpLock.acquired() ||
+        InterlockedCompareExchange(&s_symbolHandlerReady, 0, 0) == 0 || !s_symbolProcess) {
+        return frames;
+    }
+    HANDLE hProcess = s_symbolProcess;
     HANDLE hThread = GetCurrentThread();
 
-    SymInitialize(hProcess, NULL, TRUE);
+    const BOOL modulesRefreshed = s_symRefreshModuleList && s_symRefreshModuleList(hProcess);
+    if (!modulesRefreshed) {
+        SymCleanup(hProcess);
+        if (!SymInitialize(hProcess, nullptr, TRUE)) {
+            InterlockedExchange(&s_symbolHandlerReady, 0);
+            return frames;
+        }
+    }
 
     CONTEXT ctx = *pContext;
     STACKFRAME64 frame = { 0 };
@@ -286,13 +317,14 @@ static std::vector<StackFrameInfo> WalkCallStack(CONTEXT* pContext) {
         frames.push_back(sfi);
     }
 
-    SymCleanup(hProcess);
     return frames;
 }
 
 static void WriteMiniDump(EXCEPTION_POINTERS* pExceptionInfo) {
     if (!s_dumpPath[0]) DetermineCrashPaths();
 
+    DbgHelpLockGuard dbgHelpLock;
+    if (!dbgHelpLock.acquired()) return;
     HANDLE hDumpFile = CreateFileA(s_dumpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hDumpFile != INVALID_HANDLE_VALUE) {
         MINIDUMP_EXCEPTION_INFORMATION mei;
@@ -561,6 +593,50 @@ static LONG WINAPI G3OUnhandledCrashFilter(EXCEPTION_POINTERS* pExceptionInfo) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+static void InitializeSymbolHandler() {
+    HANDLE currentProcess = GetCurrentProcess();
+    HANDLE symbolProcess = nullptr;
+    if (!DuplicateHandle(currentProcess, currentProcess, currentProcess, &symbolProcess,
+                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        Log("Crash", "DbgHelp symbol session unavailable: DuplicateHandle failed (%lu).", GetLastError());
+        return;
+    }
+
+    DbgHelpLockGuard dbgHelpLock;
+    if (!dbgHelpLock.acquired()) {
+        CloseHandle(symbolProcess);
+        Log("Crash", "DbgHelp symbol session unavailable: another DbgHelp call is active.");
+        return;
+    }
+    HMODULE hDbgHelp = GetModuleHandleA("dbghelp.dll");
+    s_symRefreshModuleList = hDbgHelp
+        ? reinterpret_cast<SymRefreshModuleList_t>(GetProcAddress(hDbgHelp, "SymRefreshModuleList"))
+        : nullptr;
+    if (!SymInitialize(symbolProcess, nullptr, TRUE)) {
+        const DWORD error = GetLastError();
+        CloseHandle(symbolProcess);
+        Log("Crash", "DbgHelp symbol session unavailable: SymInitialize failed (%lu).", error);
+        return;
+    }
+
+    s_symbolProcess = symbolProcess;
+    InterlockedExchange(&s_symbolHandlerReady, 1);
+}
+
+static void ShutdownSymbolHandler() {
+    DbgHelpLockGuard dbgHelpLock;
+    if (!dbgHelpLock.acquired()) return;
+
+    if (InterlockedExchange(&s_symbolHandlerReady, 0) != 0 && s_symbolProcess) {
+        SymCleanup(s_symbolProcess);
+    }
+    if (s_symbolProcess) {
+        CloseHandle(s_symbolProcess);
+        s_symbolProcess = nullptr;
+    }
+    s_symRefreshModuleList = nullptr;
+}
+
 static LONG WINAPI G3OVectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo) {
     if (!pExceptionInfo || !pExceptionInfo->ExceptionRecord) {
         return EXCEPTION_CONTINUE_SEARCH;
@@ -600,6 +676,7 @@ static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI HookedSetUnhandledExceptionFilter(LPT
 void InitializeCrashHandler() {
     DetermineCrashPaths();
     FlushDiagnosticLog();
+    InitializeSymbolHandler();
 
     // 1. Install top-level unhandled exception filter
     s_previousFilter = SetUnhandledExceptionFilter(G3OUnhandledCrashFilter);
@@ -628,15 +705,16 @@ void ShutdownCrashHandler() {
     if (s_origSetUnhandledExceptionFilter) {
         MH_DisableHook((void*)SetUnhandledExceptionFilter);
     }
+    ShutdownSymbolHandler();
 }
 
 // -----------------------------------------------------------------------------
 // Engine-level Fatal Error hooks (SharedBase.dll bCErrorAdmin)
 // -----------------------------------------------------------------------------
-typedef void (__thiscall *CallFatalError1_t)(void* pThis, const char* msg, const char* file, int line);
+typedef void (__thiscall *CallFatalError1_t)(void* pThis, const char* module, const char* file, int line);
 static CallFatalError1_t s_origCallFatalError1 = nullptr;
 
-typedef void (__thiscall *CallFatalError2_t)(void* pThis, const char* msg, const char* file, const char* func, int line);
+typedef void (__thiscall *CallFatalError2_t)(void* pThis, const char* module, const char* description, const char* file, int line);
 static CallFatalError2_t s_origCallFatalError2 = nullptr;
 
 typedef int (__thiscall *CallExceptionError_t)(void* pThis, void* pExceptionPointers);
@@ -653,29 +731,20 @@ static int __fastcall HookedCallExceptionError(void* pThis, void* /*edx*/, void*
     return 1;
 }
 
-static void __fastcall HookedCallFatalError1(void* pThis, void* /*edx*/, const char* msg, const char* file, int line) {
-    char fullMsg[1024];
-    snprintf(fullMsg, sizeof(fullMsg), "Движок Gothic 3 вызвал Fatal Error:\nСообщение: %s\nФайл: %s (строка %d)",
-             msg ? msg : "<null>", file ? file : "<unknown>", line);
-    Log("EngineFatal", "%s", fullMsg);
-
-    ReportManualCrash("Gothic 3 Engine Fatal Error", msg ? msg : "Engine Fatal Error", file, line);
+static void __fastcall HookedCallFatalError1(void* pThis, void* /*edx*/, const char* module, const char* file, int line) {
+    ReportEngineFatalError(module, nullptr, file, line);
 
     if (s_origCallFatalError1) {
-        s_origCallFatalError1(pThis, msg, file, line);
+        s_origCallFatalError1(pThis, module, file, line);
     }
 }
 
-static void __fastcall HookedCallFatalError2(void* pThis, void* /*edx*/, const char* msg, const char* file, const char* func, int line) {
-    char fullMsg[1024];
-    snprintf(fullMsg, sizeof(fullMsg), "Движок Gothic 3 вызвал Fatal Error:\nСообщение: %s\nФункция: %s\nФайл: %s (строка %d)",
-             msg ? msg : "<null>", func ? func : "<unknown>", file ? file : "<unknown>", line);
-    Log("EngineFatal", "%s", fullMsg);
-
-    ReportManualCrash("Gothic 3 Engine Fatal Error", msg ? msg : "Engine Fatal Error", file, line);
+static void __fastcall HookedCallFatalError2(
+    void* pThis, void* /*edx*/, const char* module, const char* description, const char* file, int line) {
+    ReportEngineFatalError(module, description, file, line);
 
     if (s_origCallFatalError2) {
-        s_origCallFatalError2(pThis, msg, file, func, line);
+        s_origCallFatalError2(pThis, module, description, file, line);
     }
 }
 
@@ -705,12 +774,76 @@ void HookEngineFatalErrors() {
     Log("G3O", "Engine Fatal Error and Guru hooks installed in SharedBase.dll");
 }
 
-void ReportManualCrash(const char* title, const char* message, const char* file, int line) {
-    __try {
-        RaiseException(0xE0000001, EXCEPTION_NONCONTINUABLE, 0, NULL);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Exception reported
+static void CaptureFatalCaller(std::string& callerFunction, std::string& stackTrace) {
+    CONTEXT context = {};
+    RtlCaptureContext(&context);
+    const std::vector<StackFrameInfo> frames = WalkCallStack(&context);
+
+    char frameText[1024];
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const StackFrameInfo& frame = frames[i];
+        snprintf(frameText, sizeof(frameText), "#%02u 0x%p [%s+0x%X]%s%s\n",
+                 static_cast<unsigned>(i), (void*)frame.address, frame.moduleName.c_str(),
+                 static_cast<unsigned>(frame.rva), frame.symbolName.empty() ? "" : " ",
+                 frame.symbolName.c_str());
+        stackTrace += frameText;
+
+        if (callerFunction.empty() && !frame.moduleName.empty() &&
+            frame.moduleName[0] != '<' && ToLower(frame.moduleName) != "dinput8.dll") {
+            if (!frame.symbolName.empty()) {
+                callerFunction = frame.moduleName + "!" + frame.symbolName;
+            } else {
+                snprintf(frameText, sizeof(frameText), "%s+0x%X", frame.moduleName.c_str(),
+                         static_cast<unsigned>(frame.rva));
+                callerFunction = frameText;
+            }
+        }
     }
+
+    if (frames.empty()) {
+        stackTrace = "<стек недоступен>\n";
+    }
+    if (callerFunction.empty()) {
+        callerFunction = "<не удалось определить по стеку>";
+    }
+}
+
+void ReportEngineFatalError(const char* module, const char* message, const char* file, int line) {
+    DetermineCrashPaths();
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char timestamp[40];
+    snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+    std::string callerFunction;
+    std::string stackTrace;
+    try {
+        CaptureFatalCaller(callerFunction, stackTrace);
+    } catch (...) {
+        callerFunction = "<не удалось определить по стеку>";
+        stackTrace = "<ошибка сбора стека>\n";
+    }
+
+    Log("EngineFatal", "Fatal Error: module='%s', message='%s', source='%s:%d', caller='%s'.",
+        module ? module : "<unknown>", message ? message : "<not provided by overload>",
+        file ? file : "<unknown>", line, callerFunction.c_str());
+
+    std::vector<std::string> recentLogs;
+    GetRecentLogs(recentLogs);
+    std::string recentEvents;
+    for (const std::string& entry : recentLogs) {
+        recentEvents += entry;
+    }
+
+    const std::string report = BuildEngineFatalReport(
+        timestamp, module, message, callerFunction.c_str(), file, line, stackTrace.c_str(),
+        recentEvents.c_str(), GetCurrentProcessId(), GetCurrentThreadId());
+    if (GetConfig().writeCrashLog) {
+        SaveReportToFile(report);
+    }
+    FlushDiagnosticLog();
 }
 
 } // namespace G3O

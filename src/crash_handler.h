@@ -12,8 +12,8 @@ void ShutdownCrashHandler();
 // Hook engine-level fatal errors in SharedBase.dll (bCErrorAdmin)
 void HookEngineFatalErrors();
 
-// Trigger a manual crash report (e.g. on fatal assertion)
-void ReportManualCrash(const char* title, const char* message, const char* file, int line);
+// Write an engine Fatal Error report without synthesizing an exception.
+void ReportEngineFatalError(const char* module, const char* message, const char* file, int line);
 
 // Path to the crash report log
 const char* GetCrashReportPath();

@@ -36,6 +36,7 @@ add_library(dinput8 SHARED
     src/diagnostic_logger.h
     src/crash_handler.cpp
     src/crash_handler.h
+    src/engine_fatal_report.h
     src/borderless_window.cpp
     src/borderless_window.h
     src/camera_controller.cpp
