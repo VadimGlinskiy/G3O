@@ -3,6 +3,7 @@
 #include "config_manager.h"
 #include "g3o_output_path.h"
 #include "pak_cache_budget.h"
+#include "pak_prefetch_policy.h"
 #include "pak_read_at.h"
 #include "decompressor_avx2.h"
 #include <libdeflate.h>
@@ -17,6 +18,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <utility>
 #include <stdio.h>
 
 namespace G3O {
@@ -37,12 +39,14 @@ struct InFlightRead {
     const void* buffer = nullptr;
     DWORD bytesRead = 0;
     uint64_t timestampUs = 0;
+    std::string archiveName;
     bool valid = false;
 };
 
 static thread_local InFlightRead tl_lastRead;
 
 static std::atomic<bool> s_isActive{ false };
+static std::atomic<bool> s_prefetchLookupEnabled{ false };
 static std::string s_currentSaveName = "Unknown";
 static std::string BuildPakTraceFileName() {
     std::string fileName = "G3O_PakTrace_";
@@ -453,7 +457,14 @@ bool PakTracer_IsActive() {
     return s_isActive.load(std::memory_order_relaxed);
 }
 
+bool PakTracer_CanTryGetPredecompressed() {
+    return ShouldTryPredecompressedLookup(
+        s_isActive.load(std::memory_order_acquire),
+        s_prefetchLookupEnabled.load(std::memory_order_acquire));
+}
+
 void PakTracer_OnLoadStart(const char* saveName) {
+    s_prefetchLookupEnabled.store(false, std::memory_order_release);
     if (s_activeWorkerCount != 0) {
         Log("G3O", "[PakCache] Previous worker shutdown is incomplete; skipping prefetch for this load.");
         return;
@@ -585,6 +596,9 @@ void PakTracer_OnLoadStart(const char* saveName) {
     if (requestedWorkerCount > 0 && s_activeWorkerCount == 0) {
         Log("G3O", "[PakCache] No background workers started; the load will use the normal PAK read path.");
     }
+    if (s_activeWorkerCount > 0) {
+        s_prefetchLookupEnabled.store(true, std::memory_order_release);
+    }
     Log("G3O", "[PakTracer] Tracing started for savegame '%s'", s_currentSaveName.c_str());
 }
 
@@ -615,6 +629,7 @@ void PakTracer_RecordRead(
     tl_lastRead.buffer = buffer;
     tl_lastRead.bytesRead = bytesRead;
     tl_lastRead.timestampUs = (s_freq.QuadPart > 0) ? ((t0.QuadPart - s_loadStartTime.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+    tl_lastRead.archiveName = std::move(archive);
     tl_lastRead.valid = true;
 
     QueryPerformanceCounter(&t1);
@@ -629,12 +644,12 @@ bool PakTracer_TryGetPredecompressed(
     DWORD outCapacity,
     DWORD* pActualOut
 ) {
-    if (!s_isActive.load(std::memory_order_relaxed)) return false;
+    if (!PakTracer_CanTryGetPredecompressed()) return false;
     if (!tl_lastRead.valid || tl_lastRead.buffer != inBuffer || tl_lastRead.bytesRead != inSize) {
         return false;
     }
 
-    std::string archive = ResolveArchiveName(tl_lastRead.hFile);
+    const std::string& archive = tl_lastRead.archiveName;
     if (archive.empty()) return false;
 
     uint64_t key = MakeCacheKey(archive, tl_lastRead.offset);
@@ -716,7 +731,7 @@ void PakTracer_RecordDecompress(
     if (tl_lastRead.valid && tl_lastRead.buffer == inBuffer && tl_lastRead.bytesRead == inSize) {
         TraceRecord rec;
         rec.seq = s_seqCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-        std::string archive = ResolveArchiveName(tl_lastRead.hFile);
+        const std::string& archive = tl_lastRead.archiveName;
         strncpy_s(rec.pakName, sizeof(rec.pakName), archive.c_str(), _TRUNCATE);
         rec.offset = tl_lastRead.offset;
         rec.inBytes = inSize;
@@ -750,6 +765,7 @@ void PakTracer_RecordDecompress(
 
 
 void PakTracer_OnLoadEnd() {
+    s_prefetchLookupEnabled.store(false, std::memory_order_release);
     s_isActive.store(false, std::memory_order_release);
     tl_lastRead.valid = false;
 

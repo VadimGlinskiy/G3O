@@ -32,6 +32,7 @@ bool PakTracer_TryGetPredecompressed(
     DWORD* pActualOut
 );
 
+bool PakTracer_CanTryGetPredecompressed();
 bool PakTracer_IsActive();
 
 } // namespace G3O
