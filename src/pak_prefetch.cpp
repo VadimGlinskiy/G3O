@@ -3,10 +3,26 @@
 #include "diagnostic_logger.h"
 #include "pak_read_at.h"
 #include <windows.h>
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <vector>
 
 namespace G3O {
+
+static bool IsGothic3ArchiveExtension(const std::string& fileName) {
+    size_t dot = fileName.find_last_of('.');
+    if (dot == std::string::npos) return false;
+    std::string ext = fileName.substr(dot);
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (ext == ".pak" || ext == ".mod" || ext == ".cpt") return true;
+    if (ext.size() == 4 && (ext[1] == 'm' || ext[1] == 'p' || ext[1] == 'c') &&
+        std::isdigit(static_cast<unsigned char>(ext[2])) &&
+        std::isdigit(static_cast<unsigned char>(ext[3]))) {
+        return true;
+    }
+    return false;
+}
 
 static DWORD WINAPI PrefetchThread(LPVOID) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -16,13 +32,20 @@ static DWORD WINAPI PrefetchThread(LPVOID) {
     std::string dir(exe);
     size_t slash = dir.find_last_of("\\/");
     if (slash != std::string::npos) dir.resize(slash + 1);
-    std::string pattern = dir + "Data\\*.pak";
+    std::string pattern = dir + "Data\\*.*";
 
     std::vector<std::string> files;
     WIN32_FIND_DATAA fd;
     HANDLE hf = FindFirstFileA(pattern.c_str(), &fd);
     if (hf != INVALID_HANDLE_VALUE) {
-        do { files.push_back(dir + "Data\\" + fd.cFileName); } while (FindNextFileA(hf, &fd));
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                std::string name(fd.cFileName);
+                if (IsGothic3ArchiveExtension(name)) {
+                    files.push_back(dir + "Data\\" + name);
+                }
+            }
+        } while (FindNextFileA(hf, &fd));
         FindClose(hf);
     }
 
@@ -53,7 +76,7 @@ static DWORD WINAPI PrefetchThread(LPVOID) {
     }
     VirtualFree(buf, 0, MEM_RELEASE);
     QueryPerformanceCounter(&t1);
-    Log("G3O", "[PakPrefetch] Warmed %u pak files, %.2f GB in %.2f s",
+    Log("G3O", "[PakPrefetch] Warmed %u archive files (.pak/.mod/.mXX), %.2f GB in %.2f s",
         (unsigned)files.size(), total / 1073741824.0, (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart);
     return 0;
 }

@@ -2,8 +2,10 @@
 #include "diagnostic_logger.h"
 #include "d3d9_hook.h"
 #include "config_manager.h"
+#include "savegame_profiler.h"
 #include "timestamped_path.h"
 #include "g3o_output_path.h"
+#include "profiler_sample_policy.h"
 #include <minhook.h>
 #include <d3d9.h>
 #include <tlhelp32.h>
@@ -13,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <atomic>
 #include <stdio.h>
 
 namespace G3O {
@@ -26,6 +29,11 @@ static volatile LONG   s_readCalls = 0;
 static volatile LONG64 s_readBytes = 0;
 static volatile LONG64 s_readUs = 0;
 static volatile LONG   s_busyTid = 0;
+static std::atomic<bool> s_gameplaySessionStarted{ false };
+
+static SRWLOCK s_frameWindowLock = SRWLOCK_INIT;
+static std::vector<LONG> s_frameTimesUsWindow;
+static std::vector<LONG> s_allGameplayFrameTimesUs;
 
 static LARGE_INTEGER s_freq = []() {
     LARGE_INTEGER li;
@@ -44,80 +52,80 @@ static const LONG SAMPLE_CAP = 1 << 16;
 static DWORD s_samples[SAMPLE_CAP];
 static volatile LONG s_sampleCount = 0;
 
-// ---- ReadFile timing --------------------------------------------------------
-typedef BOOL (WINAPI* ReadFile_t)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
-static ReadFile_t Real_ReadFile = NULL;
-
-static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead, LPOVERLAPPED ov) {
-    LARGE_INTEGER t0, t1;
-    QueryPerformanceCounter(&t0);
-    BOOL r = Real_ReadFile(h, buf, n, pRead, ov);
-    QueryPerformanceCounter(&t1);
-    InterlockedIncrement(&s_readCalls);
-    InterlockedExchangeAdd64(&s_readBytes, (LONG64)((pRead && r) ? *pRead : 0));
-    if (s_freq.QuadPart > 0) {
-        InterlockedExchangeAdd64(&s_readUs, (t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart);
-    }
-    return r;
-}
-
-// ---- FileSystem.dll!RemoveFromDirCache (suspected load-time hotspot) --------
-typedef void (__thiscall* RemoveFromDirCache_t)(void* pThis, const void* name, bool a, bool b);
-static RemoveFromDirCache_t Real_RemoveFromDirCache = NULL;
-static volatile LONG   s_rfdCalls = 0;
-static volatile LONG64 s_rfdUs = 0;
-static volatile LONG   s_rfdEntries = 0;
-static const int RFD_SAMPLES = 40;
-static char s_rfdText[RFD_SAMPLES][112];
-static volatile LONG s_rfdTextCount = 0;
-static LONG s_rfdTextPrinted = 0;
-
-static void __fastcall Hooked_RemoveFromDirCache(void* pThis, void*, const void* name, bool a, bool b) {
-    LARGE_INTEGER t0, t1;
-    QueryPerformanceCounter(&t0);
-    Real_RemoveFromDirCache(pThis, name, a, b);
-    QueryPerformanceCounter(&t1);
-    LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
-    InterlockedIncrement(&s_rfdCalls);
-    InterlockedExchangeAdd64(&s_rfdUs, us);
-    LONG entries = *(LONG*)((BYTE*)pThis + 0x38); // element count of the dir cache map
-    s_rfdEntries = entries;
-    LONG idx = s_rfdTextCount;
-    if (idx < RFD_SAMPLES && name) {
-        // eastl::basic_string<char> with small-string optimisation
-        const BYTE* s = (const BYTE*)name;
-        const char* ptr; DWORD len;
-        if (s[0x0B] & 0x80) { ptr = *(const char**)s; len = *(const DWORD*)(s + 4); }
-        else { ptr = (const char*)s; len = 0x0B - (DWORD)(signed char)s[0x0B]; }
-        if (len > 90) len = 90;
-        char tmp[100] = {};
-        if (ptr && !IsBadReadPtr(ptr, len)) memcpy(tmp, ptr, len);
-        snprintf(s_rfdText[idx], sizeof(s_rfdText[idx]), "args(%d,%d) entries=%ld took=%lldus name=%s", (int)a, (int)b, entries, us, tmp);
-        s_rfdTextCount = idx + 1;
-    }
-}
-// ---- Frame timing (IDirect3DDevice9::Present) -------------------------------
+// ---- Frame timing (IDirect3DDevice9::Present / eCDX9Device::SwapScreen) -----
 typedef HRESULT (STDMETHODCALLTYPE* Present_t)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
 static Present_t Real_Present = NULL;
 
-static HRESULT STDMETHODCALLTYPE Hooked_Present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND w, const RGNDATA* d) {
+void ProfilerRecordPresentedFrame() {
     InvalidateD3D9StateCaches();
     if (GetConfig().enableProfiler && s_freq.QuadPart > 0) {
+        if (!IsGameplayCaptureActive(
+                s_gameplaySessionStarted.load(std::memory_order_acquire),
+                IsSavegameLoadActive())) {
+            s_lastFrame = {};
+            return;
+        }
+        InterlockedExchange(&s_busyTid, (LONG)GetCurrentThreadId());
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         if (s_lastFrame.QuadPart) {
             LONG us = (LONG)((now.QuadPart - s_lastFrame.QuadPart) * 1000000LL / s_freq.QuadPart);
-            if (us > s_maxFrameUs) s_maxFrameUs = us;
+            LONG prevMax = s_maxFrameUs;
+            while (us > prevMax && InterlockedCompareExchange(&s_maxFrameUs, us, prevMax) != prevMax) {
+                prevMax = s_maxFrameUs;
+            }
             if (us > 33333) InterlockedIncrement(&s_slowFrames);
+            if (ShouldRecordGameplayFrameDelta(us)) {
+                AcquireSRWLockExclusive(&s_frameWindowLock);
+                s_frameTimesUsWindow.push_back(us);
+                if (s_allGameplayFrameTimesUs.size() < 360000) {
+                    s_allGameplayFrameTimesUs.push_back(us);
+                }
+                ReleaseSRWLockExclusive(&s_frameWindowLock);
+            }
         }
         s_lastFrame = now;
         InterlockedIncrement(&s_frames);
     }
+}
+
+void ProfilerSetGameplayReady(bool ready) {
+    s_gameplaySessionStarted.store(ready, std::memory_order_release);
+}
+
+static HRESULT STDMETHODCALLTYPE Hooked_Present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND w, const RGNDATA* d) {
+    ProfilerRecordPresentedFrame();
     return Real_Present(dev, a, b, w, d);
 }
 
+typedef int (__thiscall* SwapScreen_t)(void* pThis, HWND hWnd, const void* pSrcRect, const void* pDestRect);
+static SwapScreen_t Real_SwapScreen = NULL;
+static SwapScreen_t Real_MixerSwapScreen = NULL;
+
+static int __fastcall Hooked_SwapScreen(void* pThis, void* /*edx*/, HWND hWnd, const void* pSrcRect, const void* pDestRect) {
+    if (pThis) {
+        void* pDevice = *reinterpret_cast<void**>(reinterpret_cast<BYTE*>(pThis) + 0x08);
+        if (pDevice) AttachD3D9DeviceIfReady(pDevice);
+    }
+    if (!Real_Present) {
+        ProfilerRecordPresentedFrame();
+    }
+    return Real_SwapScreen(pThis, hWnd, pSrcRect, pDestRect);
+}
+
+static int __fastcall Hooked_MixerSwapScreen(void* pThis, void* /*edx*/, HWND hWnd, const void* pSrcRect, const void* pDestRect) {
+    if (pThis) {
+        // [pThis + 0x44] is m_iSkipNextSwapScreens; only record when frame is actually swapped
+        int skipCount = *reinterpret_cast<int*>(reinterpret_cast<BYTE*>(pThis) + 0x44);
+        if (skipCount <= 0 && !Real_Present) {
+            ProfilerRecordPresentedFrame();
+        }
+    }
+    return Real_MixerSwapScreen(pThis, hWnd, pSrcRect, pDestRect);
+}
+
 void ProfilerHookPresent(void** vtbl) {
-    if (!vtbl) return;
+    if (!vtbl || Real_Present) return;
     if (MH_CreateHook(vtbl[17], (LPVOID)Hooked_Present, (LPVOID*)&Real_Present) == MH_OK) {
         MH_EnableHook(vtbl[17]);
         Log("G3O", "Profiler: Present hooked for frame timing.");
@@ -129,8 +137,14 @@ static DWORD WINAPI SamplerThread(LPVOID) {
     HANDLE hThread = NULL;
     DWORD hTid = 0;
     while (!s_stop) {
-        Sleep(1);
-        DWORD tid = (DWORD)s_busyTid;
+        Sleep(10);
+        if (!IsGameplayCaptureActive(
+                s_gameplaySessionStarted.load(std::memory_order_acquire),
+                IsSavegameLoadActive())) {
+            Sleep(50);
+            continue;
+        }
+        DWORD tid = (DWORD)InterlockedCompareExchange(&s_busyTid, 0, 0);
         if (!tid) continue;
         if (tid != hTid) {
             if (hThread) CloseHandle(hThread);
@@ -212,7 +226,7 @@ static std::string Resolve(DWORD eip, std::string& moduleOut) {
 
 static void ReportHotspots() {
     LONG n = s_sampleCount;
-    if (n < 50 || !s_file) { s_sampleCount = 0; return; }
+    if (n < 20 || !s_file) { s_sampleCount = 0; return; }
     std::unordered_map<std::string, int> byFunc, byModule;
     std::unordered_map<DWORD, std::string> cache;
     for (LONG i = 0; i < n; ++i) {
@@ -225,26 +239,31 @@ static void ReportHotspots() {
             fn = Resolve(e, mod);
             cache[e >> 4] = fn;
         }
-        // Strip +offset so samples of the same function aggregate.
-        std::string key = fn;
-        size_t plus = key.rfind("+0x");
-        if (plus != std::string::npos) key.resize(plus);
+        const std::string key = NormalizeHotspotKey(fn);
         byFunc[key]++;
         size_t bang = key.find('!');
-        byModule[bang != std::string::npos ? key.substr(0, bang) : key]++;
+        if (bang != std::string::npos) {
+            byModule[key.substr(0, bang)]++;
+        } else {
+            const size_t rva = key.find("+0x");
+            byModule[key.substr(0, rva)]++;
+        }
     }
     s_sampleCount = 0;
 
     auto dump = [&](const char* title, std::unordered_map<std::string, int>& m, size_t top) {
         std::vector<std::pair<std::string, int>> v(m.begin(), m.end());
         std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-        fprintf(s_file, "HOT %s (%ld samples):\n", title, n);
-        for (size_t i = 0; i < v.size() && i < top; ++i)
-            fprintf(s_file, "HOT   %5.1f%%  %s\n", 100.0 * v[i].second / n, v[i].first.c_str());
+        if (s_file) fprintf(s_file, "HOT %s (%ld samples):\n", title, n);
+        Log("G3O", "[HotspotProfiler] HOT %s (%ld samples):", title, n);
+        for (size_t i = 0; i < v.size() && i < top; ++i) {
+            if (s_file) fprintf(s_file, "HOT   %5.1f%%  %s\n", 100.0 * v[i].second / n, v[i].first.c_str());
+            Log("G3O", "  HOT   %5.1f%%  %s", 100.0 * v[i].second / n, v[i].first.c_str());
+        }
     };
     dump("modules", byModule, 6);
-    dump("functions", byFunc, 15);
-    fflush(s_file);
+    dump("EIP buckets (nearest export where available)", byFunc, 15);
+    if (s_file) fflush(s_file);
 }
 
 // ---- Reporter thread --------------------------------------------------------
@@ -253,12 +272,11 @@ static ULONGLONG FtToU64(const FILETIME& f) {
 }
 
 static DWORD WINAPI ReporterThread(LPVOID) {
-    std::unordered_map<DWORD, ULONGLONG> prevThread;
     ULONGLONG prevProc = 0;
     DWORD start = GetTickCount();
-    DWORD pid = GetCurrentProcessId();
     SYSTEM_INFO si; GetSystemInfo(&si);
     int tick = 0;
+    std::vector<LONG> localFrames;
 
     while (!s_stop) {
         Sleep(1000);
@@ -270,8 +288,22 @@ static DWORD WINAPI ReporterThread(LPVOID) {
         LONG64 rb = InterlockedExchange64(&s_readBytes, 0);
         LONG64 ru = InterlockedExchange64(&s_readUs, 0);
         LONG cull = InterlockedExchange(&g_cullCalls, 0);
-        LONG rfdCalls = InterlockedExchange(&s_rfdCalls, 0);
-        LONG64 rfdUs = InterlockedExchange64(&s_rfdUs, 0);
+
+        localFrames.clear();
+        AcquireSRWLockExclusive(&s_frameWindowLock);
+        localFrames.swap(s_frameTimesUsWindow);
+        ReleaseSRWLockExclusive(&s_frameWindowLock);
+
+        double p99Ms = 0.0;
+        double low1PctFps = 0.0;
+        if (!localFrames.empty()) {
+            std::sort(localFrames.begin(), localFrames.end());
+            size_t p99Idx = (localFrames.size() * 99) / 100;
+            if (p99Idx >= localFrames.size()) p99Idx = localFrames.size() - 1;
+            LONG p99Us = localFrames[p99Idx];
+            p99Ms = p99Us / 1000.0;
+            if (p99Us > 0) low1PctFps = 1000000.0 / (double)p99Us;
+        }
 
         FILETIME c, e, k, u;
         GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
@@ -279,42 +311,14 @@ static DWORD WINAPI ReporterThread(LPVOID) {
         double procPct = prevProc ? (double)(proc - prevProc) / 10000000.0 * 100.0 : 0.0;
         prevProc = proc;
 
-        DWORD busyTid = 0; double busyPct = 0.0;
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (snap != INVALID_HANDLE_VALUE) {
-            THREADENTRY32 te; te.dwSize = sizeof(te);
-            if (Thread32First(snap, &te)) {
-                do {
-                    if (te.th32OwnerProcessID != pid) continue;
-                    HANDLE th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
-                    if (!th) continue;
-                    FILETIME tc, te2, tk, tu;
-                    if (GetThreadTimes(th, &tc, &te2, &tk, &tu)) {
-                        ULONGLONG t = FtToU64(tk) + FtToU64(tu);
-                        auto it = prevThread.find(te.th32ThreadID);
-                        if (it != prevThread.end()) {
-                            double pct = (double)(t - it->second) / 10000000.0 * 100.0;
-                            if (pct > busyPct) { busyPct = pct; busyTid = te.th32ThreadID; }
-                        }
-                        prevThread[te.th32ThreadID] = t;
-                    }
-                    CloseHandle(th);
-                } while (Thread32Next(snap, &te));
-            }
-            CloseHandle(snap);
-        }
-        // Sample the busiest thread only when it is clearly the bottleneck.
-        s_busyTid = (busyPct > 60.0) ? (LONG)busyTid : 0;
-
         if (s_file) {
             fprintf(s_file,
-                "t=%3lus fps=%3d maxFrame=%6.1fms slow(>33ms)=%2d | read: %5d calls %7.1f MB %6.0f ms | cull=%7d | rfd=%ld calls %.0f ms (N=%ld) | cpu=%4.0f%% (cores=%lu) busiestThread=%u %3.0f%%\n",
-                (DWORD)((GetTickCount() - start) / 1000), (int)frames, maxUs / 1000.0, (int)slow,
-                (int)rc, rb / 1048576.0, ru / 1000.0, (int)cull, rfdCalls, rfdUs / 1000.0, (long)s_rfdEntries,
-                procPct, si.dwNumberOfProcessors, busyTid, busyPct);
+                "t=%3lus fps=%3d 1%%low=%5.1f p99=%5.1fms maxFrame=%6.1fms slow(>33ms)=%2d | read: %5d calls %7.1f MB %6.0f ms | cull=%7d | cpu=%4.0f%% (cores=%lu)\n",
+                (DWORD)((GetTickCount() - start) / 1000), (int)frames, low1PctFps, p99Ms, maxUs / 1000.0, (int)slow,
+                (int)rc, rb / 1048576.0, ru / 1000.0, (int)cull,
+                procPct, si.dwNumberOfProcessors);
             fflush(s_file);
         }
-        while (s_rfdTextPrinted < s_rfdTextCount && s_file) { fprintf(s_file, "RFD %s\n", s_rfdText[s_rfdTextPrinted]); s_rfdTextPrinted++; }
         if (++tick % 15 == 0) ReportHotspots();
     }
     return 0;
@@ -335,30 +339,56 @@ void InitializeProfiler() {
     }
     if (s_file) {
         fprintf(s_file, "# G3O profiler. fps=0 means no frames presented (loading screen / menu transition).\n"
-                        "# HOT lines: sampling of the busiest thread every 15 s (share of CPU time per function).\n");
+                        "# FPS/frame-time capture starts after a game session starts and pauses during savegame loading.\n"
+                        "# EIP sample shares are not call stacks or direct CPU-utilization percentages.\n"
+                        "# Columns include real-time FPS, 1%% low FPS, p99 frame time, max frame time, and process CPU usage.\n");
         fflush(s_file);
     }
 
-    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
-    void* pRead = hK32 ? (void*)GetProcAddress(hK32, "ReadFile") : NULL;
-    if (pRead && MH_CreateHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile) == MH_OK) {
-        MH_EnableHook(pRead);
+    HMODULE hEngine = GetModuleHandleA("Engine.dll");
+    void* pSwap = hEngine ? (void*)GetProcAddress(hEngine, "?SwapScreen@eCDX9Device@@UAE?AW4bEResult@@PAUHWND__@@PBVbCRect@@1@Z") : NULL;
+    if (pSwap && MH_CreateHook(pSwap, (LPVOID)Hooked_SwapScreen, (LPVOID*)&Real_SwapScreen) == MH_OK) {
+        MH_EnableHook(pSwap);
+        Log("G3O", "Profiler: Hooked Engine.dll!eCDX9Device::SwapScreen for frame timing.");
     }
-
-    HMODULE hFs = GetModuleHandleA("FileSystem.dll");
-    void* pRfd = hFs ? (void*)GetProcAddress(hFs, "?RemoveFromDirCache@CFFFileSystemModule@@AAEXABV?$basic_string@DVallocator@eastl@@@eastl@@_N1@Z") : NULL;
-    if (pRfd && MH_CreateHook(pRfd, (LPVOID)Hooked_RemoveFromDirCache, (LPVOID*)&Real_RemoveFromDirCache) == MH_OK) {
-        MH_EnableHook(pRfd);
-        Log("G3O", "Profiler: RemoveFromDirCache instrumented.");
+    void* pMixerSwap = hEngine ? (void*)GetProcAddress(hEngine, "?SwapScreen@eCGfxMixerAdmin@@QAE?AW4bEResult@@QAUHWND__@@PBVbCRect@@1@Z") : NULL;
+    if (pMixerSwap && MH_CreateHook(pMixerSwap, (LPVOID)Hooked_MixerSwapScreen, (LPVOID*)&Real_MixerSwapScreen) == MH_OK) {
+        MH_EnableHook(pMixerSwap);
+        Log("G3O", "Profiler: Hooked Engine.dll!eCGfxMixerAdmin::SwapScreen for frame timing.");
     }
 
     CreateThread(NULL, 0, ReporterThread, NULL, 0, NULL);
-    // SamplerThread disabled for zero overhead
+    CreateThread(NULL, 0, SamplerThread, NULL, 0, NULL);
     Log("G3O", "Profiler enabled; output: %s.", s_file ? path : "unavailable");
 }
 
 void ShutdownProfiler() {
     s_stop = true;
+    ReportHotspots();
+    std::vector<LONG> allFrames;
+    AcquireSRWLockExclusive(&s_frameWindowLock);
+    allFrames = s_allGameplayFrameTimesUs;
+    ReleaseSRWLockExclusive(&s_frameWindowLock);
+
+    if (!allFrames.empty()) {
+        std::sort(allFrames.begin(), allFrames.end());
+        double totalUs = 0.0;
+        for (LONG v : allFrames) totalUs += (double)v;
+        double avgUs = totalUs / (double)allFrames.size();
+        double avgFps = (avgUs > 0.0) ? (1000000.0 / avgUs) : 0.0;
+        LONG p99Us = allFrames[(allFrames.size() * 99) / 100];
+        LONG p999Us = allFrames[(allFrames.size() * 999) / 1000];
+        LONG maxUs = allFrames.back();
+        double low1Fps = (p99Us > 0) ? (1000000.0 / (double)p99Us) : 0.0;
+        double low01Fps = (p999Us > 0) ? (1000000.0 / (double)p999Us) : 0.0;
+
+        Log("G3O", "[FPS Summary] Total frames=%zu | Avg FPS=%.1f (%.2f ms) | 1%% Low=%.1f FPS (p99=%.2f ms) | 0.1%% Low=%.1f FPS (p99.9=%.2f ms) | Max Spike=%.2f ms",
+            allFrames.size(), avgFps, avgUs / 1000.0, low1Fps, p99Us / 1000.0, low01Fps, p999Us / 1000.0, maxUs / 1000.0);
+        if (s_file) {
+            fprintf(s_file, "# [FPS Summary] Total frames=%zu | Avg FPS=%.1f (%.2f ms) | 1%% Low=%.1f FPS (p99=%.2f ms) | 0.1%% Low=%.1f FPS (p99.9=%.2f ms) | Max Spike=%.2f ms\n",
+                allFrames.size(), avgFps, avgUs / 1000.0, low1Fps, p99Us / 1000.0, low01Fps, p999Us / 1000.0, maxUs / 1000.0);
+        }
+    }
     if (s_file) { fflush(s_file); }
 }
 

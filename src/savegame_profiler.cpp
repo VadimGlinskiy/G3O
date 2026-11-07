@@ -10,6 +10,7 @@
 #include "vfs_cache_optimizer.h"
 #include "pak_tracer.h"
 #include "pak_read_at.h"
+#include "profiler.h"
 #include <minhook.h>
 #include <windows.h>
 #include <stdio.h>
@@ -18,6 +19,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <intrin.h>
 #include <atomic>
 
@@ -38,6 +40,10 @@ static volatile LONG   s_readCalls = 0;
 static volatile LONG64 s_readBytes = 0;
 static volatile LONG64 s_readTimeUs = 0;
 static std::atomic<bool> s_isLoadActive{ false };
+
+bool IsSavegameLoadActive() noexcept {
+    return s_isLoadActive.load(std::memory_order_relaxed);
+}
 static volatile bool   s_inPreLoad = false;
 static volatile bool   s_skippedPreLoadActivate = false;
 
@@ -56,8 +62,13 @@ struct ContextAuditMetrics {
     LayerAuditMetric createSpecificEntity; // eCEntityDynamicContext::CreateSpecificEntity (Engine.dll)
     LayerAuditMetric dynEntityRead;        // eCDynamicEntity::Read (Engine.dll RVA 0x2295C0)
     LayerAuditMetric entityRead;           // eCEntity::Read (Engine.dll RVA 0x2257F0)
+    EntityReadVariantMetrics entityReadVariants;
+    EntityReadSuboperationMetrics entityReadSuboperations;
     LayerAuditMetric readObject;           // bCPropertyObjectSingleton::ReadObject (SharedBase.dll)
+    LayerAuditMetric readNewObject;         // bCPropertyObjectSingleton::ReadNewObject (SharedBase.dll)
     LayerAuditMetric propertyFactoryReadObject; // bCPropertyObjectFactory::ReadObject (SharedBase.dll)
+    LayerAuditMetric propertyFactoryReadNewObject; // bCPropertyObjectFactory::ReadNewObject (SharedBase.dll)
+    LayerAuditMetric cloneObjectInstance;  // bCPropertyObjectFactory::CloneObjectInstance (SharedBase.dll)
     LayerAuditMetric patchWithTemplate;    // eCEntity::PatchWithTemplate (Engine.dll RVA 0x224350)
     LayerAuditMetric readDependency;       // eCContextBase::ReadDependency (Engine.dll RVA 0x21A150)
     LayerAuditMetric childrenAvailable;    // eCEntity::ChildrenAvailable (Engine.dll)
@@ -65,6 +76,22 @@ struct ContextAuditMetrics {
 
 static thread_local LayerAuditMetrics s_layerAuditMetrics{};
 static thread_local ContextAuditMetrics s_contextAuditMetrics{};
+// shortcut: tracks at most 256 targets; increase if overflow is reported.
+static constexpr std::size_t kSysDynPropertyReadDispatchCapacity = 256;
+static thread_local PropertyReadDispatchPaths<kSysDynPropertyReadDispatchCapacity> s_sysDynReadDispatchMetrics{};
+struct PropertyCacheTelemetryCounts {
+    LONG stringHits = 0;
+    LONG stringMisses = 0;
+    LONG idHits = 0;
+    LONG idMisses = 0;
+};
+static thread_local PropertyCacheTelemetryCounts s_sysDynPropertyCacheTelemetry{};
+static thread_local bool s_isSysDynSectorActive = false;
+static thread_local bool s_collectSysDynReadDispatch = false;
+static thread_local PvsPrefetchMetrics s_pvsPrefetchMetrics{};
+static thread_local bool s_capturePvsPrefetchMetrics = false;
+static void* s_targetPvsProcess = nullptr;
+static void* s_targetPvsWaitForEmptyThreadQueue = nullptr;
 
 // Original function prototypes
 using LayerCreateDataFn = std::int32_t (__thiscall*)(void*);
@@ -78,11 +105,20 @@ using CPOStreamReadFileFn = bool (__thiscall*)(void*, void*);
 using CreateSpecificEntityFn = void* (__thiscall*)(void*);
 using DynamicEntityReadFn = int (__thiscall*)(void*, void*);
 using EntityReadFn = int (__thiscall*)(void*, void*);
+using EntityReadVersionedFn = int (__thiscall*)(void*, void*, std::uint16_t);
+using EntityNodeReadFn = int (__thiscall*)(void*, void*);
+using AccessorPropertyStreamReadFn = void* (__stdcall*)(void*, void*);
 using PatchWithTemplateFn = bool (__thiscall*)(void*, const void*, bool);
 using PropertyObjectReadObjectFn = bool (__thiscall*)(void*, void*, void*);
+using PropertyObjectReadNewObjectFn = void* (__thiscall*)(void*, void*);
 using PropertyFactoryReadObjectFn = bool (__thiscall*)(void*, void*, void*);
+using PropertyFactoryReadNewObjectFn = void* (__thiscall*)(void*, void*);
+using PropertyFactoryCloneObjectInstanceFn = void* (__thiscall*)(void*);
 static PropertyObjectReadObjectFn Real_PropertyObjectReadObject = nullptr;
+static PropertyObjectReadNewObjectFn Real_PropertyObjectReadNewObject = nullptr;
 static PropertyFactoryReadObjectFn Real_PropertyFactoryReadObject = nullptr;
+static PropertyFactoryReadNewObjectFn Real_PropertyFactoryReadNewObject = nullptr;
+static PropertyFactoryCloneObjectInstanceFn Real_PropertyFactoryCloneObjectInstance = nullptr;
 
 using ReadDependencyFn = int (__thiscall*)(void*, void*, void*);
 using ChildrenAvailableFn = void (__thiscall*)(void*, bool);
@@ -98,6 +134,10 @@ static CPOStreamReadFileFn Real_CPOStreamReadFile = nullptr;
 static CreateSpecificEntityFn Real_CreateSpecificEntity = nullptr;
 static DynamicEntityReadFn Real_DynamicEntityRead = nullptr;
 static EntityReadFn Real_EntityRead = nullptr;
+static EntityReadVersionedFn Real_EntityReadV83 = nullptr;
+static EntityReadVersionedFn Real_EntityReadV63 = nullptr;
+static EntityNodeReadFn Real_EntityNodeRead = nullptr;
+static AccessorPropertyStreamReadFn Real_AccessorPropertyStreamRead = nullptr;
 static PatchWithTemplateFn Real_PatchWithTemplate = nullptr;
 static ReadDependencyFn Real_ReadDependency = nullptr;
 static ChildrenAvailableFn Real_ChildrenAvailable = nullptr;
@@ -105,6 +145,14 @@ static ChildrenAvailableFn Real_ChildrenAvailable = nullptr;
 static LPVOID s_metricsHookTargets[32] = {};
 static int s_numMetricsHooks = 0;
 static bool s_metricsHooksInitialized = false;
+
+struct AccessorReadTimingFrame {
+    std::uint64_t childTicks = 0;
+};
+static constexpr std::size_t kMaxAccessorReadTimingDepth = 128;
+static thread_local AccessorReadTimingFrame s_accessorReadFrames[kMaxAccessorReadTimingDepth]{};
+static thread_local std::uint64_t s_accessorReadDepth = 0;
+static thread_local std::uint64_t s_accessorMaxDepth = 0;
 
 static std::uint64_t BeginLayerMetric() {
     LARGE_INTEGER t{};
@@ -122,6 +170,32 @@ static double LayerMetricMs(std::uint64_t ticks) {
     return s_freq.QuadPart > 0
         ? static_cast<double>(ticks) * 1000.0 / static_cast<double>(s_freq.QuadPart)
         : 0.0;
+}
+
+template <std::size_t Capacity>
+static void LogPropertyReadDispatchPath(
+    const char* path, const PropertyReadDispatchMetrics<Capacity>& metrics) {
+    std::uint64_t targetCount = 0;
+    std::uint64_t recordedCalls = 0;
+    std::uint64_t recordedTicks = 0;
+    for (const auto& entry : metrics.entries) {
+        if (!entry.target) continue;
+        ++targetCount;
+        recordedCalls += entry.metric.calls;
+        recordedTicks += entry.metric.qpcTicks;
+    }
+    Log("G3O", "[PropertyReadDispatch] SysDyn path=%s virtual Read slot=%u targets=%llu recordedCalls=%llu recordedInclusive=%.3f ms overflowCalls=%llu unresolvedCalls=%llu; factory timings are inclusive",
+        path, static_cast<unsigned>(kPropertyObjectReadVtableSlot),
+        static_cast<unsigned long long>(targetCount),
+        static_cast<unsigned long long>(recordedCalls), LayerMetricMs(recordedTicks),
+        static_cast<unsigned long long>(metrics.overflowCalls),
+        static_cast<unsigned long long>(metrics.unresolvedCalls));
+    for (const auto& entry : metrics.entries) {
+        if (!entry.target) continue;
+        Log("G3O", "[PropertyReadDispatch] SysDyn path=%s target=%p factoryInclusive=%.3f ms calls=%llu",
+            path, reinterpret_cast<void*>(entry.target), LayerMetricMs(entry.metric.qpcTicks),
+            static_cast<unsigned long long>(entry.metric.calls));
+    }
 }
 
 static LayerAuditMetrics SubtractLayerMetrics(
@@ -169,13 +243,34 @@ static bool __fastcall Hooked_EntityCreateFromTemplate(
 static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, void* pStream, void* pLayer, bool directRead) {
     if (!s_isLoadActive) return Real_OnLoadDynamicContext(self, pStream, pLayer, directRead);
 
+    const bool previousSysDynDispatch = s_collectSysDynReadDispatch;
+    const bool collectSysDynMetrics = s_isSysDynSectorActive && !previousSysDynDispatch;
+    const LONG stringHitsBefore = collectSysDynMetrics ? GetPropertyCacheStringHits() : 0;
+    const LONG stringMissesBefore = collectSysDynMetrics ? GetPropertyCacheStringMisses() : 0;
+    const LONG idHitsBefore = collectSysDynMetrics ? GetPropertyCacheIdHits() : 0;
+    const LONG idMissesBefore = collectSysDynMetrics ? GetPropertyCacheIdMisses() : 0;
+    s_collectSysDynReadDispatch = previousSysDynDispatch || collectSysDynMetrics;
+
     const ContextAuditMetrics before = s_contextAuditMetrics;
+    const std::uint64_t previousAccessorMaxDepth = s_accessorMaxDepth;
+    s_accessorMaxDepth = 0;
     const std::uint64_t start = BeginLayerMetric();
 
     const bool result = Real_OnLoadDynamicContext(self, pStream, pLayer, directRead);
+    s_collectSysDynReadDispatch = previousSysDynDispatch;
+    if (collectSysDynMetrics) {
+        s_sysDynPropertyCacheTelemetry.stringHits += GetPropertyCacheStringHits() - stringHitsBefore;
+        s_sysDynPropertyCacheTelemetry.stringMisses += GetPropertyCacheStringMisses() - stringMissesBefore;
+        s_sysDynPropertyCacheTelemetry.idHits += GetPropertyCacheIdHits() - idHitsBefore;
+        s_sysDynPropertyCacheTelemetry.idMisses += GetPropertyCacheIdMisses() - idMissesBefore;
+    }
 
     const std::uint64_t elapsedTicks = BeginLayerMetric() - start;
     const double totalMs = LayerMetricMs(elapsedTicks);
+    const std::uint64_t contextAccessorMaxDepth = s_accessorMaxDepth;
+    s_accessorMaxDepth = previousAccessorMaxDepth > contextAccessorMaxDepth
+        ? previousAccessorMaxDepth
+        : contextAccessorMaxDepth;
 
     if (IsTelemetryActive() && totalMs >= 20.0) { // Log any layer taking >= 20 ms
         const char* filePath = "<unknown>";
@@ -191,10 +286,35 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
         const uint64_t dynReadCalls = s_contextAuditMetrics.dynEntityRead.calls - before.dynEntityRead.calls;
         const double entReadMs = LayerMetricMs(s_contextAuditMetrics.entityRead.qpcTicks - before.entityRead.qpcTicks);
         const uint64_t entReadCalls = s_contextAuditMetrics.entityRead.calls - before.entityRead.calls;
+        const EntityReadVariantMetrics readVariantDelta{
+            DifferenceLayerAuditMetric(s_contextAuditMetrics.entityReadVariants.v63, before.entityReadVariants.v63),
+            DifferenceLayerAuditMetric(s_contextAuditMetrics.entityReadVariants.v83, before.entityReadVariants.v83),
+        };
+        const double readV63Ms = LayerMetricMs(readVariantDelta.v63.qpcTicks);
+        const double readV83Ms = LayerMetricMs(readVariantDelta.v83.qpcTicks);
+        const EntityReadSuboperationMetrics readSuboperationDelta{
+            DifferenceLayerAuditMetric(s_contextAuditMetrics.entityReadSuboperations.nodeRead, before.entityReadSuboperations.nodeRead),
+            DifferenceLayerAuditMetric(s_contextAuditMetrics.entityReadSuboperations.accessorPropertyStreamRead, before.entityReadSuboperations.accessorPropertyStreamRead),
+            DifferenceLayerAuditMetric(s_contextAuditMetrics.entityReadSuboperations.accessorPropertyStreamReadExclusive, before.entityReadSuboperations.accessorPropertyStreamReadExclusive),
+            s_contextAuditMetrics.entityReadSuboperations.accessorNestedCalls - before.entityReadSuboperations.accessorNestedCalls,
+            s_contextAuditMetrics.entityReadSuboperations.accessorExclusiveUnavailableCalls - before.entityReadSuboperations.accessorExclusiveUnavailableCalls,
+        };
+        const double entityNodeReadMs = LayerMetricMs(readSuboperationDelta.nodeRead.qpcTicks);
+        const double accessorPropertyStreamReadMs = LayerMetricMs(readSuboperationDelta.accessorPropertyStreamRead.qpcTicks);
+        const double accessorPropertyStreamReadExclusiveMs = LayerMetricMs(readSuboperationDelta.accessorPropertyStreamReadExclusive.qpcTicks);
+        const std::uint64_t accessorNestedCalls = readSuboperationDelta.accessorNestedCalls;
+        const std::uint64_t accessorExclusiveUnavailableCalls = readSuboperationDelta.accessorExclusiveUnavailableCalls;
+        const std::uint64_t accessorMaxDepth = contextAccessorMaxDepth;
         const double readObjectMs = LayerMetricMs(s_contextAuditMetrics.readObject.qpcTicks - before.readObject.qpcTicks);
         const uint64_t readObjectCalls = s_contextAuditMetrics.readObject.calls - before.readObject.calls;
         const double propertyFactoryReadObjectMs = LayerMetricMs(s_contextAuditMetrics.propertyFactoryReadObject.qpcTicks - before.propertyFactoryReadObject.qpcTicks);
         const uint64_t propertyFactoryReadObjectCalls = s_contextAuditMetrics.propertyFactoryReadObject.calls - before.propertyFactoryReadObject.calls;
+        const double readNewObjectMs = LayerMetricMs(s_contextAuditMetrics.readNewObject.qpcTicks - before.readNewObject.qpcTicks);
+        const uint64_t readNewObjectCalls = s_contextAuditMetrics.readNewObject.calls - before.readNewObject.calls;
+        const double propertyFactoryReadNewObjectMs = LayerMetricMs(s_contextAuditMetrics.propertyFactoryReadNewObject.qpcTicks - before.propertyFactoryReadNewObject.qpcTicks);
+        const uint64_t propertyFactoryReadNewObjectCalls = s_contextAuditMetrics.propertyFactoryReadNewObject.calls - before.propertyFactoryReadNewObject.calls;
+        const double cloneObjectInstanceMs = LayerMetricMs(s_contextAuditMetrics.cloneObjectInstance.qpcTicks - before.cloneObjectInstance.qpcTicks);
+        const uint64_t cloneObjectInstanceCalls = s_contextAuditMetrics.cloneObjectInstance.calls - before.cloneObjectInstance.calls;
         const double readDependencyMs = LayerMetricMs(s_contextAuditMetrics.readDependency.qpcTicks - before.readDependency.qpcTicks);
         const uint64_t readDependencyCalls = s_contextAuditMetrics.readDependency.calls - before.readDependency.calls;
         const double patchWithTemplateMs = LayerMetricMs(s_contextAuditMetrics.patchWithTemplate.qpcTicks - before.patchWithTemplate.qpcTicks);
@@ -209,15 +329,36 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
             " | ContextRead=%.2f ms (%llu calls, inclusive)"
             " | DynamicEntityRead=%.2f ms (%llu calls, inclusive)"
             " | EntityRead=%.2f ms (%llu calls, inclusive)"
+            " | ReadV83=%.2f ms (%llu calls, inclusive)"
+            " | ReadV63=%.2f ms (%llu calls, inclusive)"
+            " | eCNode::Read=%.2f ms (%llu calls, inclusive)"
+            " | AccessorPropertyStreamRead=%.2f ms (%llu calls, inclusive)"
+            " | AccessorPropertyStreamReadExclusive=%.2f ms (%llu calls)"
+            " | AccessorNestedCalls=%llu | AccessorMaxDepth=%llu | AccessorExclusiveUnavailableCalls=%llu"
             " | PropertyObjectRead=%.2f ms (%llu calls, inclusive)"
+            " | PropertyObjectReadNew=%.2f ms (%llu calls, inclusive)"
             " | PropertyFactoryReadObject=%.2f ms (%llu calls, inclusive)"
+            " | PropertyFactoryReadNewObject=%.2f ms (%llu calls, inclusive)"
+            " | CloneObjectInstance=%.2f ms (%llu calls, inclusive)"
             " | ReadDependency=%.2f ms (%llu calls, inclusive)"
             " | PatchWithTemplate(PropertyID)=%.2f ms (%llu calls, inclusive)"
             " | ChildrenAvailable=%.2f ms (%llu calls, inclusive)"
             " | CreateSpecificEntity=%.2f ms (%llu calls, inclusive)",
             pLayer, filePath, (int)directRead, totalMs,
             contextReadMs, contextReadCalls, dynReadMs, dynReadCalls, entReadMs, entReadCalls,
-            readObjectMs, readObjectCalls, propertyFactoryReadObjectMs, propertyFactoryReadObjectCalls,
+            readV83Ms, static_cast<unsigned long long>(readVariantDelta.v83.calls),
+            readV63Ms, static_cast<unsigned long long>(readVariantDelta.v63.calls),
+            entityNodeReadMs, static_cast<unsigned long long>(readSuboperationDelta.nodeRead.calls),
+            accessorPropertyStreamReadMs, static_cast<unsigned long long>(readSuboperationDelta.accessorPropertyStreamRead.calls),
+            accessorPropertyStreamReadExclusiveMs, static_cast<unsigned long long>(readSuboperationDelta.accessorPropertyStreamReadExclusive.calls),
+            static_cast<unsigned long long>(accessorNestedCalls),
+            static_cast<unsigned long long>(accessorMaxDepth),
+            static_cast<unsigned long long>(accessorExclusiveUnavailableCalls),
+            readObjectMs, readObjectCalls,
+            readNewObjectMs, readNewObjectCalls,
+            propertyFactoryReadObjectMs, propertyFactoryReadObjectCalls,
+            propertyFactoryReadNewObjectMs, propertyFactoryReadNewObjectCalls,
+            cloneObjectInstanceMs, cloneObjectInstanceCalls,
             readDependencyMs, readDependencyCalls,
             patchWithTemplateMs, patchWithTemplateCalls, childrenAvailableMs, childrenAvailableCalls,
             createSpecificEntityMs, createSpecificEntityCalls);
@@ -266,6 +407,66 @@ static int __fastcall Hooked_EntityRead(void* self, void* /*edx*/, void* pStream
     return result;
 }
 
+static int __fastcall Hooked_EntityReadV83(
+    void* self, void* /*edx*/, void* pStream, std::uint16_t version) {
+    if (!s_isLoadActive) return Real_EntityReadV83(self, pStream, version);
+    const std::uint64_t start = BeginLayerMetric();
+    const int result = Real_EntityReadV83(self, pStream, version);
+    RecordEntityReadVariantDuration(
+        s_contextAuditMetrics.entityReadVariants, EntityReadVariant::V83,
+        start, BeginLayerMetric());
+    return result;
+}
+
+static int __fastcall Hooked_EntityReadV63(
+    void* self, void* /*edx*/, void* pStream, std::uint16_t version) {
+    if (!s_isLoadActive) return Real_EntityReadV63(self, pStream, version);
+    const std::uint64_t start = BeginLayerMetric();
+    const int result = Real_EntityReadV63(self, pStream, version);
+    RecordEntityReadVariantDuration(
+        s_contextAuditMetrics.entityReadVariants, EntityReadVariant::V63,
+        start, BeginLayerMetric());
+    return result;
+}
+
+static int __fastcall Hooked_EntityNodeRead(void* self, void* /*edx*/, void* pStream) {
+    if (!s_isLoadActive) return Real_EntityNodeRead(self, pStream);
+    const std::uint64_t start = BeginLayerMetric();
+    const int result = Real_EntityNodeRead(self, pStream);
+    RecordEntityReadSuboperationDuration(
+        s_contextAuditMetrics.entityReadSuboperations, EntityReadSuboperation::NodeRead,
+        start, BeginLayerMetric());
+    return result;
+}
+
+static void* __stdcall Hooked_AccessorPropertyStreamRead(void* pStream, void* pAccessor) {
+    if (!s_isLoadActive) return Real_AccessorPropertyStreamRead(pStream, pAccessor);
+
+    const std::uint64_t depth = ++s_accessorReadDepth;
+    if (depth > s_accessorMaxDepth) s_accessorMaxDepth = depth;
+    const bool depthTracked = depth <= kMaxAccessorReadTimingDepth;
+    if (depthTracked) s_accessorReadFrames[depth - 1].childTicks = 0;
+
+    const std::uint64_t start = BeginLayerMetric();
+    void* const result = Real_AccessorPropertyStreamRead(pStream, pAccessor);
+    const std::uint64_t end = BeginLayerMetric();
+    const std::uint64_t inclusiveTicks = end >= start ? end - start : 0;
+    const std::uint64_t childTicks = depthTracked
+        ? s_accessorReadFrames[depth - 1].childTicks
+        : 0;
+    const bool exclusiveAvailable = depthTracked && childTicks <= inclusiveTicks;
+    const std::uint64_t exclusiveTicks = exclusiveAvailable ? inclusiveTicks - childTicks : 0;
+
+    RecordAccessorPropertyStreamReadDuration(
+        s_contextAuditMetrics.entityReadSuboperations,
+        start, end, exclusiveTicks, depth, exclusiveAvailable);
+    if (depth > 1 && depth - 1 <= kMaxAccessorReadTimingDepth) {
+        s_accessorReadFrames[depth - 2].childTicks += inclusiveTicks;
+    }
+    s_accessorReadDepth = depth - 1;
+    return result;
+}
+
 static bool __fastcall Hooked_PropertyObjectReadObject(void* self, void* /*edx*/, void* pStream, void* pObject) {
     if (!s_isLoadActive) return Real_PropertyObjectReadObject(self, pStream, pObject);
     const std::uint64_t start = BeginLayerMetric();
@@ -276,9 +477,53 @@ static bool __fastcall Hooked_PropertyObjectReadObject(void* self, void* /*edx*/
 
 static bool __fastcall Hooked_PropertyFactoryReadObject(void* self, void* /*edx*/, void* pStream, void* pObject) {
     if (!s_isLoadActive) return Real_PropertyFactoryReadObject(self, pStream, pObject);
+    const std::uintptr_t readTarget = s_collectSysDynReadDispatch
+        ? ResolvePropertyObjectReadTarget(pObject)
+        : 0;
     const std::uint64_t start = BeginLayerMetric();
     const bool result = Real_PropertyFactoryReadObject(self, pStream, pObject);
-    EndLayerMetric(s_contextAuditMetrics.propertyFactoryReadObject, start);
+    if (s_collectSysDynReadDispatch) {
+        const std::uint64_t end = BeginLayerMetric();
+        RecordLayerAuditDuration(s_contextAuditMetrics.propertyFactoryReadObject, start, end);
+        RecordPropertyReadDispatchDuration(
+            s_sysDynReadDispatchMetrics, PropertyReadDispatchPath::ReadObject, readTarget, start, end);
+    } else {
+        EndLayerMetric(s_contextAuditMetrics.propertyFactoryReadObject, start);
+    }
+    return result;
+}
+
+static void* __fastcall Hooked_PropertyObjectReadNewObject(
+    void* self, void* /*edx*/, void* pStream) {
+    if (!s_isLoadActive) return Real_PropertyObjectReadNewObject(self, pStream);
+    const std::uint64_t start = BeginLayerMetric();
+    void* const result = Real_PropertyObjectReadNewObject(self, pStream);
+    EndLayerMetric(s_contextAuditMetrics.readNewObject, start);
+    return result;
+}
+
+static void* __fastcall Hooked_PropertyFactoryReadNewObject(
+    void* self, void* /*edx*/, void* pStream) {
+    if (!s_isLoadActive) return Real_PropertyFactoryReadNewObject(self, pStream);
+    const std::uint64_t start = BeginLayerMetric();
+    void* const result = Real_PropertyFactoryReadNewObject(self, pStream);
+    if (s_collectSysDynReadDispatch) {
+        const std::uint64_t end = BeginLayerMetric();
+        RecordLayerAuditDuration(s_contextAuditMetrics.propertyFactoryReadNewObject, start, end);
+        RecordPropertyReadDispatchDuration(
+            s_sysDynReadDispatchMetrics, PropertyReadDispatchPath::ReadNewObject,
+            ResolvePropertyObjectReadTarget(result), start, end);
+    } else {
+        EndLayerMetric(s_contextAuditMetrics.propertyFactoryReadNewObject, start);
+    }
+    return result;
+}
+
+static void* __fastcall Hooked_PropertyFactoryCloneObjectInstance(void* self, void* /*edx*/) {
+    if (!s_isLoadActive) return Real_PropertyFactoryCloneObjectInstance(self);
+    const std::uint64_t start = BeginLayerMetric();
+    void* const result = Real_PropertyFactoryCloneObjectInstance(self);
+    EndLayerMetric(s_contextAuditMetrics.cloneObjectInstance, start);
     return result;
 }
 
@@ -313,7 +558,7 @@ static bool InstallHookTarget(LPVOID target, LPVOID detour, LPVOID* original, co
         Log("G3O", "[LayerAudit] Target address is null for: %s", name);
         return false;
     }
-    if (s_numMetricsHooks >= 16) {
+    if (s_numMetricsHooks >= 19) {
         Log("G3O", "[LayerAudit] Hook slots exhausted for: %s", name);
         return false;
     }
@@ -347,9 +592,16 @@ static void RemoveCreatedMetricsHooks() {
     Real_CreateSpecificEntity = nullptr;
     Real_DynamicEntityRead = nullptr;
     Real_EntityRead = nullptr;
+    Real_EntityReadV83 = nullptr;
+    Real_EntityReadV63 = nullptr;
+    Real_EntityNodeRead = nullptr;
+    Real_AccessorPropertyStreamRead = nullptr;
     Real_PatchWithTemplate = nullptr;
     Real_PropertyObjectReadObject = nullptr;
+    Real_PropertyObjectReadNewObject = nullptr;
     Real_PropertyFactoryReadObject = nullptr;
+    Real_PropertyFactoryReadNewObject = nullptr;
+    Real_PropertyFactoryCloneObjectInstance = nullptr;
     Real_ReadDependency = nullptr;
     Real_ChildrenAvailable = nullptr;
 
@@ -414,6 +666,21 @@ static bool InitMetricsHooks() {
         reinterpret_cast<LPVOID>(Hooked_EntityRead),
         reinterpret_cast<LPVOID*>(&Real_EntityRead),
         "eCEntity::Read") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?ReadV83@eCEntity@@MAE?AW4bEResult@@AAVbCIStream@@G@Z")),
+        reinterpret_cast<LPVOID>(Hooked_EntityReadV83),
+        reinterpret_cast<LPVOID*>(&Real_EntityReadV83),
+        "eCEntity::ReadV83") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?ReadV63@eCEntity@@MAE?AW4bEResult@@AAVbCIStream@@G@Z")),
+        reinterpret_cast<LPVOID>(Hooked_EntityReadV63),
+        reinterpret_cast<LPVOID*>(&Real_EntityReadV63),
+        "eCEntity::ReadV63") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?Read@eCNode@@UAE?AW4bEResult@@AAVbCIStream@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_EntityNodeRead),
+        reinterpret_cast<LPVOID*>(&Real_EntityNodeRead),
+        "eCNode::Read") && created;
 
     if (hSharedBase) {
         (void)InstallHookTarget(
@@ -426,6 +693,26 @@ static bool InitMetricsHooks() {
             reinterpret_cast<LPVOID>(Hooked_PropertyFactoryReadObject),
             reinterpret_cast<LPVOID*>(&Real_PropertyFactoryReadObject),
             "bCPropertyObjectFactory::ReadObject");
+        (void)InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?ReadNewObject@bCPropertyObjectSingleton@@QAEPAVbCPropertyObjectBase@@AAVbCIStream@@@Z")),
+            reinterpret_cast<LPVOID>(Hooked_PropertyObjectReadNewObject),
+            reinterpret_cast<LPVOID*>(&Real_PropertyObjectReadNewObject),
+            "bCPropertyObjectSingleton::ReadNewObject");
+        (void)InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?ReadNewObject@bCPropertyObjectFactory@@IAEPAVbCPropertyObjectBase@@AAVbCIStream@@@Z")),
+            reinterpret_cast<LPVOID>(Hooked_PropertyFactoryReadNewObject),
+            reinterpret_cast<LPVOID*>(&Real_PropertyFactoryReadNewObject),
+            "bCPropertyObjectFactory::ReadNewObject");
+        (void)InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?CloneObjectInstance@bCPropertyObjectFactory@@IBEPAVbCPropertyObjectBase@@XZ")),
+            reinterpret_cast<LPVOID>(Hooked_PropertyFactoryCloneObjectInstance),
+            reinterpret_cast<LPVOID*>(&Real_PropertyFactoryCloneObjectInstance),
+            "bCPropertyObjectFactory::CloneObjectInstance");
+        (void)InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "??5@YGAAVbCIStream@@AAV0@AAVbCAccessorPropertyObject@@@Z")),
+            reinterpret_cast<LPVOID>(Hooked_AccessorPropertyStreamRead),
+            reinterpret_cast<LPVOID*>(&Real_AccessorPropertyStreamRead),
+            "operator>>(bCIStream&, bCAccessorPropertyObject&)");
     }
     (void)InstallHookTarget(
         reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?ReadDependency@eCContextBase@@IAE?AW4bEResult@@AAVbCIStream@@AAV?$bTValArray@PAVeCNode@@@@@Z")),
@@ -464,7 +751,7 @@ static bool InitMetricsHooks() {
     }
 
     s_metricsHooksInitialized = true;
-    Log("G3O", "[LayerAudit] %d layer/context QPC hooks enabled; nested read timings are inclusive (frequency=%lld Hz).",
+    Log("G3O", "[LayerAudit] %d layer/context QPC hooks enabled; call times are inclusive except separately labeled accessor exclusive time (frequency=%lld Hz).",
         s_numMetricsHooks, s_freq.QuadPart);
     return true;
 }
@@ -502,9 +789,16 @@ static void ShutdownMetricsHooks() {
         Real_CreateSpecificEntity = nullptr;
         Real_DynamicEntityRead = nullptr;
         Real_EntityRead = nullptr;
+        Real_EntityReadV83 = nullptr;
+        Real_EntityReadV63 = nullptr;
+        Real_EntityNodeRead = nullptr;
+        Real_AccessorPropertyStreamRead = nullptr;
         Real_PatchWithTemplate = nullptr;
         Real_PropertyObjectReadObject = nullptr;
+        Real_PropertyObjectReadNewObject = nullptr;
         Real_PropertyFactoryReadObject = nullptr;
+        Real_PropertyFactoryReadNewObject = nullptr;
+        Real_PropertyFactoryCloneObjectInstance = nullptr;
         Real_ReadDependency = nullptr;
         Real_ChildrenAvailable = nullptr;
         s_metricsHooksInitialized = false;
@@ -547,8 +841,10 @@ struct PhaseStats {
     double durationSec = 0.0;
     LONG   pakBlocks = 0;
     double pakOutMb = 0.0;
+    double pakTimeSec = 0.0;
     LONG   readCalls = 0;
     double readMb = 0.0;
+    double readTimeSec = 0.0;
 };
 
 static LARGE_INTEGER s_tHUDStart = {};
@@ -605,12 +901,15 @@ static volatile LONG   s_cellsProcessed = 0;
 static volatile LONG64 s_hierarchyTimeUs = 0;
 
 static inline void SnapshotPhase(PhaseStats& st, LARGE_INTEGER t0, LARGE_INTEGER t1,
-                                 LONG pakCount0, LONG64 pakOut0, LONG read0, LONG64 readBytes0) {
+                                 LONG pakCount0, LONG64 pakOut0, LONG read0, LONG64 readBytes0,
+                                 double pakTimeMs0 = 0.0, LONG64 readTimeUs0 = 0) {
     st.durationSec = (double)(t1.QuadPart - t0.QuadPart) / (double)s_freq.QuadPart;
     st.pakBlocks = GetPakDecompCount() - pakCount0;
     st.pakOutMb = (double)(GetPakDecompOutBytes() - pakOut0) / (1024.0 * 1024.0);
+    st.pakTimeSec = (GetPakDecompTimeMs() - pakTimeMs0) / 1000.0;
     st.readCalls = s_readCalls - read0;
     st.readMb = (double)(s_readBytes - readBytes0) / (1024.0 * 1024.0);
+    st.readTimeSec = (double)(s_readTimeUs - readTimeUs0) / 1000000.0;
 }
 
 static void LogLoadReport(double totalSec) {
@@ -652,8 +951,10 @@ static void LogLoadReport(double totalSec) {
     double postOther = postTotal - postKnown;
     if (postOther < 0.0) postOther = 0.0;
 
-    double gotoPakSec = (pakOutMb > 0.0) ? (s_statGotoPos.pakOutMb / pakOutMb) * pakSec : 0.0;
-    double gotoReadSec = (rbMb > 0.0) ? (s_statGotoPos.readMb / rbMb) * rSec : 0.0;
+    double gotoPakSec = (s_statGotoPos.pakTimeSec > 0.0) ? s_statGotoPos.pakTimeSec
+                      : ((pakOutMb > 0.0) ? (s_statGotoPos.pakOutMb / pakOutMb) * pakSec : 0.0);
+    double gotoReadSec = (s_statGotoPos.readTimeSec > 0.0) ? s_statGotoPos.readTimeSec
+                       : ((rbMb > 0.0) ? (s_statGotoPos.readMb / rbMb) * rSec : 0.0);
     double pvsSec = (double)s_hierarchyTimeUs / 1000000.0;
     double gotoSetupSec = s_statGotoPos.durationSec - (gotoPakSec + gotoReadSec + pvsSec);
     if (gotoSetupSec < 0.0) gotoSetupSec = 0.0;
@@ -709,6 +1010,20 @@ static void LogLoadReport(double totalSec) {
     Log("G3O", "           - Disk ReadFile I/O:           %6.3f s", gotoReadSec);
     Log("G3O", "           - PVS Cell Hierarchies:        %6.3f s [%ld cells]", pvsSec, s_cellsProcessed);
     Log("G3O", "           - Scene & Entity Setup:        %6.3f s", gotoSetupSec);
+    if (s_targetPvsProcess) {
+        Log("G3O", "[PVSDirect] GotoLoadedPosition Process inclusive: %.3f s [%llu calls] (not additive)",
+            LayerMetricMs(s_pvsPrefetchMetrics.process.qpcTicks) / 1000.0,
+            static_cast<unsigned long long>(s_pvsPrefetchMetrics.process.calls));
+    } else {
+        Log("G3O", "[PVSDirect] eCPVSPrefetcher3::Process timing unavailable (hook not installed)");
+    }
+    if (s_targetPvsWaitForEmptyThreadQueue) {
+        Log("G3O", "[PVSDirect] GotoLoadedPosition queue-wait inclusive: %.3f s [%llu calls] (overlaps Process)",
+            LayerMetricMs(s_pvsPrefetchMetrics.waitForEmptyThreadQueue.qpcTicks) / 1000.0,
+            static_cast<unsigned long long>(s_pvsPrefetchMetrics.waitForEmptyThreadQueue.calls));
+    } else {
+        Log("G3O", "[PVSDirect] eCPVSPrefetcher3::WaitForEmptyThreadQueue timing unavailable (hook not installed)");
+    }
     Log("G3O", "       * gCSession::Start (World):  %6.3f s [%ld pak blocks, %.2f MB read]",
         s_statSessionStart.durationSec, s_statSessionStart.pakBlocks, s_statSessionStart.readMb);
     Log("G3O", "       * Other Post Overhead:       %6.3f s", postOther);
@@ -797,6 +1112,20 @@ static void LogLoadReport(double totalSec) {
         fprintf(fp, "           - Disk ReadFile I/O:           %6.3f s\n", gotoReadSec);
         fprintf(fp, "           - PVS Cell Hierarchies:        %6.3f s [%ld cells]\n", pvsSec, s_cellsProcessed);
         fprintf(fp, "           - Scene & Entity Setup:        %6.3f s\n", gotoSetupSec);
+        if (s_targetPvsProcess) {
+            fprintf(fp, "[PVSDirect] GotoLoadedPosition Process inclusive: %.3f s [%llu calls] (not additive)\n",
+                LayerMetricMs(s_pvsPrefetchMetrics.process.qpcTicks) / 1000.0,
+                static_cast<unsigned long long>(s_pvsPrefetchMetrics.process.calls));
+        } else {
+            fprintf(fp, "[PVSDirect] eCPVSPrefetcher3::Process timing unavailable (hook not installed)\n");
+        }
+        if (s_targetPvsWaitForEmptyThreadQueue) {
+            fprintf(fp, "[PVSDirect] GotoLoadedPosition queue-wait inclusive: %.3f s [%llu calls] (overlaps Process)\n",
+                LayerMetricMs(s_pvsPrefetchMetrics.waitForEmptyThreadQueue.qpcTicks) / 1000.0,
+                static_cast<unsigned long long>(s_pvsPrefetchMetrics.waitForEmptyThreadQueue.calls));
+        } else {
+            fprintf(fp, "[PVSDirect] eCPVSPrefetcher3::WaitForEmptyThreadQueue timing unavailable (hook not installed)\n");
+        }
         fprintf(fp, "       * gCSession::Start (World):  %6.3f s [%ld pak blocks, %.2f MB read]\n",
             s_statSessionStart.durationSec, s_statSessionStart.pakBlocks, s_statSessionStart.readMb);
         fprintf(fp, "       * Other Post Overhead:       %6.3f s\n", postOther);
@@ -959,8 +1288,11 @@ static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 
 static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, void* b) {
     const Config& cfg = GetConfig();
+    ProfilerSetGameplayReady(false);
     s_isLoadActive = true;
     s_layerAuditMetrics = {};
+    s_pvsPrefetchMetrics = {};
+    s_capturePvsPrefetchMetrics = false;
     s_inPreLoad = true;
     s_skippedPreLoadActivate = false;
     QueryPerformanceCounter(&s_tHUDStart);
@@ -1001,9 +1333,6 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
         LeaveCriticalSection(&s_sectorTimingCs);
     }
 
-    if (cfg.enableProfiler) {
-        StartSampler();
-    }
     if (ShouldTracePakPrefetch(cfg)) {
         PakTracer_OnLoadStart(s_lastSaveName.c_str());
     }
@@ -1011,13 +1340,11 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     if (ShouldTracePakPrefetch(cfg)) {
         PakTracer_OnLoadEnd();
     }
-    if (cfg.enableProfiler) {
-        StopSamplerAndReport();
-    }
 
     LARGE_INTEGER t1;
     QueryPerformanceCounter(&t1);
     s_isLoadActive = false;
+    ProfilerSetGameplayReady(r);
     if (Real_EnableSectorActivation) {
         Real_EnableSectorActivation(true);
     }
@@ -1057,6 +1384,7 @@ typedef void (__thiscall* SessionStop_t)(void* pThis);
 static SessionStop_t Real_SessionStop = nullptr;
 
 static void __fastcall Hooked_SessionStop(void* pThis, void* /*edx*/) {
+    ProfilerSetGameplayReady(false);
     if (!s_isLoadActive) { Real_SessionStop(pThis); return; }
     LARGE_INTEGER t0, t1;
     LONG pak0 = GetPakDecompCount(); LONG64 pakOut0 = GetPakDecompOutBytes();
@@ -1179,7 +1507,19 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
         return;
     }
 
-
+    const char* sectorNameForCapture = SafeGetSectorName(pSector);
+    const bool isSysDynSector = IsTelemetryActive()
+        && sectorNameForCapture
+        && std::strncmp(sectorNameForCapture, "SysDyn_", sizeof("SysDyn_") - 1) == 0;
+    const bool previousSysDynSectorActive = s_isSysDynSectorActive;
+    const bool previousSysDynDispatch = s_collectSysDynReadDispatch;
+    const bool ownsSysDynCapture = isSysDynSector && !previousSysDynSectorActive;
+    if (ownsSysDynCapture) {
+        s_sysDynReadDispatchMetrics = {};
+        s_sysDynPropertyCacheTelemetry = {};
+    }
+    s_isSysDynSectorActive = isSysDynSector;
+    s_collectSysDynReadDispatch = false;
 
     s_sectorDoLoadDataUs = 0;
     s_sectorDoLoadDataCalls = 0;
@@ -1188,11 +1528,13 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     const LayerAuditMetrics metricsBefore = s_layerAuditMetrics;
     const int previousSamplePhase = s_samplePhase;
     if (s_sampleThread) {
-        s_samplePhase = G3O::ResolveSamplePhaseForSector(previousSamplePhase, SafeGetSectorName(pSector));
+        s_samplePhase = G3O::ResolveSamplePhaseForSector(previousSamplePhase, sectorNameForCapture);
     }
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     Real_SectorOnActivate(pSector);
+    s_collectSysDynReadDispatch = previousSysDynDispatch;
+    s_isSysDynSectorActive = previousSysDynSectorActive;
     if (s_sampleThread) s_samplePhase = previousSamplePhase;
     QueryPerformanceCounter(&t1);
     const LayerAuditMetrics metricsDelta = SubtractLayerMetrics(s_layerAuditMetrics, metricsBefore);
@@ -1217,6 +1559,16 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
             secName ? secName : "unknown",
             static_cast<unsigned long long>(metricsDelta.createData.calls), LayerMetricMs(metricsDelta.createData.qpcTicks),
             static_cast<unsigned long long>(metricsDelta.doLoadData.calls), LayerMetricMs(metricsDelta.doLoadData.qpcTicks));
+    }
+
+    if (ownsSysDynCapture) {
+        Log("G3O", "[PropertyCache] SysDyn OnLoadDynamicContext load-thread stringHits=%ld stringMisses=%ld idHits=%ld idMisses=%ld",
+            s_sysDynPropertyCacheTelemetry.stringHits,
+            s_sysDynPropertyCacheTelemetry.stringMisses,
+            s_sysDynPropertyCacheTelemetry.idHits,
+            s_sysDynPropertyCacheTelemetry.idMisses);
+        LogPropertyReadDispatchPath("ReadObject", s_sysDynReadDispatchMetrics.readObject);
+        LogPropertyReadDispatchPath("ReadNewObject", s_sysDynReadDispatchMetrics.readNewObject);
     }
 }
 
@@ -1300,6 +1652,7 @@ static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const vo
         Real_EnableSectorActivation(true);
     }
     s_samplePhase = 1;
+    PakTracer_OnLoadGameWorldStart();
     QueryPerformanceCounter(&s_tWorldStart);
     if (s_tHUDStart.QuadPart > 0) {
         s_preWorldTotalSec = (double)(s_tWorldStart.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
@@ -1328,17 +1681,51 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
     if (!s_isLoadActive) { Real_GotoLoadedPosition(pThis, pEntity, a); return; }
     LARGE_INTEGER t0, t1;
     LONG pak0 = GetPakDecompCount(); LONG64 pakOut0 = GetPakDecompOutBytes();
+    double pakTimeMs0 = GetPakDecompTimeMs();
     LONG read0 = s_readCalls; LONG64 readBytes0 = s_readBytes;
+    LONG64 readTimeUs0 = s_readTimeUs;
     QueryPerformanceCounter(&t0);
     Log("G3O", "[LoadProfile] -> gCSession::GotoLoadedPosition START (Resource Streaming / Scene Init)");
 
     s_samplePhase = 2;
+    PakTracer_OnGotoLoadedPositionStart();
+    const bool wasCapturingPvsMetrics = s_capturePvsPrefetchMetrics;
+    s_capturePvsPrefetchMetrics = true;
     Real_GotoLoadedPosition(pThis, pEntity, a);
+    s_capturePvsPrefetchMetrics = wasCapturingPvsMetrics;
 
     QueryPerformanceCounter(&t1);
-    SnapshotPhase(s_statGotoPos, t0, t1, pak0, pakOut0, read0, readBytes0);
+    SnapshotPhase(s_statGotoPos, t0, t1, pak0, pakOut0, read0, readBytes0, pakTimeMs0, readTimeUs0);
     Log("G3O", "[LoadProfile] <- gCSession::GotoLoadedPosition FINISHED in %.3f s (pak blocks=%ld, decomp=%.2f MB, read=%.2f MB)",
         s_statGotoPos.durationSec, s_statGotoPos.pakBlocks, s_statGotoPos.pakOutMb, s_statGotoPos.readMb);
+}
+
+// PVS prefetcher call times are inclusive and are scoped to GotoLoadedPosition.
+using PvsPrefetchProcessFn = bool (__thiscall*)(void*, void*);
+using PvsPrefetchWaitFn = void (__thiscall*)(void*);
+static PvsPrefetchProcessFn Real_PvsPrefetchProcess = nullptr;
+static PvsPrefetchWaitFn Real_PvsPrefetchWait = nullptr;
+
+static bool __fastcall Hooked_PvsPrefetchProcess(void* pThis, void* /*edx*/, void* pDatabase) {
+    if (!s_capturePvsPrefetchMetrics) return Real_PvsPrefetchProcess(pThis, pDatabase);
+    const std::uint64_t start = BeginLayerMetric();
+    const bool result = Real_PvsPrefetchProcess(pThis, pDatabase);
+    const std::uint64_t end = BeginLayerMetric();
+    RecordPvsPrefetchDuration(
+        s_pvsPrefetchMetrics, PvsPrefetchOperation::Process, start, end);
+    return result;
+}
+
+static void __fastcall Hooked_PvsPrefetchWait(void* pThis, void* /*edx*/) {
+    if (!s_capturePvsPrefetchMetrics) {
+        Real_PvsPrefetchWait(pThis);
+        return;
+    }
+    const std::uint64_t start = BeginLayerMetric();
+    Real_PvsPrefetchWait(pThis);
+    const std::uint64_t end = BeginLayerMetric();
+    RecordPvsPrefetchDuration(
+        s_pvsPrefetchMetrics, PvsPrefetchOperation::WaitForEmptyThreadQueue, start, end);
 }
 
 // 10. SessionStart hook
@@ -1346,7 +1733,11 @@ typedef void (__thiscall* SessionStart_t)(void* pThis, int mode);
 static SessionStart_t Real_SessionStart = nullptr;
 
 static void __fastcall Hooked_SessionStart(void* pThis, void* /*edx*/, int mode) {
-    if (!s_isLoadActive) { Real_SessionStart(pThis, mode); return; }
+    if (!s_isLoadActive) {
+        Real_SessionStart(pThis, mode);
+        ProfilerSetGameplayReady(true);
+        return;
+    }
     LARGE_INTEGER t0, t1;
     LONG pak0 = GetPakDecompCount(); LONG64 pakOut0 = GetPakDecompOutBytes();
     LONG read0 = s_readCalls; LONG64 readBytes0 = s_readBytes;
@@ -1355,6 +1746,7 @@ static void __fastcall Hooked_SessionStart(void* pThis, void* /*edx*/, int mode)
 
     s_samplePhase = 3;
     Real_SessionStart(pThis, mode);
+    ProfilerSetGameplayReady(true);
 
     QueryPerformanceCounter(&t1);
     SnapshotPhase(s_statSessionStart, t0, t1, pak0, pakOut0, read0, readBytes0);
@@ -1442,6 +1834,36 @@ static void* s_targetSessionStart = nullptr;
 static void* s_targetWorldActivate = nullptr;
 static void* s_targetBuildStatic = nullptr;
 
+static bool InstallPvsMetricHook(
+    HMODULE module, const char* exportedName, LPVOID detour, LPVOID* original,
+    void** targetSlot, const char* methodName) {
+    void* target = (void*)GetProcAddress(module, exportedName);
+    if (!target) {
+        Log("G3O", "Savegame Profiler: %s export not found; direct metric unavailable.", methodName);
+        return false;
+    }
+
+    const auto createStatus = MH_CreateHook(target, detour, original);
+    if (createStatus != MH_OK) {
+        Log("G3O", "Savegame Profiler: %s hook creation failed (status=%d).",
+            methodName, static_cast<int>(createStatus));
+        return false;
+    }
+
+    const auto enableStatus = MH_EnableHook(target);
+    if (enableStatus != MH_OK) {
+        MH_RemoveHook(target);
+        *original = nullptr;
+        Log("G3O", "Savegame Profiler: %s hook enable failed (status=%d).",
+            methodName, static_cast<int>(enableStatus));
+        return false;
+    }
+
+    *targetSlot = target;
+    Log("G3O", "Savegame Profiler: Hooked %s (0x%p)", methodName, target);
+    return true;
+}
+
 bool InitializeSavegameProfiler() {
     const Config& cfg = GetConfig();
     if (cfg.enablePakPrefetch && !cfg.enableFastPakDecompressor) {
@@ -1454,7 +1876,7 @@ bool InitializeSavegameProfiler() {
     if (s_freq.QuadPart <= 0) {
         QueryPerformanceFrequency(&s_freq);
     }
-    const bool metricsHooksReady = cfg.enableSavegameAudit ? InitMetricsHooks() : false;
+    const bool metricsHooksReady = (cfg.enableSavegameAudit && cfg.enableLayerAudit) ? InitMetricsHooks() : false;
     if (s_freq.QuadPart <= 0) {
         Log("G3O", "Savegame Profiler initialization aborted: QPC frequency unavailable.");
         return false;
@@ -1463,12 +1885,35 @@ bool InitializeSavegameProfiler() {
     if (cfg.enableSavegameAudit || ShouldTracePakPrefetch(cfg)) {
         HMODULE hK32 = GetModuleHandleA("kernel32.dll");
         if (hK32) {
-        void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
-        if (pRead) {
-            s_targetReadFile = pRead;
-            MH_CreateHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile);
-            MH_EnableHook(pRead);
+            void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
+            if (pRead) {
+                s_targetReadFile = pRead;
+                MH_CreateHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile);
+                MH_EnableHook(pRead);
+            }
         }
+        HMODULE hGame = GetModuleHandleA("Game.dll");
+        if (hGame) {
+            void* pHeader = (void*)GetProcAddress(hGame, "?GetSaveGameHeader@gCWorld@@QAE?AW4bEResult@@ABVbCString@@AAVgCSaveGameHeader@1@@Z");
+            if (pHeader && !s_targetHeader) {
+                s_targetHeader = pHeader;
+                MH_CreateHook(pHeader, (LPVOID)Hooked_GetSaveGameHeader, (LPVOID*)&Real_GetSaveGameHeader);
+                MH_EnableHook(pHeader);
+            }
+            void* pWorld = (void*)GetProcAddress(hGame, "?LoadGameWorld@gCWorld@@QAE_NABVbCString@@_N@Z");
+            if (pWorld && !s_targetLoadGameWorld) {
+                s_targetLoadGameWorld = pWorld;
+                MH_CreateHook(pWorld, (LPVOID)Hooked_LoadGameWorld, (LPVOID*)&Real_LoadGameWorld);
+                MH_EnableHook(pWorld);
+                Log("G3O", "Savegame Profiler: Hooked gCWorld::LoadGameWorld (0x%p)", pWorld);
+            }
+            void* pGoto = (void*)GetProcAddress(hGame, "?GotoLoadedPosition@gCSession@@QAEXPAVeCEntity@@_N@Z");
+            if (pGoto && !s_targetGotoPos) {
+                s_targetGotoPos = pGoto;
+                MH_CreateHook(pGoto, (LPVOID)Hooked_GotoLoadedPosition, (LPVOID*)&Real_GotoLoadedPosition);
+                MH_EnableHook(pGoto);
+                Log("G3O", "Savegame Profiler: Hooked gCSession::GotoLoadedPosition (0x%p)", pGoto);
+            }
         }
     }
 
@@ -1484,7 +1929,7 @@ bool InitializeSavegameProfiler() {
 
         if (cfg.enableSavegameAudit) {
         void* pHeader = (void*)GetProcAddress(hGame, "?GetSaveGameHeader@gCWorld@@QAE?AW4bEResult@@ABVbCString@@AAVgCSaveGameHeader@1@@Z");
-        if (pHeader) {
+        if (pHeader && !s_targetHeader) {
             s_targetHeader = pHeader;
             MH_CreateHook(pHeader, (LPVOID)Hooked_GetSaveGameHeader, (LPVOID*)&Real_GetSaveGameHeader);
             MH_EnableHook(pHeader);
@@ -1512,7 +1957,7 @@ bool InitializeSavegameProfiler() {
         }
 
         void* pWorld = (void*)GetProcAddress(hGame, "?LoadGameWorld@gCWorld@@QAE_NABVbCString@@_N@Z");
-        if (pWorld) {
+        if (pWorld && !s_targetLoadGameWorld) {
             s_targetLoadGameWorld = pWorld;
             MH_CreateHook(pWorld, (LPVOID)Hooked_LoadGameWorld, (LPVOID*)&Real_LoadGameWorld);
             MH_EnableHook(pWorld);
@@ -1520,7 +1965,7 @@ bool InitializeSavegameProfiler() {
         }
 
         void* pGoto = (void*)GetProcAddress(hGame, "?GotoLoadedPosition@gCSession@@QAEXPAVeCEntity@@_N@Z");
-        if (pGoto) {
+        if (pGoto && !s_targetGotoPos) {
             s_targetGotoPos = pGoto;
             MH_CreateHook(pGoto, (LPVOID)Hooked_GotoLoadedPosition, (LPVOID*)&Real_GotoLoadedPosition);
             MH_EnableHook(pGoto);
@@ -1620,6 +2065,21 @@ bool InitializeSavegameProfiler() {
             MH_EnableHook(pBuild);
         }
 
+        InstallPvsMetricHook(
+            hEngine,
+            "?Process@eCPVSPrefetcher3@@QAE_NAAVeCFrustumDatabase@@@Z",
+            (LPVOID)Hooked_PvsPrefetchProcess,
+            (LPVOID*)&Real_PvsPrefetchProcess,
+            &s_targetPvsProcess,
+            "eCPVSPrefetcher3::Process");
+        InstallPvsMetricHook(
+            hEngine,
+            "?WaitForEmptyThreadQueue@eCPVSPrefetcher3@@QAEXXZ",
+            (LPVOID)Hooked_PvsPrefetchWait,
+            (LPVOID*)&Real_PvsPrefetchWait,
+            &s_targetPvsWaitForEmptyThreadQueue,
+            "eCPVSPrefetcher3::WaitForEmptyThreadQueue");
+
         void* pDeact = (void*)GetProcAddress(hEngine, "?Deactivate@eCProcessibleElement@@QAE?AW4eEResult@1@XZ");
         if (pDeact) {
             s_targetDeactivate = pDeact;
@@ -1640,7 +2100,7 @@ bool InitializeSavegameProfiler() {
     }
 
     const LayerAuditHookState auditHookState = ResolveLayerAuditHookState(
-        cfg.enableSavegameAudit, metricsHooksReady && s_metricsHooksInitialized);
+        cfg.enableSavegameAudit && cfg.enableLayerAudit, metricsHooksReady && s_metricsHooksInitialized);
     Log("G3O", "Savegame hooks initialized (audit=%s, profiler=%s, PAK prefetch=%s, LayerAudit hooks=%s).",
         cfg.enableSavegameAudit ? "enabled" : "disabled",
         cfg.enableProfiler ? "enabled" : "disabled",
@@ -1668,6 +2128,8 @@ void ShutdownSavegameProfiler() {
     if (s_targetSectorOnActivate) MH_DisableHook(s_targetSectorOnActivate);
     if (s_targetWorldActivate) MH_DisableHook(s_targetWorldActivate);
     if (s_targetBuildStatic) MH_DisableHook(s_targetBuildStatic);
+    if (s_targetPvsProcess) MH_DisableHook(s_targetPvsProcess);
+    if (s_targetPvsWaitForEmptyThreadQueue) MH_DisableHook(s_targetPvsWaitForEmptyThreadQueue);
     if (s_targetWorldDoLoadData) MH_DisableHook(s_targetWorldDoLoadData);
     if (s_targetSectorDoLoadData) MH_DisableHook(s_targetSectorDoLoadData);
 }

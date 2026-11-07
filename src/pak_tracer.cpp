@@ -5,6 +5,7 @@
 #include "pak_cache_budget.h"
 #include "pak_prefetch_policy.h"
 #include "pak_read_at.h"
+#include "pak_read_history.h"
 #include "decompressor_avx2.h"
 #include <libdeflate.h>
 #include <windows.h>
@@ -41,9 +42,26 @@ struct InFlightRead {
     uint64_t timestampUs = 0;
     std::string archiveName;
     bool valid = false;
+    uint64_t loadGeneration = 0;
 };
 
-static thread_local InFlightRead tl_lastRead;
+static constexpr size_t IN_FLIGHT_READ_CAPACITY = 32;
+using ThreadReadHistory = RecentReadHistory<InFlightRead, IN_FLIGHT_READ_CAPACITY>;
+static thread_local ThreadReadHistory tl_history;
+static std::atomic<uint64_t> s_loadGeneration{ 0 };
+
+static bool FindMatchingRead(
+    const void* inBuffer,
+    DWORD inSize,
+    InFlightRead& outMatch,
+    InFlightRead** matchedSlot = nullptr) {
+    InFlightRead* slot = tl_history.FindMostRecentExact(
+        inBuffer, inSize, s_loadGeneration.load(std::memory_order_relaxed));
+    if (!slot) return false;
+    outMatch = *slot;
+    if (matchedSlot) *matchedSlot = slot;
+    return true;
+}
 
 static std::atomic<bool> s_isActive{ false };
 static std::atomic<bool> s_prefetchLookupEnabled{ false };
@@ -98,6 +116,7 @@ struct CachedBlock {
     uint32_t seq = 0;
     std::string pakName;
     uint64_t offset = 0;
+    uint32_t inBytes = 0;
     uint32_t outBytes = 0;
     size_t reservedBytes = 0;
     uint64_t savedUs = 0;
@@ -111,16 +130,19 @@ static std::atomic<size_t> s_rollingMemoryBytes{ 0 };
 static std::atomic<size_t> s_priorityMemoryBytes{ 0 };
 static std::atomic<size_t> s_peakMemoryBytes{ 0 };
 static std::atomic<uint32_t> s_currentMainSeq{ 0 };
+static std::atomic<uint32_t> s_preGameWorldMaxSeq{ 0 };
+static std::atomic<uint32_t> s_gotoLoadedPosMinSeq{ 0 };
+static std::atomic<bool> s_inGotoLoadedPos{ false };
 
 static SRWLOCK s_cacheLock = SRWLOCK_INIT;
 static std::unordered_map<uint64_t, std::shared_ptr<CachedBlock>> s_predecompCache;
+static std::unordered_map<uint64_t, std::vector<uint32_t>> s_candidateSeqsByKey;
 
-static std::vector<PrefetchCandidate> s_priorityCandidates;
+static size_t s_vipCandidateCount = 0;
 static std::vector<PrefetchCandidate> s_candidates;
 static const size_t MAX_WORKER_THREADS = 8;
 static HANDLE s_workerThreads[MAX_WORKER_THREADS] = {};
 static size_t s_activeWorkerCount = 0;
-static std::atomic<size_t> s_priorityIndex{ 0 };
 static std::atomic<size_t> s_candidateIndex{ 0 };
 
 static HANDLE s_memAvailableEvent = nullptr;
@@ -294,65 +316,10 @@ static DWORD WINAPI BgPredecompWorker(LPVOID lpParam) {
     QueryPerformanceCounter(&t0);
     size_t prioCount = 0;
     size_t normCount = 0;
+    std::vector<BYTE> compBuf;
 
     // =========================================================================
-    // PHASE 1: Priority VIP Pre-Decompression (Top heaviest blocks >= 50 MB)
-    // All workers cooperate in parallel via atomic s_priorityIndex
-    // =========================================================================
-    while (s_isActive.load(std::memory_order_relaxed)) {
-        size_t i = s_priorityIndex.fetch_add(1, std::memory_order_relaxed);
-        if (i >= s_priorityCandidates.size()) break;
-
-        const auto& cand = s_priorityCandidates[i];
-        if (cand.seq <= s_currentMainSeq.load(std::memory_order_relaxed)) continue;
-        if (!ReserveCacheMemory(cand.outBytes, true)) continue;
-
-        HANDLE hFile = GetArchiveHandle(cand.pakName);
-        if (hFile == INVALID_HANDLE_VALUE) {
-            ReleaseCacheMemory(cand.outBytes, true);
-            continue;
-        }
-
-        std::vector<BYTE> compBuf(cand.inBytes);
-        bool readOk = false;
-        {
-            ScopedInternalPakRead internalRead;
-            readOk = ReadExactAt(hFile, cand.offset, compBuf.data(), cand.inBytes);
-        }
-        if (!readOk) {
-            ReleaseCacheMemory(cand.outBytes, true);
-            continue;
-        }
-
-        auto block = std::make_shared<CachedBlock>();
-        block->seq = cand.seq;
-        block->pakName = cand.pakName;
-        block->offset = cand.offset;
-        block->outBytes = cand.outBytes;
-        block->reservedBytes = cand.outBytes;
-        block->savedUs = cand.decompUs;
-        block->isPriority = true;
-        block->data.resize(cand.outBytes);
-
-        size_t actualOut = 0;
-        int res = -1;
-        if (G3O_AVX2_IsSupported()) {
-            res = G3O_AVX2_DecompressZlib(dec, compBuf.data(), cand.inBytes, block->data.data(), cand.outBytes, &actualOut);
-        } else {
-            res = libdeflate_zlib_decompress(dec, compBuf.data(), cand.inBytes, block->data.data(), cand.outBytes, &actualOut);
-        }
-
-        if (res == 0 && actualOut > 0) {
-            block->outBytes = static_cast<uint32_t>(actualOut);
-            const uint64_t key = MakeCacheKey(block->pakName, block->offset);
-            if (StorePrefetchedBlock(key, block)) prioCount++;
-        } else {
-            ReleaseCacheMemory(block->reservedBytes, true);
-        }
-    }
-
-    // =========================================================================
-    // PHASE 2: Chronological Rolling Window (Regular blocks)
+    // Unified Chronological Rolling Window (Regular + VIP blocks in load order)
     // All workers cooperate in parallel via atomic s_candidateIndex
     // =========================================================================
     while (s_isActive.load(std::memory_order_relaxed)) {
@@ -360,14 +327,26 @@ static DWORD WINAPI BgPredecompWorker(LPVOID lpParam) {
         if (i >= s_candidates.size()) break;
 
         const auto& cand = s_candidates[i];
+        const bool isVip = (cand.outBytes >= 50 * 1024 * 1024);
 
         // Skip immediately if main thread has already passed this candidate
         if (cand.seq <= s_currentMainSeq.load(std::memory_order_relaxed)) {
             continue;
         }
+        // Do not prefetch GotoLoadedPosition blocks until Pre-Load sector activation finishes
+        if (!s_inGotoLoadedPos.load(std::memory_order_acquire) &&
+            s_preGameWorldMaxSeq.load(std::memory_order_relaxed) > 0 &&
+            cand.seq > s_preGameWorldMaxSeq.load(std::memory_order_relaxed)) {
+            while (!s_inGotoLoadedPos.load(std::memory_order_acquire) &&
+                   s_isActive.load(std::memory_order_relaxed)) {
+                WaitForSingleObject(s_memAvailableEvent, 5);
+            }
+            if (!s_isActive.load(std::memory_order_relaxed)) break;
+            if (cand.seq <= s_currentMainSeq.load(std::memory_order_relaxed)) continue;
+        }
 
         if (cand.outBytes > s_cacheBudget.Limit()) continue;
-        bool reserved = ReserveCacheMemory(cand.outBytes, false);
+        bool reserved = ReserveCacheMemory(cand.outBytes, isVip);
         while (!reserved && s_isActive.load(std::memory_order_relaxed)) {
             const uint32_t curSeq = s_currentMainSeq.load(std::memory_order_relaxed);
             if (cand.seq <= curSeq) break;
@@ -376,30 +355,32 @@ static DWORD WINAPI BgPredecompWorker(LPVOID lpParam) {
             PurgeStaleBlocksUnderLock(curSeq);
             ReleaseSRWLockExclusive(&s_cacheLock);
 
-            reserved = ReserveCacheMemory(cand.outBytes, false);
+            reserved = ReserveCacheMemory(cand.outBytes, isVip);
             if (!reserved) WaitForSingleObject(s_memAvailableEvent, 5);
         }
         if (!s_isActive.load(std::memory_order_relaxed)) break;
         if (!reserved) continue;
         if (cand.seq <= s_currentMainSeq.load(std::memory_order_relaxed)) {
-            ReleaseCacheMemory(cand.outBytes, false);
+            ReleaseCacheMemory(cand.outBytes, isVip);
             continue;
         }
 
         HANDLE hFile = GetArchiveHandle(cand.pakName);
         if (hFile == INVALID_HANDLE_VALUE) {
-            ReleaseCacheMemory(cand.outBytes, false);
+            ReleaseCacheMemory(cand.outBytes, isVip);
             continue;
         }
 
-        std::vector<BYTE> compBuf(cand.inBytes);
+        if (compBuf.size() < cand.inBytes) {
+            compBuf.resize(cand.inBytes);
+        }
         bool readOk = false;
         {
             ScopedInternalPakRead internalRead;
             readOk = ReadExactAt(hFile, cand.offset, compBuf.data(), cand.inBytes);
         }
         if (!readOk) {
-            ReleaseCacheMemory(cand.outBytes, false);
+            ReleaseCacheMemory(cand.outBytes, isVip);
             continue;
         }
 
@@ -407,10 +388,11 @@ static DWORD WINAPI BgPredecompWorker(LPVOID lpParam) {
         block->seq = cand.seq;
         block->pakName = cand.pakName;
         block->offset = cand.offset;
+        block->inBytes = cand.inBytes;
         block->outBytes = cand.outBytes;
         block->reservedBytes = cand.outBytes;
         block->savedUs = cand.decompUs;
-        block->isPriority = false;
+        block->isPriority = isVip;
         block->data.resize(cand.outBytes);
 
         size_t actualOut = 0;
@@ -424,9 +406,12 @@ static DWORD WINAPI BgPredecompWorker(LPVOID lpParam) {
         if (res == 0 && actualOut > 0) {
             block->outBytes = static_cast<uint32_t>(actualOut);
             const uint64_t key = MakeCacheKey(block->pakName, block->offset);
-            if (StorePrefetchedBlock(key, block)) normCount++;
+            if (StorePrefetchedBlock(key, block)) {
+                if (isVip) prioCount++;
+                else normCount++;
+            }
         } else {
-            ReleaseCacheMemory(block->reservedBytes, false);
+            ReleaseCacheMemory(block->reservedBytes, isVip);
         }
     }
 
@@ -471,6 +456,7 @@ void PakTracer_OnLoadStart(const char* saveName) {
     }
     s_isActive.store(false, std::memory_order_release);
     s_currentSaveName = (saveName && *saveName) ? saveName : "Savegame";
+    s_loadGeneration.fetch_add(1, std::memory_order_relaxed);
     QueryPerformanceCounter(&s_loadStartTime);
 
     AcquireSRWLockExclusive(&s_traceLock);
@@ -492,11 +478,15 @@ void PakTracer_OnLoadStart(const char* saveName) {
     s_priorityMemoryBytes.store(0, std::memory_order_relaxed);
     s_peakMemoryBytes.store(0, std::memory_order_relaxed);
     s_currentMainSeq.store(0, std::memory_order_relaxed);
+    s_preGameWorldMaxSeq.store(0, std::memory_order_relaxed);
+    s_gotoLoadedPosMinSeq.store(0, std::memory_order_relaxed);
+    s_inGotoLoadedPos.store(false, std::memory_order_relaxed);
 
 
-    s_priorityCandidates.clear();
+    s_vipCandidateCount = 0;
     s_candidates.clear();
-    tl_lastRead.valid = false;
+    s_candidateSeqsByKey.clear();
+    tl_history.Clear();
 
     if (!s_memAvailableEvent) {
         s_memAvailableEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
@@ -522,6 +512,8 @@ void PakTracer_OnLoadStart(const char* saveName) {
         if (ifs.is_open()) {
             std::string line;
             std::getline(ifs, line); // header
+            double prevLoadMs = 0.0;
+            uint32_t prevRowSeq = 0;
             while (std::getline(ifs, line)) {
                 std::stringstream ss(line);
                 std::string item;
@@ -530,6 +522,7 @@ void PakTracer_OnLoadStart(const char* saveName) {
                 if (cols.size() >= 7) {
                     uint64_t decomp_us = std::stoull(cols[5]);
                     uint32_t outSz = std::stoul(cols[4]);
+                    double load_ms = std::stod(cols[6]);
 
                     PrefetchCandidate cand;
                     cand.seq = std::stoul(cols[0]);
@@ -539,10 +532,22 @@ void PakTracer_OnLoadStart(const char* saveName) {
                     cand.outBytes = outSz;
                     cand.decompUs = decomp_us;
 
-                    // Universal filter: VIP textures vs heavy regular candidates (independent of timing/duration)
+                    if (prevRowSeq > 0 && s_preGameWorldMaxSeq.load(std::memory_order_relaxed) == 0 &&
+                        (load_ms - prevLoadMs) >= 1500.0 && prevLoadMs >= 5000.0) {
+                        s_preGameWorldMaxSeq.store(prevRowSeq, std::memory_order_relaxed);
+                        s_gotoLoadedPosMinSeq.store(cand.seq, std::memory_order_relaxed);
+                    }
+                    prevLoadMs = load_ms;
+                    prevRowSeq = cand.seq;
+
+                    const uint64_t key = MakeCacheKey(cand.pakName, cand.offset);
+                    s_candidateSeqsByKey[key].push_back(cand.seq);
+
+                    // Universal chronological filter: keep VIP textures in sequence alongside regular blocks
                     if (outSz >= 50 * 1024 * 1024 && outSz <= 128 * 1024 * 1024) {
-                        s_priorityCandidates.push_back(cand);
-                    } else if (decomp_us >= 300 && outSz >= 4096 && outSz < 50 * 1024 * 1024) {
+                        s_vipCandidateCount++;
+                        s_candidates.push_back(cand);
+                    } else if (decomp_us >= 150 && outSz >= 2048 && outSz < 50 * 1024 * 1024) {
                         s_candidates.push_back(cand);
                     }
                 }
@@ -555,27 +560,33 @@ void PakTracer_OnLoadStart(const char* saveName) {
         s_cacheBudget.Configure(s_maxRollingMemoryBytes);
         if (s_maxRollingMemoryBytes == 0) {
             Log("G3O", "[PakCache] Trace pre-decompression disabled by PakCacheBudgetMB=0.");
-        } else if ((!s_priorityCandidates.empty() || !s_candidates.empty()) && s_memAvailableEvent) {
+        } else if (!s_candidates.empty() && s_memAvailableEvent) {
 
             size_t numWorkers = 4;
+            int effectiveCores = cfg.cpuCores;
+            if (effectiveCores <= 0) {
+                SYSTEM_INFO si = {};
+                GetSystemInfo(&si);
+                effectiveCores = (si.dwNumberOfProcessors >= 2) ? static_cast<int>(si.dwNumberOfProcessors / 2) : 1;
+            }
             if (cfg.pakPrefetchWorkers > 0) {
                 numWorkers = (size_t)cfg.pakPrefetchWorkers;
-            } else if (cfg.cpuCores >= 8) {
+            } else if (effectiveCores >= 8) {
                 numWorkers = 6;
-            } else if (cfg.cpuCores >= 6) {
+            } else if (effectiveCores >= 6) {
                 numWorkers = 4;
-            } else if (cfg.cpuCores >= 4) {
+            } else if (effectiveCores >= 4) {
                 numWorkers = 3;
             } else {
                 numWorkers = 1;
             }
             if (numWorkers > MAX_WORKER_THREADS) numWorkers = MAX_WORKER_THREADS;
 
-            s_priorityIndex.store(0, std::memory_order_relaxed);
             s_candidateIndex.store(0, std::memory_order_relaxed);
+            const size_t regularCount = s_candidates.size() - s_vipCandidateCount;
 
             Log("G3O", "[PakCache] Starting pre-decompression pool: %zu worker threads, budget: %zu MB (%zu VIP + %zu regular candidates) for '%s'",
-                numWorkers, s_maxRollingMemoryBytes / (1024 * 1024), s_priorityCandidates.size(), s_candidates.size(), s_currentSaveName.c_str());
+                numWorkers, s_maxRollingMemoryBytes / (1024 * 1024), s_vipCandidateCount, regularCount, s_currentSaveName.c_str());
 
             requestedWorkerCount = numWorkers;
         }
@@ -610,31 +621,51 @@ void PakTracer_RecordRead(
     LPOVERLAPPED ov
 ) {
     if (!s_isActive.load(std::memory_order_relaxed)) return;
-    if (!ov || !buffer || bytesRead == 0 || bytesRead != bytesRequested) {
-        tl_lastRead.valid = false;
-        return;
-    }
+    if (!ov || !buffer || bytesRead == 0) return;
 
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
 
     std::string archive = ResolveArchiveName(hFile);
-    if (archive.empty()) {
-        tl_lastRead.valid = false;
-        return;
-    }
+    if (archive.empty()) return;
 
-    tl_lastRead.hFile = hFile;
-    tl_lastRead.offset = ((uint64_t)ov->OffsetHigh << 32) | (uint64_t)ov->Offset;
-    tl_lastRead.buffer = buffer;
-    tl_lastRead.bytesRead = bytesRead;
-    tl_lastRead.timestampUs = (s_freq.QuadPart > 0) ? ((t0.QuadPart - s_loadStartTime.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
-    tl_lastRead.archiveName = std::move(archive);
-    tl_lastRead.valid = true;
+    InFlightRead read;
+    read.hFile = hFile;
+    read.offset = ((uint64_t)ov->OffsetHigh << 32) | (uint64_t)ov->Offset;
+    read.buffer = buffer;
+    read.bytesRead = bytesRead;
+    read.loadGeneration = s_loadGeneration.load(std::memory_order_relaxed);
+    read.timestampUs = (s_freq.QuadPart > 0) ? ((t0.QuadPart - s_loadStartTime.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+    read.archiveName = std::move(archive);
+    read.valid = true;
+
+    tl_history.Push(std::move(read));
 
     QueryPerformanceCounter(&t1);
     uint64_t oh = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
     s_tracerOverheadUs.fetch_add(oh, std::memory_order_relaxed);
+}
+
+void PakTracer_OnLoadGameWorldStart() {
+    if (!s_isActive.load(std::memory_order_relaxed)) return;
+    // Allow background workers to start prefetching GotoLoadedPosition blocks during LoadGameWorld's 2.3s CPU phase
+    s_inGotoLoadedPos.store(true, std::memory_order_release);
+    if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
+}
+
+void PakTracer_OnGotoLoadedPositionStart() {
+    if (!s_isActive.load(std::memory_order_relaxed)) return;
+    s_inGotoLoadedPos.store(true, std::memory_order_release);
+    const uint32_t minSeq = s_gotoLoadedPosMinSeq.load(std::memory_order_relaxed);
+    if (minSeq > 0) {
+        uint32_t prevSeq = s_currentMainSeq.load(std::memory_order_relaxed);
+        while (minSeq - 1 > prevSeq && !s_currentMainSeq.compare_exchange_weak(
+                   prevSeq, minSeq - 1, std::memory_order_relaxed)) {}
+        AcquireSRWLockExclusive(&s_cacheLock);
+        PurgeStaleBlocksUnderLock(minSeq);
+        ReleaseSRWLockExclusive(&s_cacheLock);
+    }
+    if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
 }
 
 bool PakTracer_TryGetPredecompressed(
@@ -645,14 +676,16 @@ bool PakTracer_TryGetPredecompressed(
     DWORD* pActualOut
 ) {
     if (!PakTracer_CanTryGetPredecompressed()) return false;
-    if (!tl_lastRead.valid || tl_lastRead.buffer != inBuffer || tl_lastRead.bytesRead != inSize) {
+    InFlightRead read;
+    InFlightRead* matchedSlot = nullptr;
+    if (!FindMatchingRead(inBuffer, inSize, read, &matchedSlot)) {
         return false;
     }
 
-    const std::string& archive = tl_lastRead.archiveName;
+    const std::string& archive = read.archiveName;
     if (archive.empty()) return false;
 
-    uint64_t key = MakeCacheKey(archive, tl_lastRead.offset);
+    uint64_t key = MakeCacheKey(archive, read.offset);
 
     std::shared_ptr<CachedBlock> block;
     AcquireSRWLockExclusive(&s_cacheLock);
@@ -663,6 +696,13 @@ bool PakTracer_TryGetPredecompressed(
         return false;
     }
     block = it->second;
+    if (!PakReadIdentityMatches(
+            block->pakName.c_str(), block->offset, block->inBytes,
+            archive.c_str(), read.offset, inSize)) {
+        ReleaseSRWLockExclusive(&s_cacheLock);
+        s_cacheMisses.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     s_predecompCache.erase(it);
 
     if (outCapacity < block->outBytes) {
@@ -696,22 +736,23 @@ bool PakTracer_TryGetPredecompressed(
     TraceRecord rec;
     rec.seq = s_seqCounter.fetch_add(1, std::memory_order_relaxed) + 1;
     strncpy_s(rec.pakName, sizeof(rec.pakName), archive.c_str(), _TRUNCATE);
-    rec.offset = tl_lastRead.offset;
+    rec.offset = read.offset;
     rec.inBytes = inSize;
     rec.outBytes = block->outBytes;
     rec.decompTimeUs = 50; // served from cache
-    rec.loadTimestampUs = tl_lastRead.timestampUs;
+    rec.loadTimestampUs = read.timestampUs;
 
-    s_currentMainSeq.store(rec.seq, std::memory_order_relaxed);
+    uint32_t targetSeq = (block->seq > rec.seq) ? block->seq : rec.seq;
+    uint32_t prevSeq = s_currentMainSeq.load(std::memory_order_relaxed);
+    while (targetSeq > prevSeq && !s_currentMainSeq.compare_exchange_weak(
+               prevSeq, targetSeq, std::memory_order_relaxed)) {}
 
     AcquireSRWLockExclusive(&s_traceLock);
     s_traceRecords.push_back(rec);
     ReleaseSRWLockExclusive(&s_traceLock);
 
     s_matchedCount.fetch_add(1, std::memory_order_relaxed);
-
-    // Invalidate read
-    tl_lastRead.valid = false;
+    tl_history.Consume(matchedSlot);
     return true;
 }
 
@@ -728,25 +769,44 @@ void PakTracer_RecordDecompress(
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
 
-    if (tl_lastRead.valid && tl_lastRead.buffer == inBuffer && tl_lastRead.bytesRead == inSize) {
+    InFlightRead read;
+    InFlightRead* matchedSlot = nullptr;
+    if (FindMatchingRead(inBuffer, inSize, read, &matchedSlot)) {
+        tl_history.Consume(matchedSlot);
         TraceRecord rec;
         rec.seq = s_seqCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-        const std::string& archive = tl_lastRead.archiveName;
+        const std::string& archive = read.archiveName;
         strncpy_s(rec.pakName, sizeof(rec.pakName), archive.c_str(), _TRUNCATE);
-        rec.offset = tl_lastRead.offset;
+        rec.offset = read.offset;
         rec.inBytes = inSize;
         rec.outBytes = actualOut ? actualOut : outCapacity;
         rec.decompTimeUs = decompTimeUs;
-        rec.loadTimestampUs = tl_lastRead.timestampUs;
+        rec.loadTimestampUs = read.timestampUs;
 
-        // Update main thread sequence and purge any stale blocks older than rec.seq
-        s_currentMainSeq.store(rec.seq, std::memory_order_relaxed);
+        const uint32_t curMainSeq = s_currentMainSeq.load(std::memory_order_relaxed);
+        uint32_t targetSeq = rec.seq;
+        const uint64_t key = MakeCacheKey(archive, rec.offset);
+        auto seqIt = s_candidateSeqsByKey.find(key);
+        if (seqIt != s_candidateSeqsByKey.end()) {
+            const auto& seqVec = seqIt->second;
+            auto itNext = std::lower_bound(seqVec.begin(), seqVec.end(), curMainSeq + 1);
+            if (itNext != seqVec.end()) {
+                // Only advance if within a reasonable chronological window (avoid jumping 4000 seq ahead on repeated blocks)
+                if (*itNext <= curMainSeq + 256 || curMainSeq == 0) {
+                    targetSeq = *itNext;
+                }
+            }
+        }
+        uint32_t prevSeq = curMainSeq;
+        while (targetSeq > prevSeq && !s_currentMainSeq.compare_exchange_weak(
+                   prevSeq, targetSeq, std::memory_order_relaxed)) {}
+        const uint32_t purgeSeq = s_currentMainSeq.load(std::memory_order_relaxed);
+
+        // Purge any stale blocks older than purgeSeq
         AcquireSRWLockExclusive(&s_cacheLock);
-        PurgeStaleBlocksUnderLock(rec.seq);
+        PurgeStaleBlocksUnderLock(purgeSeq);
         ReleaseSRWLockExclusive(&s_cacheLock);
         if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
-
-        tl_lastRead.valid = false;
 
         AcquireSRWLockExclusive(&s_traceLock);
         s_traceRecords.push_back(rec);
@@ -754,7 +814,6 @@ void PakTracer_RecordDecompress(
 
         s_matchedCount.fetch_add(1, std::memory_order_relaxed);
     } else {
-        tl_lastRead.valid = false;
         s_unmatchedCount.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -767,7 +826,7 @@ void PakTracer_RecordDecompress(
 void PakTracer_OnLoadEnd() {
     s_prefetchLookupEnabled.store(false, std::memory_order_release);
     s_isActive.store(false, std::memory_order_release);
-    tl_lastRead.valid = false;
+    tl_history.Clear();
 
     if (s_memAvailableEvent) {
         SetEvent(s_memAvailableEvent);
@@ -826,14 +885,15 @@ void PakTracer_OnLoadEnd() {
     Log("G3O", "  Unmatched / Other:    %u (%.1f%%)", unmatched, 100.0 - matchRate);
     Log("G3O", "  Tracer overhead:      %.2f ms", overheadMs);
 
-    size_t totalCandidates = s_priorityCandidates.size() + s_candidates.size();
+    size_t totalCandidates = s_candidates.size();
     if (totalCandidates > 0) {
+        const size_t regularCount = totalCandidates - s_vipCandidateCount;
         double hitPct = (hits + misses > 0) ? (100.0 * (double)hits / (double)(hits + misses)) : 0.0;
         Log("G3O", "[PakCache] === PRE-DECOMPRESSION CACHE PERFORMANCE REPORT ===");
         Log("G3O", "  Candidates Queued:        %zu (%zu VIP Priority + %zu Regular)",
-            totalCandidates, s_priorityCandidates.size(), s_candidates.size());
+            totalCandidates, s_vipCandidateCount, regularCount);
         Log("G3O", "  Cache HITS:               %u (%.1f%%)", hits, hitPct);
-        Log("G3O", "  VIP Priority HITS:        %u / %zu", prioHits, s_priorityCandidates.size());
+        Log("G3O", "  VIP Priority HITS:        %u / %zu", prioHits, s_vipCandidateCount);
         Log("G3O", "  Cache MISSES:             %u (%.1f%%)", misses, 100.0 - hitPct);
         Log("G3O", "  Data Served from Cache:   %.2f MB", hitMb);
         Log("G3O", "  Estimated CPU Time Saved: %.2f s", savedSec);
@@ -842,8 +902,8 @@ void PakTracer_OnLoadEnd() {
             peakMb, s_maxRollingMemoryBytes / (1024 * 1024));
     }
 
-    // Write trace to CSV only if there was no valid trace (so we preserve golden baseline trace)
-    if (!s_hasValidTrace && totalMatched > 0 && s_tracePath[0]) {
+    // Write trace to CSV if there was no valid trace, or if we matched significantly more records than the old baseline
+    if (totalMatched > 0 && s_tracePath[0] && (!s_hasValidTrace || totalMatched > s_candidates.size() + 100)) {
         std::ofstream ofs(s_tracePath);
         if (ofs.is_open()) {
             ofs << "seq,pak,offset,in_bytes,out_bytes,decomp_us,load_time_ms\n";

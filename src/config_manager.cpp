@@ -385,6 +385,7 @@ void LoadConfig() {
     s_config.interceptOutputDebugString = ReadIniBool("Logging", "InterceptOutputDebugString", false, path);
     s_config.enableProfiler = ReadIniBool("Logging", "EnableProfiler", false, path);
     s_config.enableSavegameAudit = ReadIniBool("Logging", "EnableSavegameAudit", false, path);
+    s_config.enableLayerAudit = ReadIniBool("Logging", "EnableLayerAudit", false, path);
 
 }
 

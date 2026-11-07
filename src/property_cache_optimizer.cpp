@@ -1,4 +1,5 @@
 #include "property_cache_optimizer.h"
+#include "property_cache_hook_pair.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
 #include <minhook.h>
@@ -18,8 +19,7 @@ static ResolvePropertyID_t Real_ResolvePropertyID = nullptr;
 static void* s_targetString = nullptr;
 static void* s_targetID = nullptr;
 
-// Per-thread telemetry avoids LOCK INC in the resolver hot path. The load
-// report reads these counters on the thread that runs the sequential load.
+// Per-thread telemetry avoids LOCK INC in the resolver hot path.
 static thread_local uint32_t s_stringHits = 0;
 static thread_local uint32_t s_stringMisses = 0;
 static thread_local uint32_t s_idHits = 0;
@@ -52,7 +52,7 @@ static const uint32_t STRING_CACHE_MASK = STRING_CACHE_SIZE - 1;
 static const uint32_t ID_CACHE_SIZE = 8192;
 static const uint32_t ID_CACHE_MASK = ID_CACHE_SIZE - 1;
 
-// Thread-local caches to ensure 100% thread safety without locks
+// Thread-local caches ensure 100% thread safety without locks
 static thread_local StringCacheEntry* s_tlStringCache = nullptr;
 static thread_local PropertyIdCacheEntry* s_tlIdCache = nullptr;
 
@@ -211,6 +211,9 @@ bool InitializePropertyCacheOptimizer() {
     if (!GetConfig().enablePropertyCache) {
         return false;
     }
+    if (s_targetString && s_targetID) {
+        return true;
+    }
 
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
     if (!hSharedBase) {
@@ -226,20 +229,29 @@ bool InitializePropertyCacheOptimizer() {
         return false;
     }
 
-    s_targetString = fnString;
-    s_targetID = fnID;
+    Real_ResolvePropertyString = nullptr;
+    Real_ResolvePropertyID = nullptr;
+    auto create = [&](void* target) {
+        if (target == fnString) {
+            return MH_CreateHook(target, (LPVOID)Hooked_ResolvePropertyString,
+                                 (LPVOID*)&Real_ResolvePropertyString) == MH_OK;
+        }
+        return MH_CreateHook(target, (LPVOID)Hooked_ResolvePropertyID,
+                             (LPVOID*)&Real_ResolvePropertyID) == MH_OK;
+    };
+    auto enable = [](void* target) { return MH_EnableHook(target) == MH_OK; };
+    auto disable = [](void* target) { (void)MH_DisableHook(target); };
+    auto remove = [](void* target) { (void)MH_RemoveHook(target); };
 
-    MH_STATUS s1 = MH_CreateHook(fnString, (LPVOID)Hooked_ResolvePropertyString, (LPVOID*)&Real_ResolvePropertyString);
-    MH_STATUS s2 = MH_CreateHook(fnID, (LPVOID)Hooked_ResolvePropertyID, (LPVOID*)&Real_ResolvePropertyID);
-
-    if (s1 != MH_OK || s2 != MH_OK) {
-        Log("G3O", "PropertyCacheOptimizer: Failed to create hooks (code %d, %d).", (int)s1, (int)s2);
+    if (!InstallHookPairTransactional(fnString, fnID, create, enable, disable, remove)) {
+        Real_ResolvePropertyString = nullptr;
+        Real_ResolvePropertyID = nullptr;
+        Log("G3O", "Property Cache Optimizer: Failed to install both ResolveProperty hooks transactionally.");
         return false;
     }
 
-    MH_EnableHook(fnString);
-    MH_EnableHook(fnID);
-
+    s_targetString = fnString;
+    s_targetID = fnID;
     Log("G3O", "Property Cache Optimizer initialized (bCAccessorProperty::ResolveProperty hooked with O(1) hash cache).");
     return true;
 }
@@ -247,12 +259,16 @@ bool InitializePropertyCacheOptimizer() {
 void ShutdownPropertyCacheOptimizer() {
     if (s_targetString) {
         MH_DisableHook(s_targetString);
+        MH_RemoveHook(s_targetString);
         s_targetString = nullptr;
     }
     if (s_targetID) {
         MH_DisableHook(s_targetID);
+        MH_RemoveHook(s_targetID);
         s_targetID = nullptr;
     }
+    Real_ResolvePropertyString = nullptr;
+    Real_ResolvePropertyID = nullptr;
     Log("G3O", "Property Cache Optimizer thread-local stats: String hits=%lu, misses=%lu | ID hits=%lu, misses=%lu",
         (unsigned long)s_stringHits, (unsigned long)s_stringMisses,
         (unsigned long)s_idHits, (unsigned long)s_idMisses);

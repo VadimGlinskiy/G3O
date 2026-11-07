@@ -58,6 +58,7 @@ struct Config {
     bool interceptOutputDebugString = false;
     bool enableProfiler = false;
     bool enableSavegameAudit = false;
+    bool enableLayerAudit = false;     // Deep per-entity/property QPC hooks (19 hooks, ~0.2-0.3s overhead)
 
     std::string iniFilePath;
 };

@@ -8,10 +8,12 @@ namespace G3O {
 // of the process and of its busiest thread. Does not alter game behaviour.
 void InitializeProfiler();
 void ShutdownProfiler();
+void ProfilerSetGameplayReady(bool ready);
 
 extern volatile LONG g_cullCalls;
 
 // Installs the frame-time hook on vtbl[17] (IDirect3DDevice9::Present).
 void ProfilerHookPresent(void** deviceVtbl);
+void ProfilerRecordPresentedFrame();
 
 } // namespace G3O

@@ -270,23 +270,27 @@ static void InstallDeviceStateFilter(IDirect3DDevice9* pDevice) {
     Log("G3O", "Direct3D 9 State Redundancy Filter installed on IDirect3DDevice9.");
 }
 
+void AttachD3D9DeviceIfReady(void* rawDevice) {
+    IDirect3DDevice9* pDevice = reinterpret_cast<IDirect3DDevice9*>(rawDevice);
+    if (!pDevice) return;
+    if (GetConfig().enableD3D9StateFilter && !s_deviceFilterInstalled) {
+        InstallDeviceStateFilter(pDevice);
+    }
+    if (GetConfig().enableProfiler && !s_presentHooked) {
+        void** vtbl = *(void***)pDevice;
+        if (vtbl) {
+            ProfilerHookPresent(vtbl);
+            s_presentHooked = true;
+        }
+    }
+}
+
 typedef void* (__thiscall* eCDX9Device_ctor_t)(void* pThis, IDirect3DDevice9* pDevice);
 static eCDX9Device_ctor_t Real_eCDX9Device_ctor = NULL;
 
 static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDirect3DDevice9* pDevice) {
     void* result = Real_eCDX9Device_ctor(pThis, pDevice);
-    if (pDevice) {
-        if (GetConfig().enableD3D9StateFilter) {
-            InstallDeviceStateFilter(pDevice);
-        }
-        if (GetConfig().enableProfiler && !s_presentHooked) {
-            void** vtbl = *(void***)pDevice;
-            if (vtbl) {
-                ProfilerHookPresent(vtbl);
-                s_presentHooked = true;
-            }
-        }
-    }
+    AttachD3D9DeviceIfReady(pDevice);
     return result;
 }
 
