@@ -26,6 +26,7 @@
 #include "pvs_prefetch_optimizer.h"
 #include "quest_load_optimizer.h"
 #include "info_manager_optimizer.h"
+#include "layer_ring_arena.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
 #include "pak_prefetch.h"
@@ -168,6 +169,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // Savegame Profiler: High-resolution telemetry for savegame loading phases
     G3O::InitializeSavegameProfiler();
     G3O::InitializePakPrefetch();
+    G3O::InitializeLayerRingArena();
 
     if (cfg.enableSharedBaseOptimizations) {
         G3O::InitializeSharedBaseOptimizations();
@@ -245,6 +247,7 @@ static void ShutdownOptima() {
     G3O::ShutdownInfoManagerOptimizer();
     G3O::ShutdownNavigationOptimizer();
     G3O::ShutdownVFSCacheOptimizer();
+    G3O::ShutdownLayerRingArena();
     G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();

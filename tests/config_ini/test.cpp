@@ -32,7 +32,7 @@ int main() {
     if (path.empty()) return 2;
     bool ok = true;
     const G3O::Config defaults{};
-    ok &= Expect(defaults.enablePropertyCache &&
+    ok &= Expect(defaults.enablePropertyCache && defaults.enableLayerRingArena &&
                  defaults.enableVFSCache && defaults.pakCacheBudgetMB == 768 &&
                  defaults.enableDiagnosticLog && defaults.interceptOutputDebugString &&
                  defaults.enableProfiler && defaults.enableSavegameAudit && defaults.enableLayerAudit,
@@ -69,7 +69,7 @@ int main() {
     ok &= Expect(invalid.cpuAffinityMask == 0, "mask wider than the x86 pointer should use default");
     ok &= Expect(invalid.pakCacheBudgetMB == 768, "negative cache budget should use default");
     ok &= Expect(invalid.pakPrefetchWorkers == 0, "worker count above maximum should use default");
-    ok &= Expect(invalid.enablePropertyCache && invalid.enableVFSCache,
+    ok &= Expect(invalid.enablePropertyCache && invalid.enableLayerRingArena && invalid.enableVFSCache,
                  "missing performance keys should use the active release profile");
     ok &= Expect(invalid.enableDiagnosticLog && invalid.interceptOutputDebugString && invalid.enableProfiler &&
                  invalid.enableSavegameAudit && invalid.enableLayerAudit,
@@ -93,7 +93,7 @@ int main() {
         "EnableSharedBaseOptimizations=",
         "VegetationGridRangeClamp=", "EnableVFSCache=", "CPUCores=", "CPUThreads=",
         "CPUAffinityMask=", "PakCacheBudgetMB=768", "PakPrefetchWorkers=",
-        "EnablePropertyCache=true", "EnableVFSCache=true",
+        "EnablePropertyCache=true", "EnableLayerRingArena=true", "EnableVFSCache=true",
         "EnableD3D9StateFilter=true", "EnableDiagnosticLog=true", "InterceptOutputDebugString=true",
         "EnableProfiler=true", "EnableSavegameAudit=true", "EnableLayerAudit=true"
     };

@@ -101,6 +101,8 @@ add_library(dinput8 SHARED
     src/quest_load_optimizer.h
     src/info_manager_optimizer.cpp
     src/info_manager_optimizer.h
+    src/layer_ring_arena.cpp
+    src/layer_ring_arena.h
     src/property_cache_optimizer.cpp
     src/property_cache_optimizer.h
     src/entity_search_optimizer.cpp

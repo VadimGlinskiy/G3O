@@ -312,6 +312,10 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Что делает: заменяет 43-бакетный обход связных списков на плоскую теневую хэш-таблицу O(1).\n"
         << "; Что дает: сокращает фазу десериализации диалогов в SysDyn с 3.7 секунд до менее чем 5 миллисекунд.\n"
         << "EnableInfoManagerOptimizer=true\n\n"
+        << "; Опережающая кольцевая арена декомпрессии статических слоев (true / false).\n"
+        << "; Что делает: предварительно разжимает блоки геометрии тяжелых секторов (RB_Mod со 108 слоями) в скользящем окне памяти (4 МБ) в фоновом потоке.\n"
+        << "; Что дает: исключает задержки декомпрессии геометрии при загрузке 108 статических слоев мода.\n"
+        << "EnableLayerRingArena=true\n\n"
         << "; Ускоритель загрузки текстур (true / false).\n"
         << "; Что делает: перехватывает загрузку текстур через Direct3D 9, пропуская избыточные промежуточные конвертации.\n"
         << "; Что дает: снижает заикания при фоновой подгрузке текстур в процессе перемещения по миру.\n"
@@ -494,6 +498,7 @@ void LoadConfig() {
     s_config.pvsRampUpCalls = static_cast<uint32_t>(ReadIniInt("Performance", "PVSRampUpCalls", 24, 0, 1000, path));
     s_config.enableQuestLoadOptimizer = ReadIniBool("Performance", "EnableQuestLoadOptimizer", true, path);
     s_config.enableInfoManagerOptimizer = ReadIniBool("Performance", "EnableInfoManagerOptimizer", true, path);
+    s_config.enableLayerRingArena = ReadIniBool("Performance", "EnableLayerRingArena", true, path);
 
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);

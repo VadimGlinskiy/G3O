@@ -1,4 +1,5 @@
 #include "fast_pak_decompressor.h"
+#include "layer_ring_arena.h"
 #include "decompressor_avx2.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
@@ -98,6 +99,18 @@ static int __stdcall Hooked_ZlibDecompress(
 ) {
     BlackboxScope bbScope(BB_OP_DECOMPRESSING_PAK, "PAK_Stream", (uint64_t)(uintptr_t)inBuffer, inSize);
     if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0) {
+        // Fast path: Sliding-Window Ring Arena for heavy static layers (RB_Mod)
+        if (LayerRingArena_IsActive()) {
+            DWORD arenaOut = 0;
+            if (LayerRingArena_TryGet(inBuffer, inSize, outBuffer, outCapacity, &arenaOut)) {
+                if (pOutWritten) *pOutWritten = arenaOut;
+                InterlockedIncrement(&s_decompCount);
+                InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
+                InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)arenaOut);
+                return 0; // Served with zero decompression overhead from Ring Arena
+            }
+        }
+
         // Step 2.3: Fast speculative pre-decompression cache lookup
         if (PakTracer_CanTryGetPredecompressed()) {
             DWORD cachedOut = 0;

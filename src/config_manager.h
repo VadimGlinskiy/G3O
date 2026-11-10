@@ -50,6 +50,7 @@ struct Config {
     uint32_t pvsRampUpCalls = 24;
     bool enableQuestLoadOptimizer = true;
     bool enableInfoManagerOptimizer = true;
+    bool enableLayerRingArena = true;
 
     // Fail-open if device threading or state-block hooks cannot be verified.
     bool enableD3D9StateFilter = true;

@@ -16,6 +16,7 @@
 #include "pvs_prefetch_optimizer.h"
 #include "quest_load_optimizer.h"
 #include "info_manager_optimizer.h"
+#include "layer_ring_arena.h"
 #include "pak_tracer.h"
 #include "pak_read_at.h"
 #include "profiler.h"
@@ -1674,7 +1675,9 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     }
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
+    LayerRingArena_OnSectorStart(sectorNameForCapture);
     Real_SectorOnActivate(pSector);
+    LayerRingArena_OnSectorEnd();
     s_collectSysDynReadDispatch = previousSysDynDispatch;
     s_isSysDynSectorActive = previousSysDynSectorActive;
     if (s_sampleThread) s_samplePhase = previousSamplePhase;
