@@ -245,10 +245,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Что делает: заменяет скалярные проверки пересечения коробок AABB на SSE, ускоряет сравнение строк.\n"
         << "; Что дает: снижает нагрузку на CPU при отсечении невидимых объектов и сглаживает микрофризы.\n"
         << "EnableSharedBaseOptimizations=true\n\n"
-        << "; Замена стандартного аллокатора MemHeap на mimalloc (true / false).\n"
-        << "; Что делает: экспериментальный перехват кучи SharedBase.\n"
-        << "; Что дает: выключено (false) из-за несовместимости с внутренними пулами SharedBase.dll и paru_s1.dll.\n"
-        << "EnableMemoryAllocator=false\n\n"
         << "; Оптимизатор поиска компонентов сущностей (true / false).\n"
         << "; Что делает: кэширует указатели vptr таблиц в eCEntity::SearchForEntity с быстрым ранним выходом.\n"
         << "; Что дает: ускоряет на 30–40% поиск свойств и компонентов у NPC и предметов при высокой плотности объектов.\n"
@@ -482,7 +478,6 @@ void LoadConfig() {
     // [Performance]
     s_config.enableSharedBaseOptimizations = ReadIniBoolWithLegacyKey(
         "Performance", "EnableSharedBaseOptimizations", "EnableSIMDFrustumCulling", true, path);
-    s_config.enableMemoryAllocator = ReadIniBool("Performance", "EnableMemoryAllocator", false, path);
     s_config.enableEntitySearchOptimizer = ReadIniBool("Performance", "EnableEntitySearchOptimizer", true, path);
     s_config.enableFastPakDecompressor = ReadIniBool("Performance", "EnableFastPakDecompressor", true, path);
     s_config.enablePropertyCache = ReadIniBool("Performance", "EnablePropertyCache", true, path);

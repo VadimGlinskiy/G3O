@@ -26,7 +26,6 @@
 #include "pvs_prefetch_optimizer.h"
 #include "quest_load_optimizer.h"
 #include "info_manager_optimizer.h"
-#include "memory_allocator.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
 #include "pak_prefetch.h"
@@ -110,10 +109,6 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // Property Cache Optimizer: O(1) hash cache for entity property resolution during save loading
     if (cfg.enablePropertyCache) {
         G3O::InitializePropertyCacheOptimizer();
-    }
-
-    if (cfg.enableMemoryAllocator) {
-        MemoryOptimizer::Initialize();
     }
 
     if (cfg.enableEntitySearchOptimizer) {
@@ -239,7 +234,6 @@ static void ShutdownOptima() {
     G3O::ShutdownVegetationOptimizer();
     G3O::ShutdownFastPakDecompressor();
     G3O::ShutdownEntitySearchOptimizer();
-    MemoryOptimizer::Shutdown();
     G3O::ShutdownPropertyCacheOptimizer();
     G3O::ShutdownFrustumDatabaseOptimizer();
     G3O::ShutdownHashProxyOptimizer();

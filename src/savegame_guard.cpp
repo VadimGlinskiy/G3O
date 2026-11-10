@@ -1,6 +1,5 @@
 #include "savegame_guard.h"
 #include <minhook.h>
-#include <mimalloc.h>
 #include <windows.h>
 #include <shlobj.h>
 #include <stdio.h>
@@ -74,11 +73,9 @@ static bool __fastcall Hooked_SaveGameWorld(void* pThis, void* /*edx*/, void* pS
 
     if (memStatus.ullAvailVirtual < 500ULL * 1024ULL * 1024ULL) {
         char buf[256];
-        sprintf_s(buf, "[Gothic3Optima] SaveGame Guard: Low virtual memory before save (%.1f MB). Flushing heap caches!\n",
+        sprintf_s(buf, "[Gothic3Optima] SaveGame Guard: Low virtual memory before save (%.1f MB)!\n",
             (double)memStatus.ullAvailVirtual / (1024.0 * 1024.0));
         OutputDebugStringA(buf);
-
-        mi_collect(true);
     }
 
     // 2. Pre-save safety backup of existing savegames

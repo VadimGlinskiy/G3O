@@ -1,5 +1,4 @@
 #include "lru_cache_manager.h"
-#include "memory_allocator.h"
 #include "d3d9_hook.h"
 #include <minhook.h>
 #include <windows.h>
@@ -147,9 +146,6 @@ namespace LRUCacheManager {
 
         // Evict managed video memory textures
         EvictD3D9Resources();
-
-        // Release free physical and virtual pages from mimalloc heaps
-        MemoryOptimizer::Collect();
 
         char buf[256];
         MEMORYSTATUSEX memStatus = { sizeof(MEMORYSTATUSEX) };

@@ -34,7 +34,6 @@ struct Config {
 
     // [Performance]
     bool enableSharedBaseOptimizations = true;
-    bool enableMemoryAllocator = false;
     bool enableEntitySearchOptimizer = true;
     bool enableFastPakDecompressor = true;
     bool enablePropertyCache = true;

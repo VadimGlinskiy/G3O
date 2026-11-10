@@ -33,7 +33,7 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
 
     output.Append("[Performance]\n");
     output.AppendFormat(
-        "EnableSharedBaseOptimizations=%s\nEnableMemoryAllocator=%s\nEnableEntitySearchOptimizer=%s\nEnableFastPakDecompressor=%s\nEnablePropertyCache=%s\nEnablePakPrefetch=%s\n"
+        "EnableSharedBaseOptimizations=%s\nEnableEntitySearchOptimizer=%s\nEnableFastPakDecompressor=%s\nEnablePropertyCache=%s\nEnablePakPrefetch=%s\n"
         "EnableFrustumDatabaseOptimizer=%s\nEnableHashProxyOptimizer=%s\nEnableNavigationOptimizer=%s\n"
         "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\nEnablePVSPrefetchOptimizer=%s\nPVSBootRadius=%.9g\nEnableQuestLoadOptimizer=%s\nEnableInfoManagerOptimizer=%s\n"
         "EnableD3D9StateFilter=%s\nEnableFastTextureLoader=%s\nEnableVegetationOptimizer=%s\n"
@@ -41,7 +41,6 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         "EnableCPUTopologyAffinity=%s\nEnableVFSCache=%s\nCPUCores=%d\nCPUThreads=%d\nCPUAffinityMask=0x%llX\n"
         "PakCacheBudgetMB=%d\nPakPrefetchWorkers=%d\n",
         config.enableSharedBaseOptimizations ? "true" : "false",
-        config.enableMemoryAllocator ? "true" : "false",
         config.enableEntitySearchOptimizer ? "true" : "false",
         config.enableFastPakDecompressor ? "true" : "false",
         config.enablePropertyCache ? "true" : "false", config.enablePakPrefetch ? "true" : "false",
