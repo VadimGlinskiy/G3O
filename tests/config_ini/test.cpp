@@ -32,7 +32,7 @@ int main() {
     if (path.empty()) return 2;
     bool ok = true;
     const G3O::Config defaults{};
-    ok &= Expect(defaults.enablePropertyCache && defaults.enableInfoManagerBinaryCache &&
+    ok &= Expect(defaults.enablePropertyCache &&
                  defaults.enableVFSCache && defaults.pakCacheBudgetMB == 768 &&
                  defaults.enableDiagnosticLog && defaults.interceptOutputDebugString &&
                  defaults.enableProfiler && defaults.enableSavegameAudit && defaults.enableLayerAudit,
@@ -69,7 +69,7 @@ int main() {
     ok &= Expect(invalid.cpuAffinityMask == 0, "mask wider than the x86 pointer should use default");
     ok &= Expect(invalid.pakCacheBudgetMB == 768, "negative cache budget should use default");
     ok &= Expect(invalid.pakPrefetchWorkers == 0, "worker count above maximum should use default");
-    ok &= Expect(invalid.enablePropertyCache && invalid.enableInfoManagerBinaryCache && invalid.enableVFSCache,
+    ok &= Expect(invalid.enablePropertyCache && invalid.enableVFSCache,
                  "missing performance keys should use the active release profile");
     ok &= Expect(invalid.enableDiagnosticLog && invalid.interceptOutputDebugString && invalid.enableProfiler &&
                  invalid.enableSavegameAudit && invalid.enableLayerAudit,
@@ -93,7 +93,7 @@ int main() {
         "EnableSharedBaseOptimizations=",
         "VegetationGridRangeClamp=", "EnableVFSCache=", "CPUCores=", "CPUThreads=",
         "CPUAffinityMask=", "PakCacheBudgetMB=768", "PakPrefetchWorkers=",
-        "EnablePropertyCache=true", "EnableInfoManagerBinaryCache=true", "EnableVFSCache=true",
+        "EnablePropertyCache=true", "EnableVFSCache=true",
         "EnableD3D9StateFilter=true", "EnableDiagnosticLog=true", "InterceptOutputDebugString=true",
         "EnableProfiler=true", "EnableSavegameAudit=true", "EnableLayerAudit=true"
     };
@@ -102,6 +102,8 @@ int main() {
     }
     ok &= Expect(text.find("статистики кучи") == std::string::npos,
                  "generated INI should not claim heap-statistics bypasses");
+    ok &= Expect(text.find("EnableInfoManagerBinaryCache=") == std::string::npos,
+                 "generated INI should not expose the removed compiled-info cache");
     ok &= Expect(text.find("EnableGuidMapOptimizer=") == std::string::npos,
                  "generated INI should not expose the removed GUID map optimizer");
     ok &= Expect(text.find("EnableFrustumCulling=") == std::string::npos,
