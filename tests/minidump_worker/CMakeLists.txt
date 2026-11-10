@@ -1,10 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(minidump_worker_test VERSION 1.6.0 LANGUAGES CXX)
+project(minidump_worker_test VERSION 1.6.1 LANGUAGES CXX)
 
 configure_file(../../src/g3o_build_info.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/g3o_build_info.h @ONLY)
 
-add_executable(minidump_worker_test test.cpp)
+add_executable(minidump_worker_test
+    test.cpp
+    ../../src/blackbox_recorder.cpp
+    ../../src/pak_resolver.cpp)
 target_include_directories(minidump_worker_test PRIVATE
     ../../src
     ${CMAKE_CURRENT_BINARY_DIR}/generated

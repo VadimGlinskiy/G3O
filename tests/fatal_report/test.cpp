@@ -32,7 +32,7 @@ static void requireContains(const char* report, const char* expected) {
 
 int main() {
     const char* runtimeContext =
-        "[Версия G3O] 1.6.0\n"
+        "[Версия G3O] 1.6.1\n"
         "[Путь отчёта] E:\\Gothic3\\G3O\\G3O_CrashReport_20261106.log\n"
         "[Статус дампа] не создавался: движковая ошибка без EXCEPTION_POINTERS\n"
         "[DLL] Engine.dll 1.75.14.0\n"
@@ -58,7 +58,7 @@ int main() {
     requireContains(report.CStr(), "[EngineFatal] captured");
     requireContains(report.CStr(), "PID: 17");
     requireContains(report.CStr(), "TID: 23");
-    requireContains(report.CStr(), "[Версия G3O] 1.6.0");
+    requireContains(report.CStr(), "[Версия G3O] 1.6.1");
     requireContains(report.CStr(), "[Путь отчёта] E:\\Gothic3\\G3O\\G3O_CrashReport_20261106.log");
     requireContains(report.CStr(), "[Статус дампа] не создавался: движковая ошибка без EXCEPTION_POINTERS");
     requireContains(report.CStr(), "[DLL] Engine.dll 1.75.14.0");

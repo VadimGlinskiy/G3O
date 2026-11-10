@@ -297,15 +297,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Что делает: кэширует reflection-дескрипторы типов (L1 кэш) и заменяет Malloc/Free на Zero-Alloc переиспользование буфера bCString.\n"
         << "; Что дает: ускоряет десериализацию объектов SysDyn и кэшей на 3–5 секунд, исключает 60 000+ аллокаций памяти движка при загрузке.\n"
         << "EnableClassFactoryOptimizer=true\n\n"
-        << "; Оптимизатор универсальных GUID-карт bTValMap<bCPropertyID, void*> (true / false).\n"
-        << "; Что делает: заменяет стандартный поиск узлов в Engine.dll (RVA 0x1F0F20) на прямой инлайновый\n"
-        << "; обход бакетов со сравнением 16 байт UUID без вызовов через границу DLL.\n"
-        << "; Почему выключено по умолчанию (false):\n"
-        << "; 1. Профилирование показало, что вызовы 0x1F0F20 не являются узким местом сектора SysDyn (6.47 с против 6.33 с).\n"
-        << "; 2. Любые попытки внешнего кэширования сырых указателей на узлы в динамических ресурсных картах\n"
-        << ";    (eCResourceAdmin) приводят к Use-After-Free сбоям при выгрузке/перезагрузке текстур в фоновых потоках.\n"
-        << "; В коде оставлен полностью безопасный прямой обход бакетов, но по умолчанию опция отключена.\n"
-        << "EnableGuidMapOptimizer=false\n\n"
         << "; Оптимизатор префетчера PVS eCPVSPrefetcher3 (true / false).\n"
         << "; Что делает: сжимает радиус синхронного спавна в GotoLoadedPosition до ближней зоны коллизий террейна,\n"
         << "; отсекает избыточные дублирующие синхронные прогоны и плавно догружает дальние ячейки после старта.\n"
@@ -325,8 +316,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Что делает: заменяет 43-бакетный обход связных списков на плоскую теневую хэш-таблицу O(1).\n"
         << "; Что дает: сокращает фазу десериализации диалогов в SysDyn с 3.7 секунд до менее чем 5 миллисекунд.\n"
         << "EnableInfoManagerOptimizer=true\n\n"
-        << "; Бинарный кэш диалогов (true / false).\n"
-        << "EnableInfoManagerBinaryCache=true\n\n"
         << "; Ускоритель загрузки текстур (true / false).\n"
         << "; Что делает: перехватывает загрузку текстур через Direct3D 9, пропуская избыточные промежуточные конвертации.\n"
         << "; Что дает: снижает заикания при фоновой подгрузке текстур в процессе перемещения по миру.\n"
@@ -504,14 +493,12 @@ void LoadConfig() {
     s_config.enableSceneNodeOptimizer = ReadIniBool("Performance", "EnableSceneNodeOptimizer", true, path);
     s_config.enableShadowOptimizer = ReadIniBool("Performance", "EnableShadowOptimizer", true, path);
     s_config.enableClassFactoryOptimizer = ReadIniBool("Performance", "EnableClassFactoryOptimizer", true, path);
-    s_config.enableGuidMapOptimizer = ReadIniBool("Performance", "EnableGuidMapOptimizer", false, path);
     s_config.enablePVSPrefetchOptimizer = ReadIniBool("Performance", "EnablePVSPrefetchOptimizer", true, path);
     s_config.pvsBootRadius = ReadIniFloat("Performance", "PVSBootRadius", 3800.0f, 500.0f, 50000.0f, path);
     s_config.pvsRedundantDistance = ReadIniFloat("Performance", "PVSRedundantDistance", 200.0f, 10.0f, 5000.0f, path);
     s_config.pvsRampUpCalls = static_cast<uint32_t>(ReadIniInt("Performance", "PVSRampUpCalls", 24, 0, 1000, path));
     s_config.enableQuestLoadOptimizer = ReadIniBool("Performance", "EnableQuestLoadOptimizer", true, path);
     s_config.enableInfoManagerOptimizer = ReadIniBool("Performance", "EnableInfoManagerOptimizer", true, path);
-    s_config.enableInfoManagerBinaryCache = ReadIniBool("Performance", "EnableInfoManagerBinaryCache", true, path);
 
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);

@@ -4,11 +4,8 @@
 #include <minhook.h>
 #include <windows.h>
 #include <atomic>
-#include <string>
 #include <string_view>
 #include <unordered_map>
-#include <cstdio>
-#include <cctype>
 #include <cstring>
 
 namespace G3O {
@@ -195,10 +192,8 @@ using FnMemAdminRealloc = void* (__thiscall*)(void* admin, void* memory, uint32_
 using FnGetHashValueCString = uint32_t (__stdcall*)(const bCString& str);
 
 static void* s_realInitHashTable = nullptr;
-static void* s_realInfoMapClear = nullptr;
 
 static uintptr_t s_expectedInitReturn = 0;
-static uintptr_t s_expectedClearReturn = 0;
 static uintptr_t s_gameBase = 0;
 
 static FnMemAdminGetInstance s_memAdminGetInstance = nullptr;
@@ -224,7 +219,6 @@ struct MapResizeStats {
 
 static MapResizeStats s_loadInfosStats;
 static MapResizeStats s_initStats;
-static MapResizeStats s_clearStats;
 
 // Exact bit-for-bit duplicate of Genome Engine's djb2 hash implementation in SharedBase.dll!0x10055F40
 static inline uint32_t FallbackHashCString(const bCString& str) noexcept {
@@ -382,44 +376,12 @@ static uint32_t __stdcall HookInitHashTableImpl(
     return originalResult;
 }
 
-static uint32_t __stdcall HookInfoMapClearImpl(
-    bTInfoValMap* map,
-    void* callerReturn)
-{
-    s_clearStats.calls.fetch_add(1, std::memory_order_relaxed);
-
-    const uint32_t originalResult =
-        CallOriginalWithEax(s_realInfoMapClear, map);
-
-    const uintptr_t caller = reinterpret_cast<uintptr_t>(callerReturn);
-    if (caller != s_expectedClearReturn) {
-        uintptr_t empty = 0;
-        s_clearStats.firstMismatchedCallerRva.compare_exchange_strong(
-            empty, caller - s_gameBase, std::memory_order_relaxed);
-        return originalResult;
-    }
-
-    s_clearStats.matches.fetch_add(1, std::memory_order_relaxed);
-    ExpandAndRehashInfoMap(map, kInfoMapBucketCount, "Clear", &s_clearStats);
-    return originalResult;
-}
-
 __declspec(naked) static void HookInitHashTableThunk()
 {
     __asm {
         push dword ptr [esp]       // Caller return address
         push eax                   // this / map
         call HookInitHashTableImpl // __stdcall cleans up both arguments
-        ret
-    }
-}
-
-__declspec(naked) static void HookInfoMapClearThunk()
-{
-    __asm {
-        push dword ptr [esp]       // Caller return address
-        push eax                   // this / map
-        call HookInfoMapClearImpl  // __stdcall cleans up both arguments
         ret
     }
 }
@@ -432,7 +394,6 @@ using FnGetInfo = gCInfo_PS* (__thiscall*)(gCInfoManager_PS* pThis, const bCStri
 static FnGetInfo Real_GetInfo = nullptr;
 static void*     s_targetGetInfo = nullptr;
 static void*     s_targetInitHashTable = nullptr;
-static void*     s_targetInfoMapClear = nullptr;
 static bool      s_bInitialized = false;
 
 // ============================================================================
@@ -564,296 +525,6 @@ static gCInfo_PS* __fastcall Hooked_GetInfo(
 }
 
 // ============================================================================
-// 6. Binary Cache Infrastructure (ReadCompiledInfoManager / WriteCompiledInfoManager)
-// ============================================================================
-
-using FnVfsGetInstance = void* (__cdecl*)();
-using FnVfsAddDirToCache = unsigned int (__thiscall*)(void* pVfs, const bCString* pDir, unsigned int* pOutCount);
-using FnCStringCtorFromPChar = bCString* (__thiscall*)(bCString* pThis, const char* pText);
-using FnCStringDtor = void (__thiscall*)(bCString* pThis);
-
-static FnVfsGetInstance        s_vfsGetInstance        = nullptr;
-static FnVfsAddDirToCache      s_vfsAddDirToCache      = nullptr;
-static FnCStringCtorFromPChar  s_cStringCtor           = nullptr;
-static FnCStringDtor           s_cStringDtor           = nullptr;
-
-static uint8_t s_originalPatchBytes[2] = { 0x75, 0x2A };
-static void*   s_patchAddress = nullptr;
-static bool    s_bPatchApplied = false;
-
-using FnReadCompiledInfoManager = bool (__thiscall*)(void* pThis, const bCString* pFileName);
-static FnReadCompiledInfoManager Real_ReadCompiledInfoManager = nullptr;
-static void* s_targetReadCompiledInfoManager = nullptr;
-
-using FnWriteCompiledInfoManager = bool (__thiscall*)(void* pThis, const bCString* pFileName);
-static FnWriteCompiledInfoManager Real_WriteCompiledInfoManager = nullptr;
-static void* s_targetWriteCompiledInfoManager = nullptr;
-
-// Computes 64-bit FNV-1a fingerprint over all Data\Infos.* archives and loose files + language
-static uint64_t ComputeInfosArchiveFingerprint(const char* lang) {
-    uint64_t hash = 14695981039346656037ull; // FNV offset basis
-    auto hashBytes = [&](const void* data, size_t len) {
-        const uint8_t* p = static_cast<const uint8_t*>(data);
-        for (size_t i = 0; i < len; ++i) {
-            hash ^= p[i];
-            hash *= 1099511628211ull; // FNV prime
-        }
-    };
-
-    if (lang && lang[0]) {
-        hashBytes(lang, std::strlen(lang));
-    }
-
-    WIN32_FIND_DATAA wfd;
-    HANDLE hFind = FindFirstFileA("Data\\Infos.*", &wfd);
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            if (!(wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                for (const char* c = wfd.cFileName; *c; ++c) {
-                    char lower = static_cast<char>(tolower(static_cast<unsigned char>(*c)));
-                    hashBytes(&lower, 1);
-                }
-                hashBytes(&wfd.nFileSizeLow, sizeof(wfd.nFileSizeLow));
-                hashBytes(&wfd.nFileSizeHigh, sizeof(wfd.nFileSizeHigh));
-                hashBytes(&wfd.ftLastWriteTime.dwLowDateTime, sizeof(wfd.ftLastWriteTime.dwLowDateTime));
-                hashBytes(&wfd.ftLastWriteTime.dwHighDateTime, sizeof(wfd.ftLastWriteTime.dwHighDateTime));
-            }
-        } while (FindNextFileA(hFind, &wfd));
-        FindClose(hFind);
-    }
-
-    // Also scan loose files in Data\Infos\ if any exist (excluding compiled cache files starting with '_')
-    hFind = FindFirstFileA("Data\\Infos\\*.*", &wfd);
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            if (!(wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                if (wfd.cFileName[0] != '_') { // ignore our cache and meta files
-                    for (const char* c = wfd.cFileName; *c; ++c) {
-                        char lower = static_cast<char>(tolower(static_cast<unsigned char>(*c)));
-                        hashBytes(&lower, 1);
-                    }
-                    hashBytes(&wfd.nFileSizeLow, sizeof(wfd.nFileSizeLow));
-                    hashBytes(&wfd.nFileSizeHigh, sizeof(wfd.nFileSizeHigh));
-                    hashBytes(&wfd.ftLastWriteTime.dwLowDateTime, sizeof(wfd.ftLastWriteTime.dwLowDateTime));
-                    hashBytes(&wfd.ftLastWriteTime.dwHighDateTime, sizeof(wfd.ftLastWriteTime.dwHighDateTime));
-                }
-            }
-        } while (FindNextFileA(hFind, &wfd));
-        FindClose(hFind);
-    }
-
-    return hash;
-}
-
-static void RefreshVfsInfosDirectory() {
-    if (s_vfsGetInstance && s_vfsAddDirToCache && s_cStringCtor && s_cStringDtor) {
-        void* pVfs = s_vfsGetInstance();
-        if (pVfs) {
-            bCString dir{};
-            s_cStringCtor(&dir, "Data/Infos");
-            unsigned int count = 0;
-            s_vfsAddDirToCache(pVfs, &dir, &count);
-            s_cStringDtor(&dir);
-        }
-    }
-}
-
-static void ApplyCompiledFolderPatch(uintptr_t gameBase) {
-    uint8_t* pTarget = reinterpret_cast<uint8_t*>(gameBase + 0x1CF41C);
-    s_patchAddress = pTarget;
-    if (pTarget[0] == 0x75 && pTarget[1] == 0x2A) {
-        DWORD oldProtect = 0;
-        if (VirtualProtect(pTarget, 2, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-            pTarget[0] = 0x90;
-            pTarget[1] = 0x90;
-            VirtualProtect(pTarget, 2, oldProtect, &oldProtect);
-            FlushInstructionCache(GetCurrentProcess(), pTarget, 2);
-            s_bPatchApplied = true;
-            Log("G3O", "[InfoManager] Memory-patched Game.dll+0x1CF41C (75 2A -> 90 90, ReadCompiledInfoManager branch enabled).");
-        } else {
-            Log("G3O", "[InfoManager] Warning: VirtualProtect failed at Game.dll+0x1CF41C.");
-        }
-    } else if (pTarget[0] == 0x90 && pTarget[1] == 0x90) {
-        s_bPatchApplied = true;
-        Log("G3O", "[InfoManager] Game.dll+0x1CF41C is already patched with NOPs.");
-    } else {
-        Log("G3O", "[InfoManager] Warning: Unexpected bytes at Game.dll+0x1CF41C: %02X %02X (expected 75 2A).", pTarget[0], pTarget[1]);
-    }
-}
-
-static void RevertCompiledFolderPatch() {
-    if (s_bPatchApplied && s_patchAddress) {
-        uint8_t* pTarget = reinterpret_cast<uint8_t*>(s_patchAddress);
-        DWORD oldProtect = 0;
-        if (VirtualProtect(pTarget, 2, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-            pTarget[0] = s_originalPatchBytes[0];
-            pTarget[1] = s_originalPatchBytes[1];
-            VirtualProtect(pTarget, 2, oldProtect, &oldProtect);
-            FlushInstructionCache(GetCurrentProcess(), pTarget, 2);
-            s_bPatchApplied = false;
-        }
-    }
-}
-
-static bool __fastcall Hooked_ReadCompiledInfoManager(
-    void* pThis, void* /*edx*/, const bCString* pFileName)
-{
-    if (!pFileName || !pFileName->m_pcText) {
-        return false;
-    }
-
-    const std::string baseName = pFileName->m_pcText; // e.g. "compiledinfos_Russian.bin"
-
-    // Extract language name, e.g. "Russian" from "compiledinfos_Russian.bin"
-    std::string lang = "Default";
-    const size_t prefixPos = baseName.find("compiledinfos_");
-    if (prefixPos != std::string::npos) {
-        const size_t start = prefixPos + std::strlen("compiledinfos_");
-        const size_t dotPos = baseName.rfind('.');
-        if (dotPos != std::string::npos && dotPos > start) {
-            lang = baseName.substr(start, dotPos - start);
-        }
-    }
-
-    std::string vfsName;
-    if (baseName.rfind("compiledinfos_", 0) == 0) {
-        vfsName = "_" + baseName; // "_compiledinfos_Russian.bin"
-    } else {
-        vfsName = baseName;
-    }
-
-    const std::string diskPath = "Data\\Infos\\" + vfsName;
-    const std::string metaPath = "Data\\Infos\\" + vfsName + ".meta";
-
-    const uint64_t currentFingerprint = ComputeInfosArchiveFingerprint(lang.c_str());
-
-    bool needGenerate = false;
-    const DWORD binAttr = GetFileAttributesA(diskPath.c_str());
-    if (binAttr == INVALID_FILE_ATTRIBUTES) {
-        Log("G3O", "[InfoManager] Binary cache '%s' does not exist on disk.", diskPath.c_str());
-        needGenerate = true;
-    } else {
-        // Check meta file
-        uint64_t savedFingerprint = 0;
-        FILE* fMeta = nullptr;
-        const errno_t err = fopen_s(&fMeta, metaPath.c_str(), "rb");
-        if (err == 0 && fMeta) {
-            fread(&savedFingerprint, sizeof(savedFingerprint), 1, fMeta);
-            fclose(fMeta);
-        }
-
-        if (savedFingerprint != currentFingerprint || savedFingerprint == 0) {
-            Log("G3O", "[InfoManager] Binary cache '%s' is stale or missing meta (saved=0x%llX, current=0x%llX). Deleting stale cache...",
-                diskPath.c_str(), savedFingerprint, currentFingerprint);
-            DeleteFileA(diskPath.c_str());
-            DeleteFileA(metaPath.c_str());
-            needGenerate = true;
-        }
-    }
-
-    if (needGenerate) {
-        Log("G3O", "[InfoManager] Cache miss for '%s'; skipping synchronous generation inside the save-load hook and returning to the engine fallback.",
-            diskPath.c_str());
-        return false;
-    }
-
-    // Ensure VFS has indexed Data/Infos
-    RefreshVfsInfosDirectory();
-
-    // Construct bCString with the VFS name "_compiledinfos_Russian.bin"
-    bCString vfsCString{};
-    if (s_cStringCtor) {
-        s_cStringCtor(&vfsCString, vfsName.c_str());
-    } else {
-        vfsCString.m_pcText = vfsName.c_str();
-    }
-
-    LARGE_INTEGER t0, t1;
-    QueryPerformanceCounter(&t0);
-    const bool success = Real_ReadCompiledInfoManager(pThis, &vfsCString);
-    QueryPerformanceCounter(&t1);
-
-    if (s_cStringDtor) {
-        s_cStringDtor(&vfsCString);
-    }
-
-    LARGE_INTEGER freq;
-    QueryPerformanceFrequency(&freq);
-    const double ms = (freq.QuadPart > 0)
-        ? static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart)
-        : 0.0;
-
-    if (success) {
-        Log("G3O", "[InfoManager] SUCCESS: ReadCompiledInfoManager loaded '%s' in %.2f ms! (LoadInfosFromInis skipped)",
-            vfsName.c_str(), ms);
-        return true;
-    } else {
-        Log("G3O", "[InfoManager] WARNING: ReadCompiledInfoManager failed to load '%s' (%.2f ms). Falling back to LoadInfosFromInis.",
-            vfsName.c_str(), ms);
-        return false;
-    }
-}
-
-static bool __fastcall Hooked_WriteCompiledInfoManager(
-    void* pThis, void* /*edx*/, const bCString* pFileName)
-{
-    LARGE_INTEGER t0, t1;
-    QueryPerformanceCounter(&t0);
-    const bool result = Real_WriteCompiledInfoManager(pThis, pFileName);
-    QueryPerformanceCounter(&t1);
-
-    LARGE_INTEGER freq;
-    QueryPerformanceFrequency(&freq);
-    const double ms = (freq.QuadPart > 0)
-        ? static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart)
-        : 0.0;
-
-    if (result && pFileName && pFileName->m_pcText) {
-        const std::string writtenPath = pFileName->m_pcText; // e.g. "Data/Infos/_compiledinfos_Russian.bin"
-        std::string metaPath = writtenPath + ".meta";
-        for (char& c : metaPath) {
-            if (c == '/') c = '\\';
-        }
-
-        std::string baseName;
-        const size_t lastSlash = writtenPath.find_last_of("/\\");
-        if (lastSlash != std::string::npos) {
-            baseName = writtenPath.substr(lastSlash + 1);
-        } else {
-            baseName = writtenPath;
-        }
-
-        std::string lang = "Default";
-        const size_t prefixPos = baseName.find("compiledinfos_");
-        if (prefixPos != std::string::npos) {
-            const size_t start = prefixPos + std::strlen("compiledinfos_");
-            const size_t dotPos = baseName.rfind('.');
-            if (dotPos != std::string::npos && dotPos > start) {
-                lang = baseName.substr(start, dotPos - start);
-            }
-        }
-
-        const uint64_t currentFingerprint = ComputeInfosArchiveFingerprint(lang.c_str());
-        FILE* fMeta = nullptr;
-        const errno_t err = fopen_s(&fMeta, metaPath.c_str(), "wb");
-        if (err == 0 && fMeta) {
-            fwrite(&currentFingerprint, sizeof(currentFingerprint), 1, fMeta);
-            fclose(fMeta);
-        }
-
-        // Re-index Data/Infos in VFS so that QuickLoad in the same session works immediately
-        RefreshVfsInfosDirectory();
-
-        Log("G3O", "[InfoManager] SUCCESS: WriteCompiledInfoManager generated '%s' in %.2f ms (fingerprint=0x%llX)!",
-            writtenPath.c_str(), ms, currentFingerprint);
-    } else {
-        Log("G3O", "[InfoManager] WARNING: WriteCompiledInfoManager failed (%.2f ms).", ms);
-    }
-
-    return result;
-}
-
-// ============================================================================
 // 7. Public API & Telemetry
 // ============================================================================
 uint64_t InfoManagerOptimizer_GetHits() noexcept { return CInfoShadowCache::GetHits(); }
@@ -862,8 +533,7 @@ uint32_t InfoManagerOptimizer_GetRebuilds() noexcept { return CInfoShadowCache::
 uint32_t InfoManagerOptimizer_GetIndexedCount() noexcept { return CInfoShadowCache::GetIndexedCount(); }
 uint32_t InfoManagerOptimizer_GetBucketExpansions() noexcept {
     return s_loadInfosStats.expanded.load(std::memory_order_relaxed) +
-           s_initStats.expanded.load(std::memory_order_relaxed) +
-           s_clearStats.expanded.load(std::memory_order_relaxed);
+           s_initStats.expanded.load(std::memory_order_relaxed);
 }
 
 static void LogOneMapResizeStats(const char* name, const MapResizeStats& stats) {
@@ -885,7 +555,6 @@ void InfoManagerOptimizer_LogStats() noexcept {
     Log("G3O", "[InfoManager] Dynamic Bucket Expansion Diagnostics:");
     LogOneMapResizeStats("LoadInfos", s_loadInfosStats);
     LogOneMapResizeStats("InitHashTable", s_initStats);
-    LogOneMapResizeStats("Clear", s_clearStats);
 }
 
 void InitializeInfoManagerOptimizer() {
@@ -896,17 +565,13 @@ void InitializeInfoManagerOptimizer() {
         return;
     }
 
-    // Ensure Data\Infos directory exists for binary cache
-    CreateDirectoryA("Data", NULL);
-    CreateDirectoryA("Data\\Infos", NULL);
-
     HMODULE hGame = GetModuleHandleW(L"Game.dll");
     if (!hGame) {
         Log("G3O", "Info Manager Optimizer: Game.dll not loaded.");
         return;
     }
 
-    // Resolve bCMemoryAdmin allocator, hash function, and bCString methods from SharedBase.dll
+    // Resolve bCMemoryAdmin allocator and hash function from SharedBase.dll
     HMODULE hSharedBase = GetModuleHandleW(L"SharedBase.dll");
     if (hSharedBase) {
         s_memAdminGetInstance = reinterpret_cast<FnMemAdminGetInstance>(
@@ -915,54 +580,11 @@ void InitializeInfoManagerOptimizer() {
             GetProcAddress(hSharedBase, "?Realloc@bCMemoryAdmin@@QAEPAXPAXK@Z"));
         s_getHashValueCString = reinterpret_cast<FnGetHashValueCString>(
             GetProcAddress(hSharedBase, "??$g_GetHashValue@VbCString@@@@YGKABVbCString@@@Z"));
-        s_cStringCtor = reinterpret_cast<FnCStringCtorFromPChar>(
-            GetProcAddress(hSharedBase, "??0bCString@@QAE@PBD@Z"));
-        s_cStringDtor = reinterpret_cast<FnCStringDtor>(
-            GetProcAddress(hSharedBase, "??1bCString@@QAE@XZ"));
-    }
-
-    // Resolve VFS methods from Engine.dll
-    HMODULE hEngine = GetModuleHandleW(L"Engine.dll");
-    if (hEngine) {
-        s_vfsGetInstance = reinterpret_cast<FnVfsGetInstance>(
-            GetProcAddress(hEngine, "?GetInstance@eCVirtualFileSystem@@SGAAV1@XZ"));
-        s_vfsAddDirToCache = reinterpret_cast<FnVfsAddDirToCache>(
-            GetProcAddress(hEngine, "?AddDirToCache@eCVirtualFileSystem@@QAEIABVbCString@@AAI@Z"));
     }
 
     const auto baseAddr = reinterpret_cast<uintptr_t>(hGame);
     s_gameBase = baseAddr;
     s_expectedInitReturn  = baseAddr + 0x1CF26A;
-    s_expectedClearReturn = baseAddr + 0x1CFDB9;
-
-    // Binary Cache optimization: patch folder check and hook Read/WriteCompiledInfoManager
-    if (GetConfig().enableInfoManagerBinaryCache) {
-        ApplyCompiledFolderPatch(baseAddr);
-
-        s_targetReadCompiledInfoManager = reinterpret_cast<void*>(baseAddr + 0x1CFC30);
-        const MH_STATUS readCompStatus = MH_CreateHook(
-            s_targetReadCompiledInfoManager,
-            reinterpret_cast<void*>(&Hooked_ReadCompiledInfoManager),
-            reinterpret_cast<void**>(&Real_ReadCompiledInfoManager));
-        if (readCompStatus == MH_OK) {
-            MH_EnableHook(s_targetReadCompiledInfoManager);
-            Log("G3O", "[InfoManager] Successfully hooked ReadCompiledInfoManager at Game.dll+0x1CFC30.");
-        } else {
-            Log("G3O", "[InfoManager] Warning: Failed to hook ReadCompiledInfoManager (MH_STATUS=%d).", readCompStatus);
-        }
-
-        s_targetWriteCompiledInfoManager = reinterpret_cast<void*>(baseAddr + 0x1CFB60);
-        const MH_STATUS writeCompStatus = MH_CreateHook(
-            s_targetWriteCompiledInfoManager,
-            reinterpret_cast<void*>(&Hooked_WriteCompiledInfoManager),
-            reinterpret_cast<void**>(&Real_WriteCompiledInfoManager));
-        if (writeCompStatus == MH_OK) {
-            MH_EnableHook(s_targetWriteCompiledInfoManager);
-            Log("G3O", "[InfoManager] Successfully hooked WriteCompiledInfoManager at Game.dll+0x1CFB60.");
-        } else {
-            Log("G3O", "[InfoManager] Warning: Failed to hook WriteCompiledInfoManager (MH_STATUS=%d).", writeCompStatus);
-        }
-    }
 
     // 1. Hook gCInfoManager_PS::GetInfo (Game.dll+0x1CE270)
     s_targetGetInfo = reinterpret_cast<void*>(baseAddr + 0x1CE270);
@@ -992,21 +614,7 @@ void InitializeInfoManagerOptimizer() {
         Log("G3O", "[InfoManager] Warning: Failed to hook InitHashTable at Game.dll+0x005E270 (MH_STATUS=%d).", initHookStatus);
     }
 
-    // 3. Hook bTValMap::Clear (Game.dll+0x0061DB0) - Fallback path for ReadCompiledInfoManager (return: 0x1CFDB9)
-    s_targetInfoMapClear = reinterpret_cast<void*>(baseAddr + 0x0061DB0);
-    const MH_STATUS clearHookStatus = MH_CreateHook(
-        s_targetInfoMapClear,
-        reinterpret_cast<void*>(&HookInfoMapClearThunk),
-        &s_realInfoMapClear);
-
-    if (clearHookStatus == MH_OK) {
-        MH_EnableHook(s_targetInfoMapClear);
-        Log("G3O", "[InfoManager] Successfully hooked bTValMap::Clear at Game.dll+0x0061DB0 (Fallback path active).");
-    } else {
-        Log("G3O", "[InfoManager] Warning: Failed to hook Clear at Game.dll+0x0061DB0 (MH_STATUS=%d).", clearHookStatus);
-    }
-
-    // 4. Micro-timing probes for bTPropertyObject<gCInfoManager_PS>::Read (0x1D0240)
+    // 3. Micro-timing probes for bTPropertyObject<gCInfoManager_PS>::Read (0x1D0240)
     s_expectedPhaseBReturn = baseAddr + 0x1D0482;
     s_expectedPhaseCReturn = baseAddr + 0x1D048D;
 
@@ -1088,12 +696,6 @@ void ShutdownInfoManagerOptimizer() {
     }
     s_realInitHashTable = nullptr;
 
-    if (s_targetInfoMapClear) {
-        MH_DisableHook(s_targetInfoMapClear);
-        s_targetInfoMapClear = nullptr;
-    }
-    s_realInfoMapClear = nullptr;
-
     if (s_targetPropertyObjectRead) {
         MH_DisableHook(s_targetPropertyObjectRead);
         s_targetPropertyObjectRead = nullptr;
@@ -1117,20 +719,6 @@ void ShutdownInfoManagerOptimizer() {
         s_targetLoadInfosFromInis = nullptr;
     }
     Real_LoadInfosFromInis = nullptr;
-
-    if (s_targetReadCompiledInfoManager) {
-        MH_DisableHook(s_targetReadCompiledInfoManager);
-        s_targetReadCompiledInfoManager = nullptr;
-    }
-    Real_ReadCompiledInfoManager = nullptr;
-
-    if (s_targetWriteCompiledInfoManager) {
-        MH_DisableHook(s_targetWriteCompiledInfoManager);
-        s_targetWriteCompiledInfoManager = nullptr;
-    }
-    Real_WriteCompiledInfoManager = nullptr;
-
-    RevertCompiledFolderPatch();
 
     Log("G3O", "[InfoManager] Shutdown complete (Hits: %llu, Misses: %llu, Rebuilds: %u, Cached: %u, Expansions: %u)",
         InfoManagerOptimizer_GetHits(),

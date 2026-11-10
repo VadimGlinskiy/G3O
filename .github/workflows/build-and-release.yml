@@ -32,7 +32,7 @@ jobs:
 
       - name: Package Release Archives
         shell: powershell
-        run: ./scripts/package_releases.ps1 -Version "${{ github.ref_type == 'tag' && github.ref_name || 'v1.6.0' }}"
+        run: ./scripts/package_releases.ps1 -Version "${{ github.ref_type == 'tag' && github.ref_name || 'v1.6.1' }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

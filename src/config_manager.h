@@ -45,14 +45,12 @@ struct Config {
     bool enableSceneNodeOptimizer = true;
     bool enableShadowOptimizer = true;
     bool enableClassFactoryOptimizer = true;
-    bool enableGuidMapOptimizer = false;
     bool enablePVSPrefetchOptimizer = true;
     float pvsBootRadius = 3800.0f;
     float pvsRedundantDistance = 200.0f;
     uint32_t pvsRampUpCalls = 24;
     bool enableQuestLoadOptimizer = true;
     bool enableInfoManagerOptimizer = true;
-    bool enableInfoManagerBinaryCache = true;
 
     // Fail-open if device threading or state-block hooks cannot be verified.
     bool enableD3D9StateFilter = true;

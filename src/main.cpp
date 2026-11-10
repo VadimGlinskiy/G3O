@@ -23,7 +23,6 @@
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
-#include "guid_map_optimizer.h"
 #include "pvs_prefetch_optimizer.h"
 #include "quest_load_optimizer.h"
 #include "info_manager_optimizer.h"
@@ -154,11 +153,6 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // Class Factory Optimizer: L1-cache and Zero-Alloc string reuse for bCPropertyObjectSingleton::ReadObject
     if (cfg.enableClassFactoryOptimizer) {
         G3O::InitializeClassFactoryOptimizer();
-    }
-
-    // Universal GUID Map Optimizer: L1-cache and Inlined 5-DWORD walk for bTValMap<bCPropertyID, void*>::FindNode
-    if (cfg.enableGuidMapOptimizer) {
-        G3O::InitializeGuidMapOptimizer();
     }
 
     // PVS Prefetch Optimizer: Adaptive Boot Radius & Deduplication for eCPVSPrefetcher3

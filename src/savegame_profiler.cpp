@@ -13,7 +13,6 @@
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
-#include "guid_map_optimizer.h"
 #include "pvs_prefetch_optimizer.h"
 #include "quest_load_optimizer.h"
 #include "info_manager_optimizer.h"
@@ -1063,8 +1062,6 @@ static void LogLoadReport(double totalSec) {
         ShadowOptimizer_GetFastAdds(), ShadowOptimizer_GetDuplicatesAvoided(), ShadowOptimizer_GetFastRemoves());
     Log("G3O", "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)",
         ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
-    Log("G3O", "  - Universal GUID Map (Engine):   %u L1 hits, %u fast inline walks, %u misses",
-        GetGuidMapL1Hits(), GetGuidMapFastWalkHits(), GetGuidMapMisses());
     Log("G3O", "  - PVS Prefetch Streaming:         %u sync clamped (to %.0f), %u redundant skipped, %u ramped",
         PVSOptimizer_GetClampedCalls(), static_cast<double>(config.pvsBootRadius), PVSOptimizer_GetSkippedCalls(), PVSOptimizer_GetRampedCalls());
     Log("G3O", "  - Quest/Info Checks Suppressed:   %u quest checks, %u info checks",
@@ -1188,8 +1185,6 @@ static void LogLoadReport(double totalSec) {
             ShadowOptimizer_GetFastAdds(), ShadowOptimizer_GetDuplicatesAvoided(), ShadowOptimizer_GetFastRemoves());
         fprintf(fp, "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)\n",
             ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
-        fprintf(fp, "  - Universal GUID Map (Engine):   %u L1 hits, %u fast inline walks, %u misses\n",
-            GetGuidMapL1Hits(), GetGuidMapFastWalkHits(), GetGuidMapMisses());
         fprintf(fp, "  - PVS Prefetch Streaming:         %u sync clamped (to %.0f), %u redundant skipped, %u ramped\n",
             PVSOptimizer_GetClampedCalls(), static_cast<double>(config.pvsBootRadius), PVSOptimizer_GetSkippedCalls(), PVSOptimizer_GetRampedCalls());
         fprintf(fp, "  - Quest/Info Checks Suppressed:   %u quest checks, %u info checks\n",

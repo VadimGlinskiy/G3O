@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima VERSION 1.6.0 LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.6.1 LANGUAGES C CXX)
 
 configure_file(src/g3o_build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/g3o_build_info.h @ONLY)
 
@@ -101,9 +101,6 @@ add_library(dinput8 SHARED
     src/class_factory_policy.h
     src/class_factory_optimizer.cpp
     src/class_factory_optimizer.h
-    src/guid_map_policy.h
-    src/guid_map_optimizer.cpp
-    src/guid_map_optimizer.h
     src/pvs_prefetch_policy.h
     src/pvs_prefetch_optimizer.cpp
     src/pvs_prefetch_optimizer.h
