@@ -51,6 +51,8 @@ struct Config {
     bool enableQuestLoadOptimizer = true;
     bool enableInfoManagerOptimizer = true;
     bool enableLayerRingArena = true;
+    bool enableFlatEntityIndex = true;
+    bool enableFlatEntityShadowVerify = false;
 
     // Fail-open if device threading or state-block hooks cannot be verified.
     bool enableD3D9StateFilter = true;

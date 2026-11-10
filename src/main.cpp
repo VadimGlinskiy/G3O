@@ -27,6 +27,7 @@
 #include "quest_load_optimizer.h"
 #include "info_manager_optimizer.h"
 #include "layer_ring_arena.h"
+#include "scoped_flat_entity_index.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
 #include "pak_prefetch.h"
@@ -170,6 +171,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     G3O::InitializeSavegameProfiler();
     G3O::InitializePakPrefetch();
     G3O::InitializeLayerRingArena();
+    if (cfg.enableFlatEntityIndex) {
+        G3O::InitializeScopedFlatEntityIndex();
+    }
 
     if (cfg.enableSharedBaseOptimizations) {
         G3O::InitializeSharedBaseOptimizations();
@@ -248,6 +252,7 @@ static void ShutdownOptima() {
     G3O::ShutdownNavigationOptimizer();
     G3O::ShutdownVFSCacheOptimizer();
     G3O::ShutdownLayerRingArena();
+    G3O::ShutdownScopedFlatEntityIndex();
     G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();

@@ -316,6 +316,14 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Что делает: предварительно разжимает блоки геометрии тяжелых секторов (RB_Mod со 108 слоями) в скользящем окне памяти (4 МБ) в фоновом потоке.\n"
         << "; Что дает: исключает задержки декомпрессии геометрии при загрузке 108 статических слоев мода.\n"
         << "EnableLayerRingArena=true\n\n"
+        << "; Плоский алгоритмический индекс сущностей внутри LoadGameWorld (true / false).\n"
+        << "; Что делает: зеркалирует bTValMap сущностей в плоский открыто-адресуемый массив (4 МБ) на время загрузки дельты мира.\n"
+        << "; Что дает: ускоряет сотни тысяч обращений eCEntityProxy в O(1), сокращая gCWorld::LoadGameWorld с ~4.26 с до ~2.0-2.3 с.\n"
+        << "EnableFlatEntityIndex=true\n\n"
+        << "; Режим теневой верификации плоского индекса сущностей (true / false).\n"
+        << "; Что делает: вызывает оба метода поиска (плоский индекс и штатный bTValMap) и сверяет результаты на 100% идентичность.\n"
+        << "; Что дает: позволяет убедиться в 0 расхождений на реальном сохранении.\n"
+        << "EnableFlatEntityShadowVerify=false\n\n"
         << "; Ускоритель загрузки текстур (true / false).\n"
         << "; Что делает: перехватывает загрузку текстур через Direct3D 9, пропуская избыточные промежуточные конвертации.\n"
         << "; Что дает: снижает заикания при фоновой подгрузке текстур в процессе перемещения по миру.\n"
@@ -499,6 +507,8 @@ void LoadConfig() {
     s_config.enableQuestLoadOptimizer = ReadIniBool("Performance", "EnableQuestLoadOptimizer", true, path);
     s_config.enableInfoManagerOptimizer = ReadIniBool("Performance", "EnableInfoManagerOptimizer", true, path);
     s_config.enableLayerRingArena = ReadIniBool("Performance", "EnableLayerRingArena", true, path);
+    s_config.enableFlatEntityIndex = ReadIniBool("Performance", "EnableFlatEntityIndex", true, path);
+    s_config.enableFlatEntityShadowVerify = ReadIniBool("Performance", "EnableFlatEntityShadowVerify", false, path);
 
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);

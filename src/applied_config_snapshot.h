@@ -35,7 +35,7 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
     output.AppendFormat(
         "EnableSharedBaseOptimizations=%s\nEnableEntitySearchOptimizer=%s\nEnableFastPakDecompressor=%s\nEnablePropertyCache=%s\nEnablePakPrefetch=%s\n"
         "EnableFrustumDatabaseOptimizer=%s\nEnableHashProxyOptimizer=%s\nEnableNavigationOptimizer=%s\n"
-        "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\nEnablePVSPrefetchOptimizer=%s\nPVSBootRadius=%.9g\nEnableQuestLoadOptimizer=%s\nEnableInfoManagerOptimizer=%s\nEnableLayerRingArena=%s\n"
+        "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\nEnablePVSPrefetchOptimizer=%s\nPVSBootRadius=%.9g\nEnableQuestLoadOptimizer=%s\nEnableInfoManagerOptimizer=%s\nEnableLayerRingArena=%s\nEnableFlatEntityIndex=%s\nEnableFlatEntityShadowVerify=%s\n"
         "EnableD3D9StateFilter=%s\nEnableFastTextureLoader=%s\nEnableVegetationOptimizer=%s\n"
         "TreeShadowDistance=%.9g\nVegetationGridRangeClamp=%.9g\nEnableHighPrecisionTimer=%s\nEnableHighProcessPriority=%s\n"
         "EnableCPUTopologyAffinity=%s\nEnableVFSCache=%s\nCPUCores=%d\nCPUThreads=%d\nCPUAffinityMask=0x%llX\n"
@@ -55,6 +55,8 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.enableQuestLoadOptimizer ? "true" : "false",
         config.enableInfoManagerOptimizer ? "true" : "false",
         config.enableLayerRingArena ? "true" : "false",
+        config.enableFlatEntityIndex ? "true" : "false",
+        config.enableFlatEntityShadowVerify ? "true" : "false",
         config.enableD3D9StateFilter ? "true" : "false",
         config.enableFastTextureLoader ? "true" : "false",
         config.enableVegetationOptimizer ? "true" : "false",

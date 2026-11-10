@@ -103,6 +103,8 @@ add_library(dinput8 SHARED
     src/info_manager_optimizer.h
     src/layer_ring_arena.cpp
     src/layer_ring_arena.h
+    src/scoped_flat_entity_index.cpp
+    src/scoped_flat_entity_index.h
     src/property_cache_optimizer.cpp
     src/property_cache_optimizer.h
     src/entity_search_optimizer.cpp

@@ -17,6 +17,7 @@
 #include "quest_load_optimizer.h"
 #include "info_manager_optimizer.h"
 #include "layer_ring_arena.h"
+#include "scoped_flat_entity_index.h"
 #include "pak_tracer.h"
 #include "pak_read_at.h"
 #include "profiler.h"
@@ -1819,7 +1820,9 @@ static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const vo
     LONG read0 = s_readCalls; LONG64 readBytes0 = s_readBytes;
     QueryPerformanceCounter(&t0);
 
+    ScopedFlatEntityIndex_OnLoadStart(pThis);
     bool r = Real_LoadGameWorld(pThis, pSaveName, isNewGame);
+    ScopedFlatEntityIndex_OnLoadEnd();
 
     QueryPerformanceCounter(&t1);
     SnapshotPhase(s_statLoadGameWorld, t0, t1, pak0, pakOut0, read0, readBytes0);
