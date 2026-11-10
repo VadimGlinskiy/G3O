@@ -312,6 +312,10 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Что делает: заменяет 43-бакетный обход связных списков на плоскую теневую хэш-таблицу O(1).\n"
         << "; Что дает: сокращает фазу десериализации диалогов в SysDyn с 3.7 секунд до менее чем 5 миллисекунд.\n"
         << "EnableInfoManagerOptimizer=true\n\n"
+        << "; Бинарный кэш диалогов и квестов (true / false).\n"
+        << "; Что делает: сохраняет разобранные 24,555 .info файлов в скомпилированный бинарный образ (Data\\Infos\\_compiledinfos_<World>.bin) и загружает его через быстрый буферизованный поток в памяти.\n"
+        << "; Что дает: ускоряет загрузку сохранений на ~2.8-2.9 секунды за счет полного пропуска медленного парсинга десятков тысяч текстовых файлов.\n"
+        << "EnableInfoManagerBinaryCache=true\n\n"
         << "; Ускоритель загрузки текстур (true / false).\n"
         << "; Что делает: перехватывает загрузку текстур через Direct3D 9, пропуская избыточные промежуточные конвертации.\n"
         << "; Что дает: снижает заикания при фоновой подгрузке текстур в процессе перемещения по миру.\n"
@@ -494,6 +498,7 @@ void LoadConfig() {
     s_config.pvsRampUpCalls = static_cast<uint32_t>(ReadIniInt("Performance", "PVSRampUpCalls", 24, 0, 1000, path));
     s_config.enableQuestLoadOptimizer = ReadIniBool("Performance", "EnableQuestLoadOptimizer", true, path);
     s_config.enableInfoManagerOptimizer = ReadIniBool("Performance", "EnableInfoManagerOptimizer", true, path);
+    s_config.enableInfoManagerBinaryCache = ReadIniBool("Performance", "EnableInfoManagerBinaryCache", true, path);
 
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);
