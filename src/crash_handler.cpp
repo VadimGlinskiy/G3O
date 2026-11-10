@@ -6,6 +6,8 @@
 #include "g3o_output_path.h"
 #include "engine_fatal_report.h"
 #include "g3o_build_info.h"
+#include "blackbox_recorder.h"
+#include "pak_resolver.h"
 #include <minhook.h>
 #include <dbghelp.h>
 #include <psapi.h>
@@ -14,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cctype>
+#include <atomic>
 
 #pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "psapi.lib")
@@ -770,16 +773,15 @@ static void BuildReportText(FixedTextBuffer& outReport, EXCEPTION_POINTERS* pExc
     outReport += runtimeContext ? runtimeContext : "[Контекст отчёта недоступен]\n";
     outReport += "\n";
 
-    // 1. Diagnosis Summary
+    // 1. Tier 1: Execution Point (Fact, 100% precision)
     outReport += "--------------------------------------------------------------------------------\n";
-    outReport += "[ДИАГНОЗ И ВИНОВНИК СБОЯ]\n";
+    outReport += "[1. ТОЧКА И ТИП СБОЯ (EXECUTION POINT — ФАКТ)]\n";
     outReport += "--------------------------------------------------------------------------------\n";
-    snprintf(buf, sizeof(buf), "Категория:      %s\n", blame.category); outReport += buf;
-    snprintf(buf, sizeof(buf), "Модуль:         %s\n", blame.moduleName); outReport += buf;
-    snprintf(buf, sizeof(buf), "Путь к файлу:   %s\n", blame.modulePath); outReport += buf;
-    snprintf(buf, sizeof(buf), "Адрес ошибки:   0x%p (смещение в модуле: +0x%X)\n",
+    snprintf(buf, sizeof(buf), "Модуль исключения:  %s (базовый адрес: 0x%p)\n", blame.moduleName, (void*)blame.baseAddress); outReport += buf;
+    snprintf(buf, sizeof(buf), "Путь к файлу:       %s\n", blame.modulePath); outReport += buf;
+    snprintf(buf, sizeof(buf), "Адрес ошибки (EIP): 0x%p (смещение в модуле RVA: +0x%X)\n",
              (void*)pExceptionInfo->ExceptionRecord->ExceptionAddress, (unsigned int)blame.rva); outReport += buf;
-    snprintf(buf, sizeof(buf), "Код сбоя:       0x%08X — %s\n",
+    snprintf(buf, sizeof(buf), "Код сбоя:           0x%08X — %s\n",
              pExceptionInfo->ExceptionRecord->ExceptionCode,
              GetExceptionCodeString(pExceptionInfo->ExceptionRecord->ExceptionCode)); outReport += buf;
 
@@ -788,30 +790,121 @@ static void BuildReportText(FixedTextBuffer& outReport, EXCEPTION_POINTERS* pExc
         ULONG_PTR accessType = pExceptionInfo->ExceptionRecord->ExceptionInformation[0];
         ULONG_PTR targetAddr = pExceptionInfo->ExceptionRecord->ExceptionInformation[1];
         const char* typeStr = (accessType == 0) ? "чтения (Read)" : (accessType == 1) ? "записи (Write)" : "выполнения (Execute)";
-        snprintf(buf, sizeof(buf), "Операция:       Попытка %s по недопустимому адресу 0x%p %s\n",
+        snprintf(buf, sizeof(buf), "Операция памяти:    Попытка %s по адресу 0x%p %s\n",
                  typeStr, (void*)targetAddr, (targetAddr < 0x10000) ? "(NULL pointer dereference!)" : "");
         outReport += buf;
     }
+    snprintf(buf, sizeof(buf), "Категория подсистемы: %s\n", blame.category); outReport += buf;
+    snprintf(buf, sizeof(buf), "Описание:           %s\n\n", blame.description); outReport += buf;
 
-    snprintf(buf, sizeof(buf), "\nОписание проблемы:\n  %s\n", blame.description); outReport += buf;
-    snprintf(buf, sizeof(buf), "\nРЕКОМЕНДАЦИЯ ПО ИСПРАВЛЕНИЮ:\n  %s\n\n", blame.recommendation); outReport += buf;
+    // 2. Tier 2: Active Thread Context (Flight Data Recorder)
+    outReport += "--------------------------------------------------------------------------------\n";
+    outReport += "[2. АКТИВНЫЙ КОНТЕКСТ ПОТОКА (ACTIVE THREAD CONTEXT — BLACKBOX)]\n";
+    outReport += "--------------------------------------------------------------------------------\n";
+    const uint32_t crashTid = GetCurrentThreadId();
+    const ThreadBlackboxSlot* crashSlot = Blackbox_GetSlotForThread(crashTid);
+    if (crashSlot && crashSlot->tid.load(std::memory_order_relaxed) != 0) {
+        const uint32_t seq = crashSlot->seq_num.load(std::memory_order_relaxed);
+        const bool inFlight = (seq & 1) != 0;
+        if (inFlight) {
+            outReport += "Уровень уверенности: ВЫСОКАЯ УВЕРЕННОСТЬ (Сбой произошёл НЕПОСРЕДСТВЕННО во время операции)\n";
+        } else {
+            outReport += "Уровень уверенности: КОРРЕЛЯЦИЯ (Последняя завершённая операция потока перед сбоем)\n";
+        }
+        snprintf(buf, sizeof(buf), "Поток вылета (TID):  %lu\n", crashTid); outReport += buf;
+        snprintf(buf, sizeof(buf), "Операция:            %s (код %u)\n", Blackbox_GetOpName(crashSlot->op_type), crashSlot->op_type); outReport += buf;
+        if (crashSlot->archive_name[0] != '\0') {
+            snprintf(buf, sizeof(buf), "Архив (.pak/.mod):   %s\n", crashSlot->archive_name); outReport += buf;
+            snprintf(buf, sizeof(buf), "Смещение в архиве:   0x%llX (%llu)\n", crashSlot->offset, crashSlot->offset); outReport += buf;
+            snprintf(buf, sizeof(buf), "Размер блока:        %u байт\n", crashSlot->size); outReport += buf;
 
-    // Check if an indirect initiator was found in stack frames
-    char initiatorMod[MAX_PATH] = {};
-    for (size_t i = 1; i < stackFrameCount; ++i) {
-        if (stackFrames[i].isScriptMod) {
-            CopyText(initiatorMod, sizeof(initiatorMod), stackFrames[i].moduleName);
-            break;
+            PakResolvedResource resInfo;
+            if (ResolvePakVirtualResource(crashSlot->archive_name, crashSlot->offset, resInfo) && resInfo.found) {
+                snprintf(buf, sizeof(buf), "Виртуальный ресурс:  %s\n", resInfo.virtualPath); outReport += buf;
+                if (resInfo.authorPath[0] != '\0') {
+                    snprintf(buf, sizeof(buf), "Исходный путь:       %s\n", resInfo.authorPath); outReport += buf;
+                }
+            }
+        }
+        if (crashSlot->resource_name[0] != '\0') {
+            snprintf(buf, sizeof(buf), "Ресурс / Путь:       %s\n", crashSlot->resource_name); outReport += buf;
+        }
+    } else {
+        outReport += "Контекст потока:     В момент сбоя поток находился вне активных дисковых/графических операций.\n";
+    }
+
+    ThreadBlackboxSlot otherSlots[BLACKBOX_MAX_SLOTS];
+    size_t otherCount = Blackbox_SnapshotAll(otherSlots, BLACKBOX_MAX_SLOTS);
+    bool headerPrinted = false;
+    for (size_t i = 0; i < otherCount; ++i) {
+        if (otherSlots[i].tid.load(std::memory_order_relaxed) != crashTid &&
+            otherSlots[i].archive_name[0] != '\0') {
+            if (!headerPrinted) {
+                outReport += "\nАктивность параллельных потоков:\n";
+                headerPrinted = true;
+            }
+            const uint32_t seq = otherSlots[i].seq_num.load(std::memory_order_relaxed);
+            snprintf(buf, sizeof(buf), "  * TID %lu [%s]: %s в '%s' (0x%llX, %u байт)\n",
+                     otherSlots[i].tid.load(std::memory_order_relaxed),
+                     (seq & 1) ? "АКТИВЕН" : "завершён",
+                     Blackbox_GetOpName(otherSlots[i].op_type),
+                     otherSlots[i].archive_name,
+                     otherSlots[i].offset,
+                     otherSlots[i].size);
+            outReport += buf;
         }
     }
-    if (initiatorMod[0] != 0 && strcmp(blame.moduleName, initiatorMod) != 0) {
-        snprintf(buf, sizeof(buf),
-                 "(!) ОБРАТИТЕ ВНИМАНИЕ:\n"
-                 "    Хотя сбой произошёл в '%s', вызов в стек пришёл из скриптового мода '%s'!\n"
-                 "    Проверьте именно мод '%s'.\n\n",
-                 blame.moduleName, initiatorMod, initiatorMod);
-        outReport += buf;
+    outReport += "\n";
+
+    // 3. Tier 3: Call Stack Participants
+    outReport += "--------------------------------------------------------------------------------\n";
+    outReport += "[3. УЧАСТНИКИ В СТЕКЕ ВЫЗОВОВ (CALL STACK PARTICIPANTS — КОСВЕННАЯ УЛИКА)]\n";
+    outReport += "--------------------------------------------------------------------------------\n";
+    bool anyScriptParticipant = false;
+    for (size_t i = 0; i < stackFrameCount; ++i) {
+        if (stackFrames[i].isScriptMod) {
+            snprintf(buf, sizeof(buf), "Кадр #%02d: %s [RVA: +0x%X] — сторонний скриптовый плагин/мод в цепочке вызовов\n",
+                     (int)i, stackFrames[i].moduleName, (unsigned int)stackFrames[i].rva);
+            outReport += buf;
+            anyScriptParticipant = true;
+        }
     }
+    if (!anyScriptParticipant) {
+        outReport += "Скриптовые моды и сторонние плагины в цепочке вызовов не зафиксированы.\n";
+    }
+    outReport += "\n";
+
+    // 4. Tier 4: Recent Resource Errors & Anomalies
+    outReport += "--------------------------------------------------------------------------------\n";
+    outReport += "[4. СВЕЖИЕ ОШИБКИ И АНОМАЛИИ РЕСУРСОВ (RECENT RESOURCE ANOMALIES)]\n";
+    outReport += "--------------------------------------------------------------------------------\n";
+    bool foundAnomaly = false;
+    if (recentEvents && recentEvents[0] != '\0') {
+        const char* p = recentEvents;
+        while (*p) {
+            const char* nextLine = strchr(p, '\n');
+            size_t lineLen = nextLine ? (size_t)(nextLine - p) : strlen(p);
+            if (lineLen > 0) {
+                if (strstr(p, "[FAILED") || strstr(p, "ERROR") || strstr(p, "Guru") || strstr(p, "Fatal") || strstr(p, "Fallback")) {
+                    if (lineLen < sizeof(buf) - 2) {
+                        memcpy(buf, p, lineLen);
+                        buf[lineLen] = '\n';
+                        buf[lineLen + 1] = '\0';
+                        outReport += buf;
+                        foundAnomaly = true;
+                    }
+                }
+            }
+            if (!nextLine) break;
+            p = nextLine + 1;
+        }
+    }
+    if (!foundAnomaly) {
+        outReport += "Критических аномалий ресурсов непосредственно перед сбоем не зарегистрировано.\n";
+    }
+    outReport += "\n";
+
+    snprintf(buf, sizeof(buf), "РЕКОМЕНДАЦИЯ ПО ИСПРАВЛЕНИЮ:\n  %s\n\n", blame.recommendation); outReport += buf;
 
     // 2. Memory & Virtual Address Space status (Gothic 3 32-bit VAS check!)
     MEMORYSTATUSEX memStatus = { sizeof(MEMORYSTATUSEX) };
@@ -907,9 +1000,32 @@ static bool SaveReportToFile(const char* report, ReportFileTargets& files) {
     return saved;
 }
 
+static std::atomic<DWORD> s_primaryCrashThreadId{0};
+static std::atomic<bool> s_crashAlreadyReported{false};
+
+static bool BeginCrashHandling(DWORD exitCode) {
+    const DWORD currentTid = GetCurrentThreadId();
+    DWORD expected = 0;
+    if (!s_primaryCrashThreadId.compare_exchange_strong(expected, currentTid)) {
+        if (expected == currentTid) {
+            // Recursive crash on the same thread during crash reporting - abort immediately
+            TerminateProcess(GetCurrentProcess(), exitCode);
+        } else {
+            // Another thread is actively handling the primary crash (writing dump / displaying dialog).
+            // Sleep indefinitely so we don't interfere with the report or kill the process prematurely.
+            Sleep(INFINITE);
+        }
+        return false;
+    }
+    return true;
+}
+
 static LONG HandleCrash(EXCEPTION_POINTERS* pExceptionInfo) {
     if (!pExceptionInfo || !pExceptionInfo->ExceptionRecord) {
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (s_crashAlreadyReported.exchange(true)) {
+        return EXCEPTION_EXECUTE_HANDLER;
     }
     if (InterlockedCompareExchange(&s_reportPipelineActive, 1, 0) != 0) {
         return EXCEPTION_CONTINUE_SEARCH;
@@ -960,17 +1076,35 @@ static LONG HandleCrash(EXCEPTION_POINTERS* pExceptionInfo) {
         : false;
 
     if (config.showCrashDialog) {
+        char resourceContext[512] = {0};
+        const ThreadBlackboxSlot* crashSlot = Blackbox_GetSlotForThread(GetCurrentThreadId());
+        if (crashSlot && crashSlot->archive_name[0] != '\0') {
+            PakResolvedResource resInfo;
+            if (ResolvePakVirtualResource(crashSlot->archive_name, crashSlot->offset, resInfo) && resInfo.found) {
+                snprintf(resourceContext, sizeof(resourceContext),
+                         "Ресурс мода:    %s\n"
+                         "Архив (.pak):   %s (смещение 0x%llX)\n",
+                         resInfo.virtualPath, crashSlot->archive_name, crashSlot->offset);
+            } else {
+                snprintf(resourceContext, sizeof(resourceContext),
+                         "Архив (.pak):   %s (смещение 0x%llX)\n",
+                         crashSlot->archive_name, crashSlot->offset);
+            }
+        }
+
         snprintf(s_crashDialogMessage, sizeof(s_crashDialogMessage),
                  "Gothic 3 Optima — Обнаружен критический сбой!\n\n"
-                 "Виновник сбоя: %s\n"
-                 "Категория:     %s\n"
-                 "Адрес сбоя:    0x%p (смещение +0x%X)\n"
-                 "Код ошибки:    0x%08X\n\n"
+                 "Модуль сбоя:    %s\n"
+                 "Категория:      %s\n"
+                 "%s"
+                 "Адрес сбоя:     0x%p (смещение +0x%X)\n"
+                 "Код ошибки:     0x%08X\n\n"
                  "Описание:\n%s\n\n"
                  "Рекомендация:\n%s\n\n"
                  "Отчёт: %s",
                  s_crashBlame.moduleName,
                  s_crashBlame.category,
+                 resourceContext,
                  (void*)faultAddr, (unsigned int)s_crashBlame.rva,
                  pExceptionInfo->ExceptionRecord->ExceptionCode,
                  s_crashBlame.description,
@@ -1000,10 +1134,17 @@ static LONG HandleCrash(EXCEPTION_POINTERS* pExceptionInfo) {
 }
 
 static LONG WINAPI G3OUnhandledCrashFilter(EXCEPTION_POINTERS* pExceptionInfo) {
-    HandleCrash(pExceptionInfo);
-    if (s_previousFilter) {
-        return s_previousFilter(pExceptionInfo);
+    DWORD exitCode = (pExceptionInfo && pExceptionInfo->ExceptionRecord)
+        ? pExceptionInfo->ExceptionRecord->ExceptionCode : 0xC0000005;
+
+    if (!BeginCrashHandling(exitCode)) {
+        return EXCEPTION_EXECUTE_HANDLER;
     }
+
+    HandleCrash(pExceptionInfo);
+
+    // Once crash log and dump are safely saved, terminate the crashing process cleanly
+    TerminateProcess(GetCurrentProcess(), exitCode);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -1144,13 +1285,23 @@ typedef int (__thiscall *CallExceptionError_t)(void* pThis, void* pExceptionPoin
 static CallExceptionError_t s_origCallExceptionError = nullptr;
 
 static int __fastcall HookedCallExceptionError(void* pThis, void* /*edx*/, void* pExceptionPointers) {
-    if (pExceptionPointers) {
-        EXCEPTION_POINTERS* pEP = (EXCEPTION_POINTERS*)pExceptionPointers;
+    DWORD exitCode = 0xC0000005;
+    EXCEPTION_POINTERS* pEP = reinterpret_cast<EXCEPTION_POINTERS*>(pExceptionPointers);
+    if (pEP && pEP->ExceptionRecord) {
+        exitCode = pEP->ExceptionRecord->ExceptionCode;
+    }
+
+    if (!BeginCrashHandling(exitCode)) {
+        return 1;
+    }
+
+    if (pEP) {
         HandleCrash(pEP);
     }
-    if (s_origCallExceptionError) {
-        return s_origCallExceptionError(pThis, pExceptionPointers);
-    }
+
+    // Once the user has seen and closed the crash dialog, terminate the process immediately.
+    // Never allow execution to return to the corrupt engine to prevent cascading crash storms!
+    TerminateProcess(GetCurrentProcess(), exitCode);
     return 1;
 }
 
@@ -1251,10 +1402,33 @@ void ReportEngineFatalError(const char* module, const char* message, const char*
     FixedTextBuffer stackTrace(s_engineFatalStackStorage, sizeof(s_engineFatalStackStorage));
     CaptureFatalCaller(callerFunction, stackTrace);
 
+    MiniDumpResult dumpResult;
+    char dumpStatus[256] = {};
+    if (config.writeCrashDump) {
+        CONTEXT ctx = {};
+        RtlCaptureContext(&ctx);
+        EXCEPTION_RECORD er = {};
+        er.ExceptionCode = 0xE0000001; // Engine Fatal Error synthetic code
+        er.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+        er.ExceptionAddress = reinterpret_cast<PVOID>(ctx.Eip);
+        EXCEPTION_POINTERS ep = { &er, &ctx };
+        dumpResult = WriteMiniDumpOnWorker(&ep);
+        if (dumpResult.written) {
+            snprintf(dumpStatus, sizeof(dumpStatus),
+                     "записан; размер %llu байт; сигнатура MDMP проверена",
+                     dumpResult.sizeBytes);
+        } else {
+            snprintf(dumpStatus, sizeof(dumpStatus),
+                     "не создан; ошибка 0x%08lX",
+                     static_cast<unsigned long>(dumpResult.error));
+        }
+    } else {
+        snprintf(dumpStatus, sizeof(dumpStatus), "отключён настройкой WriteCrashDump=false");
+    }
+
     FixedTextBuffer runtimeContext(s_runtimeContextStorage, sizeof(s_runtimeContextStorage));
     BuildRuntimeContext(runtimeContext, reportFiles, config.writeCrashLog,
-                        "не создавался: движковая FatalError не передаёт EXCEPTION_POINTERS",
-                        nullptr, GetCurrentProcessId(), GetCurrentThreadId());
+                        dumpStatus, s_dumpPath, GetCurrentProcessId(), GetCurrentThreadId());
     FixedTextBuffer report(s_engineFatalReportStorage, sizeof(s_engineFatalReportStorage));
     BuildEngineFatalReport(report, timestamp, module, message, callerFunction.CStr(), file, line,
                            stackTrace.CStr(), s_engineFatalEventSnapshot,

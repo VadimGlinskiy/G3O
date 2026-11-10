@@ -8,6 +8,15 @@
 #include "fast_pak_decompressor.h"
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
+#include "frustum_database_optimizer.h"
+#include "hash_proxy_optimizer.h"
+#include "scene_node_optimizer.h"
+#include "shadow_caster_optimizer.h"
+#include "class_factory_optimizer.h"
+#include "guid_map_optimizer.h"
+#include "pvs_prefetch_optimizer.h"
+#include "quest_load_optimizer.h"
+#include "info_manager_optimizer.h"
 #include "pak_tracer.h"
 #include "pak_read_at.h"
 #include "profiler.h"
@@ -44,6 +53,7 @@ static std::atomic<bool> s_isLoadActive{ false };
 bool IsSavegameLoadActive() noexcept {
     return s_isLoadActive.load(std::memory_order_relaxed);
 }
+
 static volatile bool   s_inPreLoad = false;
 static volatile bool   s_skippedPreLoadActivate = false;
 
@@ -90,6 +100,10 @@ static thread_local bool s_isSysDynSectorActive = false;
 static thread_local bool s_collectSysDynReadDispatch = false;
 static thread_local PvsPrefetchMetrics s_pvsPrefetchMetrics{};
 static thread_local bool s_capturePvsPrefetchMetrics = false;
+
+bool IsGotoLoadedPositionActive() noexcept {
+    return s_capturePvsPrefetchMetrics;
+}
 static void* s_targetPvsProcess = nullptr;
 static void* s_targetPvsWaitForEmptyThreadQueue = nullptr;
 
@@ -916,6 +930,7 @@ static void LogLoadReport(double totalSec) {
     LONG rc = s_readCalls;
     double rbMb = (double)s_readBytes / (1024.0 * 1024.0);
     double rSec = (double)s_readTimeUs / 1000000.0;
+    const auto& config = GetConfig();
 
     LONG pakCount = GetPakDecompCount();
     double pakInMb = (double)GetPakDecompInBytes() / (1024.0 * 1024.0);
@@ -1038,6 +1053,27 @@ static void LogLoadReport(double totalSec) {
         saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
     Log("G3O", "  - Property Resolution Cache (load-thread counters): %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
         totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
+    Log("G3O", "  - Frustum Spatial Updates:        %u calls batched -> %u flushed (%u deletions guarded)",
+        FrustumOptimizer_GetDeferredCalls(), FrustumOptimizer_GetFlushedUpdates(), FrustumOptimizer_GetDeletionsHandled());
+    Log("G3O", "  - String Hash & Template Cache:   %u fast hashes | %u proxy hits (%u neg hits), %u misses",
+        HashProxy_GetHashHits(), HashProxy_GetProxyHits(), HashProxy_GetProxyNegHits(), HashProxy_GetProxyMisses());
+    Log("G3O", "  - Scene Node Preallocations:      %u sector root nodes expanded to 1024-32768",
+        SceneNodeOptimizer_GetPreallocations());
+    Log("G3O", "  - Directional Shadow Casters:     %u fast adds (%u duplicates avoided), %u fast removes (memmove bypassed)",
+        ShadowOptimizer_GetFastAdds(), ShadowOptimizer_GetDuplicatesAvoided(), ShadowOptimizer_GetFastRemoves());
+    Log("G3O", "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)",
+        ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
+    Log("G3O", "  - Universal GUID Map (Engine):   %u L1 hits, %u fast inline walks, %u misses",
+        GetGuidMapL1Hits(), GetGuidMapFastWalkHits(), GetGuidMapMisses());
+    Log("G3O", "  - PVS Prefetch Streaming:         %u sync clamped (to %.0f), %u redundant skipped, %u ramped",
+        PVSOptimizer_GetClampedCalls(), static_cast<double>(config.pvsBootRadius), PVSOptimizer_GetSkippedCalls(), PVSOptimizer_GetRampedCalls());
+    Log("G3O", "  - Quest/Info Checks Suppressed:   %u quest checks, %u info checks",
+        QuestLoadOptimizer_GetSuppressedQuestChecks(), QuestLoadOptimizer_GetSuppressedInfoChecks());
+    Log("G3O", "  - Info Manager Dialog Cache:      %llu hits, %llu misses, %u rebuilds (cached %u dialogs, %u expansions)",
+        InfoManagerOptimizer_GetHits(), InfoManagerOptimizer_GetMisses(),
+        InfoManagerOptimizer_GetRebuilds(), InfoManagerOptimizer_GetIndexedCount(),
+        InfoManagerOptimizer_GetBucketExpansions());
+    InfoManagerOptimizer_LogStats();
 
     Log("G3O", "================================================================================");
 
@@ -1142,6 +1178,26 @@ static void LogLoadReport(double totalSec) {
             GetDecompCacheHits(), (double)GetDecompCacheBytesSaved() / (1024.0 * 1024.0));
         fprintf(fp, "  - Property Resolution Cache (load-thread counters): %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
             totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
+        fprintf(fp, "  - Frustum Spatial Updates:        %u calls batched -> %u flushed (%u deletions guarded)\n",
+            FrustumOptimizer_GetDeferredCalls(), FrustumOptimizer_GetFlushedUpdates(), FrustumOptimizer_GetDeletionsHandled());
+        fprintf(fp, "  - String Hash & Template Cache:   %u fast hashes | %u proxy hits (%u neg hits), %u misses\n",
+            HashProxy_GetHashHits(), HashProxy_GetProxyHits(), HashProxy_GetProxyNegHits(), HashProxy_GetProxyMisses());
+        fprintf(fp, "  - Scene Node Preallocations:      %u sector root nodes expanded to 1024-32768\n",
+            SceneNodeOptimizer_GetPreallocations());
+        fprintf(fp, "  - Directional Shadow Casters:     %u fast adds (%u duplicates avoided), %u fast removes (memmove bypassed)\n",
+            ShadowOptimizer_GetFastAdds(), ShadowOptimizer_GetDuplicatesAvoided(), ShadowOptimizer_GetFastRemoves());
+        fprintf(fp, "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)\n",
+            ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
+        fprintf(fp, "  - Universal GUID Map (Engine):   %u L1 hits, %u fast inline walks, %u misses\n",
+            GetGuidMapL1Hits(), GetGuidMapFastWalkHits(), GetGuidMapMisses());
+        fprintf(fp, "  - PVS Prefetch Streaming:         %u sync clamped (to %.0f), %u redundant skipped, %u ramped\n",
+            PVSOptimizer_GetClampedCalls(), static_cast<double>(config.pvsBootRadius), PVSOptimizer_GetSkippedCalls(), PVSOptimizer_GetRampedCalls());
+        fprintf(fp, "  - Quest/Info Checks Suppressed:   %u quest checks, %u info checks\n",
+            QuestLoadOptimizer_GetSuppressedQuestChecks(), QuestLoadOptimizer_GetSuppressedInfoChecks());
+        fprintf(fp, "  - Info Manager Dialog Cache:      %llu hits, %llu misses, %u rebuilds (cached %u dialogs, %u expansions)\n",
+            InfoManagerOptimizer_GetHits(), InfoManagerOptimizer_GetMisses(),
+            InfoManagerOptimizer_GetRebuilds(), InfoManagerOptimizer_GetIndexedCount(),
+            InfoManagerOptimizer_GetBucketExpansions());
         fprintf(fp, "================================================================================\n");
         fclose(fp);
     }
@@ -1289,7 +1345,9 @@ static HUDLoadGame_t Real_HUDLoadGame = nullptr;
 static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, void* b) {
     const Config& cfg = GetConfig();
     ProfilerSetGameplayReady(false);
+    SetEnginePhase(Phase_PreLoad_SysDyn);
     s_isLoadActive = true;
+    HashProxy_InvalidateNegativeCache();
     s_layerAuditMetrics = {};
     s_pvsPrefetchMetrics = {};
     s_capturePvsPrefetchMetrics = false;
@@ -1303,6 +1361,9 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
 
     ResetDecompTelemetry();
     ResetPropertyCacheTelemetry();
+    ResetShadowCasterOptimizerSession();
+    ResetClassFactoryOptimizerSession();
+    ResetPVSPrefetchOptimizerSession();
 
     ResetVFSCacheTelemetry();
     InterlockedExchange(&s_readCalls, 0);
@@ -1343,7 +1404,9 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
 
     LARGE_INTEGER t1;
     QueryPerformanceCounter(&t1);
+    FrustumOptimizer_EndDeferAndFlush(); // Backstop flush in case Session::Start was bypassed
     s_isLoadActive = false;
+    SetEnginePhase(r ? Phase_Gameplay : Phase_Init);
     ProfilerSetGameplayReady(r);
     if (Real_EnableSectorActivation) {
         Real_EnableSectorActivation(true);
@@ -1489,6 +1552,89 @@ static void* s_targetSectorDoLoadData = nullptr;
 static thread_local LONG64 s_sectorDoLoadDataUs = 0;
 static thread_local LONG s_sectorDoLoadDataCalls = 0;
 
+// Sub-activation probes inside gCSector::OnActivate
+typedef int (__thiscall* ElementActivate_t)(void* pThis);
+static ElementActivate_t Real_ElementActivate = nullptr;
+static void* s_targetElementActivate = nullptr;
+static uintptr_t s_retDynLayerActivate = 0;
+static uintptr_t s_retStaticLayerActivate = 0;
+
+typedef int (__thiscall* GeometryLayerActivate_t)(void* pThis);
+static GeometryLayerActivate_t Real_GeometryLayerActivate = nullptr;
+static void* s_targetGeometryLayerActivate = nullptr;
+
+typedef void (__thiscall* ElementOnActivate_t)(void* pThis);
+static ElementOnActivate_t Real_ElementOnActivate = nullptr;
+static void* s_targetElementOnActivate = nullptr;
+static uintptr_t s_retSectorBaseOnActivate = 0;
+
+struct SectorActivationAudit {
+    uint64_t baseOnActivateTicks = 0;
+    uint32_t baseOnActivateCalls = 0;
+    uint64_t dynLayersTicks = 0;
+    uint32_t dynLayersCalls = 0;
+    uint64_t staticLayersTicks = 0;
+    uint32_t staticLayersCalls = 0;
+};
+static thread_local SectorActivationAudit s_sectorActivationAudit{};
+
+static int __fastcall Hooked_ElementActivate(void* pThis, void* /*edx*/) {
+    if (!s_isLoadActive) return Real_ElementActivate(pThis);
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    if (caller == s_retDynLayerActivate) {
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        int res = Real_ElementActivate(pThis);
+        QueryPerformanceCounter(&t1);
+        s_sectorActivationAudit.dynLayersTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+        s_sectorActivationAudit.dynLayersCalls++;
+        return res;
+    }
+    if (caller == s_retStaticLayerActivate) {
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        int res = Real_ElementActivate(pThis);
+        QueryPerformanceCounter(&t1);
+        s_sectorActivationAudit.staticLayersTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+        s_sectorActivationAudit.staticLayersCalls++;
+        return res;
+    }
+    return Real_ElementActivate(pThis);
+}
+
+static int __fastcall Hooked_GeometryLayerActivate(void* pThis, void* /*edx*/) {
+    if (!s_isLoadActive) return Real_GeometryLayerActivate(pThis);
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    if (caller == s_retStaticLayerActivate) {
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        int res = Real_GeometryLayerActivate(pThis);
+        QueryPerformanceCounter(&t1);
+        s_sectorActivationAudit.staticLayersTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+        s_sectorActivationAudit.staticLayersCalls++;
+        return res;
+    }
+    return Real_GeometryLayerActivate(pThis);
+}
+
+static void __fastcall Hooked_ElementOnActivate(void* pThis, void* /*edx*/) {
+    if (!s_isLoadActive) {
+        Real_ElementOnActivate(pThis);
+        return;
+    }
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    if (caller == s_retSectorBaseOnActivate) {
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        Real_ElementOnActivate(pThis);
+        QueryPerformanceCounter(&t1);
+        s_sectorActivationAudit.baseOnActivateTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+        s_sectorActivationAudit.baseOnActivateCalls++;
+        return;
+    }
+    Real_ElementOnActivate(pThis);
+}
+
 static int __fastcall Hooked_SectorDoLoadData(void* pSector, void* /*edx*/, void* pStream) {
     if (!s_isLoadActive) return Real_SectorDoLoadData(pSector, pStream);
     LARGE_INTEGER t0, t1;
@@ -1523,6 +1669,7 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
 
     s_sectorDoLoadDataUs = 0;
     s_sectorDoLoadDataCalls = 0;
+    s_sectorActivationAudit = {};
     int dynBefore = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
 
     const LayerAuditMetrics metricsBefore = s_layerAuditMetrics;
@@ -1546,15 +1693,24 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     const LONG64 sectorDoLoadDataUs = s_sectorDoLoadDataUs;
     const LONG sectorDoLoadDataCalls = s_sectorDoLoadDataCalls;
     double sectorDoLoadDataMs = (double)sectorDoLoadDataUs / 1000.0;
-    double otherOnActivateMs = totalMs - sectorDoLoadDataMs;
+    double baseMs = LayerMetricMs(s_sectorActivationAudit.baseOnActivateTicks);
+    double dynLayersMs = LayerMetricMs(s_sectorActivationAudit.dynLayersTicks);
+    double staticLayersMs = LayerMetricMs(s_sectorActivationAudit.staticLayersTicks);
+    double otherOnActivateMs = totalMs - baseMs - dynLayersMs - staticLayersMs;
     if (otherOnActivateMs < 0.0) otherOnActivateMs = 0.0;
     int dynAfter = Real_GetDynamicLayerCount ? Real_GetDynamicLayerCount(pSector) : -1;
     const char* secName = SafeGetSectorName(pSector);
     RecordSectorTiming(secName, totalMs);
 
     if (IsTelemetryActive() && totalMs >= 50.0) {
-        Log("G3O", "[SectorAudit] Sector '%s': OnActivate=%.2f ms | Sector::DoLoadData=%.2f ms (%ld calls) | Other OnActivate work=%.2f ms | dynLayers: %d -> %d",
-            secName ? secName : "unknown", totalMs, sectorDoLoadDataMs, sectorDoLoadDataCalls, otherOnActivateMs, dynBefore, dynAfter);
+        Log("G3O", "[SectorAudit] Sector '%s': OnActivate=%.2f ms | Base=%.2f ms (calls=%u, Sector::DoLoadData=%.2f ms) | DynLayers=%.2f ms (calls=%u) | StaticLayers=%.2f ms (calls=%u) | Other=%.2f ms | dynLayers: %d -> %d",
+            secName ? secName : "unknown",
+            totalMs,
+            baseMs, s_sectorActivationAudit.baseOnActivateCalls, sectorDoLoadDataMs,
+            dynLayersMs, s_sectorActivationAudit.dynLayersCalls,
+            staticLayersMs, s_sectorActivationAudit.staticLayersCalls,
+            otherOnActivateMs,
+            dynBefore, dynAfter);
         Log("G3O", "[LayerAudit] Sector '%s': gCLayerBase::CreateData=%llu calls / %.2f ms | gCDynamicLayer::DoLoadData=%llu calls / %.2f ms",
             secName ? secName : "unknown",
             static_cast<unsigned long long>(metricsDelta.createData.calls), LayerMetricMs(metricsDelta.createData.qpcTicks),
@@ -1647,6 +1803,7 @@ typedef bool (__thiscall* LoadGameWorld_t)(void* pThis, const void* pSaveName, b
 static LoadGameWorld_t Real_LoadGameWorld = nullptr;
 
 static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const void* pSaveName, bool isNewGame) {
+    SetEnginePhase(Phase_LoadGameWorld);
     s_inPreLoad = false;
     if (Real_EnableSectorActivation) {
         Real_EnableSectorActivation(true);
@@ -1679,6 +1836,7 @@ static GotoLoadedPosition_t Real_GotoLoadedPosition = nullptr;
 
 static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, void* pEntity, bool a) {
     if (!s_isLoadActive) { Real_GotoLoadedPosition(pThis, pEntity, a); return; }
+    SetEnginePhase(Phase_GotoLoadedPosition);
     LARGE_INTEGER t0, t1;
     LONG pak0 = GetPakDecompCount(); LONG64 pakOut0 = GetPakDecompOutBytes();
     double pakTimeMs0 = GetPakDecompTimeMs();
@@ -1691,7 +1849,13 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
     PakTracer_OnGotoLoadedPositionStart();
     const bool wasCapturingPvsMetrics = s_capturePvsPrefetchMetrics;
     s_capturePvsPrefetchMetrics = true;
+
+    // Batch frustum updates across both GotoLoadedPosition and Session::Start.
+    // Flushed at the end of Session::Start before gameplay begins.
+    FrustumOptimizer_BeginDefer();
+    HashProxy_InvalidateNegativeCache();
     Real_GotoLoadedPosition(pThis, pEntity, a);
+
     s_capturePvsPrefetchMetrics = wasCapturingPvsMetrics;
 
     QueryPerformanceCounter(&t1);
@@ -1746,6 +1910,10 @@ static void __fastcall Hooked_SessionStart(void* pThis, void* /*edx*/, int mode)
 
     s_samplePhase = 3;
     Real_SessionStart(pThis, mode);
+
+    // Finalize and flush all deferred spatial and frustum updates before gameplay starts
+    FrustumOptimizer_EndDeferAndFlush();
+
     ProfilerSetGameplayReady(true);
 
     QueryPerformanceCounter(&t1);
@@ -2057,6 +2225,44 @@ bool InitializeSavegameProfiler() {
 
     if (cfg.enableSavegameAudit) {
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
+    HMODULE hGame = GetModuleHandleA("Game.dll");
+    if (hEngine && hGame) {
+        const uintptr_t gameBase = reinterpret_cast<uintptr_t>(hGame);
+        s_retSectorBaseOnActivate = gameBase + 0x19419B;
+        s_retDynLayerActivate     = gameBase + 0x1941EC;
+        s_retStaticLayerActivate  = gameBase + 0x19425C;
+
+        void* pElemAct = (void*)GetProcAddress(hEngine, "?Activate@eCProcessibleElement@@UAE?AW4eEResult@1@XZ");
+        if (pElemAct) {
+            s_targetElementActivate = pElemAct;
+            MH_CreateHook(pElemAct, (LPVOID)Hooked_ElementActivate, (LPVOID*)&Real_ElementActivate);
+            MH_EnableHook(pElemAct);
+            Log("G3O", "Savegame Profiler: Hooked eCProcessibleElement::Activate (0x%p)", pElemAct);
+        }
+
+        void* pGeomAct = (void*)GetProcAddress(hGame, "?Activate@gCGeometryLayer@@UAE?AW4eEResult@eCProcessibleElement@@XZ");
+        if (!pGeomAct) {
+            pGeomAct = reinterpret_cast<void*>(gameBase + 0x0C7660);
+        }
+        if (pGeomAct) {
+            s_targetGeometryLayerActivate = pGeomAct;
+            MH_STATUS stGeom = MH_CreateHook(pGeomAct, (LPVOID)Hooked_GeometryLayerActivate, (LPVOID*)&Real_GeometryLayerActivate);
+            if (stGeom == MH_OK) {
+                MH_EnableHook(pGeomAct);
+                Log("G3O", "Savegame Profiler: Hooked gCGeometryLayer::Activate (0x%p)", pGeomAct);
+            } else {
+                Log("G3O", "Savegame Profiler: Failed to hook gCGeometryLayer::Activate (0x%p, status=%d)", pGeomAct, stGeom);
+            }
+        }
+
+        void* pElemOnAct = (void*)GetProcAddress(hEngine, "?OnActivate@eCProcessibleElement@@MAEXXZ");
+        if (pElemOnAct) {
+            s_targetElementOnActivate = pElemOnAct;
+            MH_CreateHook(pElemOnAct, (LPVOID)Hooked_ElementOnActivate, (LPVOID*)&Real_ElementOnActivate);
+            MH_EnableHook(pElemOnAct);
+            Log("G3O", "Savegame Profiler: Hooked eCProcessibleElement::OnActivate (0x%p)", pElemOnAct);
+        }
+    }
     if (hEngine) {
         void* pBuild = (void*)GetProcAddress(hEngine, "?BuildStaticHierachy@eCPVSCellItem@@IAEXXZ");
         if (pBuild) {
@@ -2132,6 +2338,13 @@ void ShutdownSavegameProfiler() {
     if (s_targetPvsWaitForEmptyThreadQueue) MH_DisableHook(s_targetPvsWaitForEmptyThreadQueue);
     if (s_targetWorldDoLoadData) MH_DisableHook(s_targetWorldDoLoadData);
     if (s_targetSectorDoLoadData) MH_DisableHook(s_targetSectorDoLoadData);
+    if (s_targetElementActivate) MH_DisableHook(s_targetElementActivate);
+    if (s_targetGeometryLayerActivate) {
+        MH_DisableHook(s_targetGeometryLayerActivate);
+        s_targetGeometryLayerActivate = nullptr;
+    }
+    Real_GeometryLayerActivate = nullptr;
+    if (s_targetElementOnActivate) MH_DisableHook(s_targetElementOnActivate);
 }
 
 } // namespace G3O

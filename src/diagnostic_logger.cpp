@@ -20,6 +20,27 @@ static thread_local bool s_forwardingOriginalDiagOutput = false;
 static volatile LONG s_logPathSequence = 0;
 static bool s_outputDebugStringHookInstalled = false;
 static bool s_diagOutputHookInstalled = false;
+static std::atomic<uint32_t> s_enginePhase{Phase_Init};
+
+void SetEnginePhase(EnginePhase phase) {
+    s_enginePhase.store(static_cast<uint32_t>(phase), std::memory_order_release);
+}
+
+EnginePhase GetEnginePhase() {
+    return static_cast<EnginePhase>(s_enginePhase.load(std::memory_order_relaxed));
+}
+
+const char* GetEnginePhaseName(EnginePhase phase) {
+    switch (phase) {
+        case Phase_Init: return "Init";
+        case Phase_PreLoad_SysDyn: return "PreLoad";
+        case Phase_LoadGameWorld: return "LoadWorld";
+        case Phase_GotoLoadedPosition: return "GotoPos";
+        case Phase_Gameplay: return "Gameplay";
+        case Phase_Saving: return "Saving";
+        default: return "Unknown";
+    }
+}
 
 typedef void (WINAPI* OutputDebugStringA_t)(LPCSTR);
 static OutputDebugStringA_t s_origOutputDebugStringA = nullptr;
@@ -119,9 +140,10 @@ void LogRaw(const char* message) {
 
     SYSTEMTIME st;
     GetLocalTime(&st);
-    char timeBuf[32];
-    snprintf(timeBuf, sizeof(timeBuf), "[%02d:%02d:%02d.%03d] ",
-             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    char timeBuf[64];
+    snprintf(timeBuf, sizeof(timeBuf), "[%02d:%02d:%02d.%03d] [TID:%lu] [%s] ",
+             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+             GetCurrentThreadId(), GetEnginePhaseName(GetEnginePhase()));
 
     std::string fullLine = std::string(timeBuf) + message;
     if (fullLine.back() != '\n') {

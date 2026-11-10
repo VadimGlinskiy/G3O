@@ -1,4 +1,5 @@
 #include "pak_tracer.h"
+#include "blackbox_recorder.h"
 #include "diagnostic_logger.h"
 #include "config_manager.h"
 #include "g3o_output_path.h"
@@ -547,7 +548,7 @@ void PakTracer_OnLoadStart(const char* saveName) {
                     if (outSz >= 50 * 1024 * 1024 && outSz <= 128 * 1024 * 1024) {
                         s_vipCandidateCount++;
                         s_candidates.push_back(cand);
-                    } else if (decomp_us >= 150 && outSz >= 2048 && outSz < 50 * 1024 * 1024) {
+                    } else if (outSz >= 2048 && outSz < 50 * 1024 * 1024) {
                         s_candidates.push_back(cand);
                     }
                 }
@@ -629,9 +630,12 @@ void PakTracer_RecordRead(
     std::string archive = ResolveArchiveName(hFile);
     if (archive.empty()) return;
 
+    const uint64_t fileOffset = ((uint64_t)ov->OffsetHigh << 32) | (uint64_t)ov->Offset;
+    Blackbox_BeginOp(BB_OP_READING_PAK, archive.c_str(), fileOffset, bytesRead);
+
     InFlightRead read;
     read.hFile = hFile;
-    read.offset = ((uint64_t)ov->OffsetHigh << 32) | (uint64_t)ov->Offset;
+    read.offset = fileOffset;
     read.buffer = buffer;
     read.bytesRead = bytesRead;
     read.loadGeneration = s_loadGeneration.load(std::memory_order_relaxed);
@@ -640,6 +644,7 @@ void PakTracer_RecordRead(
     read.valid = true;
 
     tl_history.Push(std::move(read));
+    Blackbox_EndOp();
 
     QueryPerformanceCounter(&t1);
     uint64_t oh = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
@@ -773,6 +778,7 @@ void PakTracer_RecordDecompress(
     InFlightRead* matchedSlot = nullptr;
     if (FindMatchingRead(inBuffer, inSize, read, &matchedSlot)) {
         tl_history.Consume(matchedSlot);
+        Blackbox_BeginOp(BB_OP_DECOMPRESSING_PAK, read.archiveName.c_str(), read.offset, inSize);
         TraceRecord rec;
         rec.seq = s_seqCounter.fetch_add(1, std::memory_order_relaxed) + 1;
         const std::string& archive = read.archiveName;

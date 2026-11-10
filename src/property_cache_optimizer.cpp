@@ -269,6 +269,14 @@ void ShutdownPropertyCacheOptimizer() {
     }
     Real_ResolvePropertyString = nullptr;
     Real_ResolvePropertyID = nullptr;
+    if (s_tlStringCache) {
+        free(s_tlStringCache);
+        s_tlStringCache = nullptr;
+    }
+    if (s_tlIdCache) {
+        free(s_tlIdCache);
+        s_tlIdCache = nullptr;
+    }
     Log("G3O", "Property Cache Optimizer thread-local stats: String hits=%lu, misses=%lu | ID hits=%lu, misses=%lu",
         (unsigned long)s_stringHits, (unsigned long)s_stringMisses,
         (unsigned long)s_idHits, (unsigned long)s_idMisses);

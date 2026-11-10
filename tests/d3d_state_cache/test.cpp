@@ -13,6 +13,16 @@ int main() {
     int calls = 0;
     bool ok = true;
 
+    ok &= Expect(G3O::CanUseSingleThreadedD3D9StateCache(
+                     D3D_OK, D3DCREATE_HARDWARE_VERTEXPROCESSING),
+                 "the cache may run on a verified single-threaded device");
+    ok &= Expect(!G3O::CanUseSingleThreadedD3D9StateCache(
+                     D3D_OK, D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED),
+                 "the cache must fail open for a multithread-safe device");
+    ok &= Expect(!G3O::CanUseSingleThreadedD3D9StateCache(
+                     E_FAIL, D3DCREATE_HARDWARE_VERTEXPROCESSING),
+                 "the cache must fail open when device threading flags cannot be verified");
+
     HRESULT result = G3O::ApplyCachedD3DState(7, cached, valid, [&]() {
         ++calls;
         return E_FAIL;
@@ -46,6 +56,30 @@ int main() {
     });
     ok &= Expect(result == D3D_OK && cached == 8 && calls == 4,
                  "failed state change should be retried until it succeeds");
+
+    const int callsBeforeRecording = calls;
+    result = G3O::ApplyCachedD3DState(8, cached, valid, [&]() {
+        ++calls;
+        return D3D_OK;
+    }, true);
+    ok &= Expect(result == D3D_OK && calls == callsBeforeRecording + 1 && valid == 0,
+                 "recorded state changes must bypass duplicate suppression and leave the cache invalid");
+
+    int stateBlockInvalidations = 0;
+    bool stateBlockApplyInProgress = false;
+    bool stateBlockBypassObserved = false;
+    valid = 1;
+    result = G3O::ApplyD3DStateBlockAndInvalidateCache([&]() {
+        ++calls;
+        stateBlockBypassObserved = stateBlockApplyInProgress && valid == 0;
+        return E_FAIL;
+    }, [&]() {
+        valid = 0;
+        ++stateBlockInvalidations;
+    }, stateBlockApplyInProgress);
+    ok &= Expect(result == E_FAIL && valid == 0 && stateBlockInvalidations == 2 &&
+                 stateBlockBypassObserved && !stateBlockApplyInProgress,
+                 "state-block Apply must bypass setters and invalidate caches before and after, even on failure");
 
     int firstDeviceStorage = 0;
     int secondDeviceStorage = 0;
@@ -85,6 +119,6 @@ int main() {
                  "constructing a new device at a reused address must clear the old cache");
 
     if (!ok) return 1;
-    std::puts("PASS: D3D9 state cache records only successful API calls");
+    std::puts("PASS: D3D9 state cache preserves recording and state-block semantics");
     return 0;
 }

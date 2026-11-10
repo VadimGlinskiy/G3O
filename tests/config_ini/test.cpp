@@ -32,8 +32,11 @@ int main() {
     if (path.empty()) return 2;
     bool ok = true;
     const G3O::Config defaults{};
-    ok &= Expect(!defaults.enablePropertyCache,
-                 "Config defaults should match the INI parser and generated template");
+    ok &= Expect(defaults.enablePropertyCache && defaults.enableInfoManagerBinaryCache &&
+                 defaults.enableVFSCache && defaults.pakCacheBudgetMB == 768 &&
+                 defaults.enableDiagnosticLog && defaults.interceptOutputDebugString &&
+                 defaults.enableProfiler && defaults.enableSavegameAudit && defaults.enableLayerAudit,
+                 "Config defaults should match the active release profile");
     ok &= Expect(G3O::ParseKeyCode("F2junk", VK_F10) == VK_F10,
                  "partial function-key tokens should use the configured default");
     ok &= Expect(G3O::ParseKeyCode("0x79junk", VK_F10) == VK_F10,
@@ -64,8 +67,13 @@ int main() {
     ok &= Expect(invalid.vegetationGridRangeClamp == 7500.0f, "partial float should use default");
     ok &= Expect(invalid.cpuCores == 0 && invalid.cpuThreads == 0, "invalid CPU counts should use defaults");
     ok &= Expect(invalid.cpuAffinityMask == 0, "mask wider than the x86 pointer should use default");
-    ok &= Expect(invalid.pakCacheBudgetMB == 192, "negative cache budget should use default");
+    ok &= Expect(invalid.pakCacheBudgetMB == 768, "negative cache budget should use default");
     ok &= Expect(invalid.pakPrefetchWorkers == 0, "worker count above maximum should use default");
+    ok &= Expect(invalid.enablePropertyCache && invalid.enableInfoManagerBinaryCache && invalid.enableVFSCache,
+                 "missing performance keys should use the active release profile");
+    ok &= Expect(invalid.enableDiagnosticLog && invalid.interceptOutputDebugString && invalid.enableProfiler &&
+                 invalid.enableSavegameAudit && invalid.enableLayerAudit,
+                 "missing logging keys should use the active release profile");
 
     {
         std::ofstream ini(path);
@@ -84,7 +92,10 @@ int main() {
     const char* required[] = {
         "EnableSharedBaseOptimizations=",
         "VegetationGridRangeClamp=", "EnableVFSCache=", "CPUCores=", "CPUThreads=",
-        "CPUAffinityMask=", "PakCacheBudgetMB=", "PakPrefetchWorkers=", "EnableD3D9StateFilter=false"
+        "CPUAffinityMask=", "PakCacheBudgetMB=768", "PakPrefetchWorkers=",
+        "EnablePropertyCache=true", "EnableInfoManagerBinaryCache=true", "EnableVFSCache=true",
+        "EnableD3D9StateFilter=true", "EnableDiagnosticLog=true", "InterceptOutputDebugString=true",
+        "EnableProfiler=true", "EnableSavegameAudit=true", "EnableLayerAudit=true"
     };
     for (const char* item : required) {
         ok &= Expect(text.find(item) != std::string::npos, item);

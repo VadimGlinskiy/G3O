@@ -16,6 +16,18 @@
 #include "vegetation_optimizer.h"
 #include "fast_pak_decompressor.h"
 #include "property_cache_optimizer.h"
+#include "entity_search_optimizer.h"
+#include "frustum_database_optimizer.h"
+#include "hash_proxy_optimizer.h"
+#include "navigation_optimizer.h"
+#include "scene_node_optimizer.h"
+#include "shadow_caster_optimizer.h"
+#include "class_factory_optimizer.h"
+#include "guid_map_optimizer.h"
+#include "pvs_prefetch_optimizer.h"
+#include "quest_load_optimizer.h"
+#include "info_manager_optimizer.h"
+#include "memory_allocator.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
 #include "pak_prefetch.h"
@@ -101,9 +113,67 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializePropertyCacheOptimizer();
     }
 
+    if (cfg.enableMemoryAllocator) {
+        MemoryOptimizer::Initialize();
+    }
+
+    if (cfg.enableEntitySearchOptimizer) {
+        G3O::InitializeEntitySearchOptimizer();
+    }
+
     // VFS Cache Optimizer: O(1) hash cache for virtual file system directory lookups across 395 mod archives
     if (cfg.enableVFSCache) {
         G3O::InitializeVFSCacheOptimizer();
+    }
+
+    // Hash & Proxy Optimizer: Fast djb2 string hashing & template entity proxy resolution (Phase 1)
+    if (cfg.enableHashProxyOptimizer) {
+        G3O::InitializeHashProxyOptimizer();
+    }
+
+    // Frustum Database Optimizer: Deferred spatial tree updates during entity streaming (Phase 3)
+    if (cfg.enableFrustumDatabaseOptimizer) {
+        G3O::InitializeFrustumDatabaseOptimizer();
+    }
+
+    // Navigation Optimizer: Suppress redundant nav-mesh iterations during save loading
+    if (cfg.enableNavigationOptimizer) {
+        G3O::InitializeNavigationOptimizer();
+    }
+
+    // Scene Node Optimizer: Preallocate m_ppChildren in eCNode::AttachChild for massive sectors (SysDyn)
+    if (cfg.enableSceneNodeOptimizer) {
+        G3O::InitializeSceneNodeOptimizer();
+    }
+
+    // Shadow Caster Optimizer: O(1) Swap-and-Pop + Robin Hood Hash Deduplication for directional shadows
+    if (cfg.enableShadowOptimizer) {
+        G3O::InitializeShadowCasterOptimizer();
+    }
+
+    // Class Factory Optimizer: L1-cache and Zero-Alloc string reuse for bCPropertyObjectSingleton::ReadObject
+    if (cfg.enableClassFactoryOptimizer) {
+        G3O::InitializeClassFactoryOptimizer();
+    }
+
+    // Universal GUID Map Optimizer: L1-cache and Inlined 5-DWORD walk for bTValMap<bCPropertyID, void*>::FindNode
+    if (cfg.enableGuidMapOptimizer) {
+        G3O::InitializeGuidMapOptimizer();
+    }
+
+    // PVS Prefetch Optimizer: Adaptive Boot Radius & Deduplication for eCPVSPrefetcher3
+    if (cfg.enablePVSPrefetchOptimizer) {
+        G3O::InitializePVSPrefetchOptimizer();
+    }
+
+    // Quest Load Optimizer: Suppress redundant item/dialog queries during savegame loading
+    if (cfg.enableQuestLoadOptimizer) {
+        G3O::InitializeQuestLoadOptimizer();
+    }
+
+    // Info Manager Optimizer: O(1) Shadow Table for gCInfoManager_PS::GetInfo
+    if (cfg.enableInfoManagerOptimizer) {
+        G3O::InitializeInfoManagerOptimizer();
     }
 
     // Savegame Profiler: High-resolution telemetry for savegame loading phases
@@ -114,8 +184,8 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeSharedBaseOptimizations();
     }
 
-    // Direct3D 9 State Redundancy Filter & Fast Texture Loader
-    if (cfg.enableD3D9StateFilter || cfg.enableFastTextureLoader || cfg.enableProfiler) {
+    // Direct3D 9 State Redundancy Filter, Fast Texture Loader & Texture Crash Investigator
+    if (cfg.enableD3D9StateFilter || cfg.enableFastTextureLoader || cfg.enableProfiler || cfg.enableCrashInvestigator) {
         G3O::InitializeD3D9Optimizer();
     }
 
@@ -174,7 +244,18 @@ static void ShutdownOptima() {
     G3O::ShutdownSharedBaseOptimizations();
     G3O::ShutdownVegetationOptimizer();
     G3O::ShutdownFastPakDecompressor();
+    G3O::ShutdownEntitySearchOptimizer();
+    MemoryOptimizer::Shutdown();
     G3O::ShutdownPropertyCacheOptimizer();
+    G3O::ShutdownFrustumDatabaseOptimizer();
+    G3O::ShutdownHashProxyOptimizer();
+    G3O::ShutdownSceneNodeOptimizer();
+    G3O::ShutdownShadowCasterOptimizer();
+    G3O::ShutdownClassFactoryOptimizer();
+    G3O::ShutdownPVSPrefetchOptimizer();
+    G3O::ShutdownQuestLoadOptimizer();
+    G3O::ShutdownInfoManagerOptimizer();
+    G3O::ShutdownNavigationOptimizer();
     G3O::ShutdownVFSCacheOptimizer();
     G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();

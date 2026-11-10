@@ -25,6 +25,13 @@ set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
 set(LIBDEFLATE_BUILD_GZIP OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/libdeflate)
 
+set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/mimalloc)
+
 # Main dinput8.dll Proxy library
 add_library(dinput8 SHARED
     src/main.cpp
@@ -37,6 +44,10 @@ add_library(dinput8 SHARED
     src/diagnostic_logger.h
     src/recent_event_buffer.h
     src/fixed_text_buffer.h
+    src/blackbox_recorder.cpp
+    src/blackbox_recorder.h
+    src/pak_resolver.cpp
+    src/pak_resolver.h
     src/crash_handler.cpp
     src/crash_handler.h
     src/engine_fatal_report.h
@@ -73,8 +84,40 @@ add_library(dinput8 SHARED
     src/decompressor_avx2.h
     src/fast_pak_decompressor.cpp
     src/fast_pak_decompressor.h
+    src/frustum_database_policy.h
+    src/frustum_database_optimizer.cpp
+    src/frustum_database_optimizer.h
+    src/fast_djb2.h
+    src/template_cache_policy.h
+    src/hash_proxy_optimizer.cpp
+    src/hash_proxy_optimizer.h
+    src/navigation_optimizer.cpp
+    src/navigation_optimizer.h
+    src/scene_node_optimizer.cpp
+    src/scene_node_optimizer.h
+    src/shadow_caster_policy.h
+    src/shadow_caster_optimizer.cpp
+    src/shadow_caster_optimizer.h
+    src/class_factory_policy.h
+    src/class_factory_optimizer.cpp
+    src/class_factory_optimizer.h
+    src/guid_map_policy.h
+    src/guid_map_optimizer.cpp
+    src/guid_map_optimizer.h
+    src/pvs_prefetch_policy.h
+    src/pvs_prefetch_optimizer.cpp
+    src/pvs_prefetch_optimizer.h
+    src/quest_load_optimizer.cpp
+    src/quest_load_optimizer.h
+    src/info_manager_optimizer.cpp
+    src/info_manager_optimizer.h
     src/property_cache_optimizer.cpp
     src/property_cache_optimizer.h
+    src/entity_search_optimizer.cpp
+    src/entity_search_optimizer.h
+    src/entity_search_policy.h
+    src/memory_allocator.cpp
+    src/memory_allocator.h
     src/savegame_profiler.cpp
     src/savegame_profiler.h
     src/pak_prefetch.cpp
@@ -100,6 +143,7 @@ target_include_directories(dinput8 PRIVATE
     third_party/minhook/include
     third_party/libdeflate
     third_party/libdeflate/lib
+    third_party/mimalloc/include
 )
 
 target_compile_definitions(dinput8 PRIVATE G3O_BUILD_CONFIGURATION=\"$<CONFIG>\")
@@ -107,6 +151,7 @@ target_compile_definitions(dinput8 PRIVATE G3O_BUILD_CONFIGURATION=\"$<CONFIG>\"
 target_link_libraries(dinput8 PRIVATE
     minhook
     libdeflate_static
+    mimalloc-static
     dbghelp
     psapi
     version

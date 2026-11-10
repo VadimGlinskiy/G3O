@@ -34,11 +34,28 @@ struct Config {
 
     // [Performance]
     bool enableSharedBaseOptimizations = true;
+    bool enableMemoryAllocator = false;
+    bool enableEntitySearchOptimizer = true;
     bool enableFastPakDecompressor = true;
-    bool enablePropertyCache = false;
+    bool enablePropertyCache = true;
     bool enablePakPrefetch = true;
+    bool enableFrustumDatabaseOptimizer = true;
+    bool enableHashProxyOptimizer = true;
+    bool enableNavigationOptimizer = true;
+    bool enableSceneNodeOptimizer = true;
+    bool enableShadowOptimizer = true;
+    bool enableClassFactoryOptimizer = true;
+    bool enableGuidMapOptimizer = false;
+    bool enablePVSPrefetchOptimizer = true;
+    float pvsBootRadius = 3800.0f;
+    float pvsRedundantDistance = 200.0f;
+    uint32_t pvsRampUpCalls = 24;
+    bool enableQuestLoadOptimizer = true;
+    bool enableInfoManagerOptimizer = true;
+    bool enableInfoManagerBinaryCache = true;
 
-    bool enableD3D9StateFilter = false;
+    // Fail-open if device threading or state-block hooks cannot be verified.
+    bool enableD3D9StateFilter = true;
     bool enableFastTextureLoader = true;
     bool enableVegetationOptimizer = true;
     float treeShadowDistance = 6500.0f;
@@ -46,19 +63,19 @@ struct Config {
     bool enableHighPrecisionTimer = true;
     bool enableHighProcessPriority = true;
     bool enableCPUTopologyAffinity = true;
-    bool enableVFSCache = false;
+    bool enableVFSCache = true;
     int cpuCores = 0;                  // 0 = Auto-detect
     int cpuThreads = 0;                // 0 = Auto-detect
     DWORD_PTR cpuAffinityMask = 0;     // 0 = Auto-detect
-    int pakCacheBudgetMB = 192;        // Rolling pre-decompression memory budget (MB)
+    int pakCacheBudgetMB = 768;        // Rolling pre-decompression memory budget (MB)
     int pakPrefetchWorkers = 0;        // 0 = Auto-detect based on CPU cores (up to 6)
 
     // [Logging]
-    bool enableDiagnosticLog = false;
-    bool interceptOutputDebugString = false;
-    bool enableProfiler = false;
-    bool enableSavegameAudit = false;
-    bool enableLayerAudit = false;     // Deep per-entity/property QPC hooks (19 hooks, ~0.2-0.3s overhead)
+    bool enableDiagnosticLog = true;
+    bool interceptOutputDebugString = true;
+    bool enableProfiler = true;
+    bool enableSavegameAudit = true;
+    bool enableLayerAudit = true;      // Deep per-entity/property QPC hooks (19 hooks, ~0.2-0.3s overhead)
 
     std::string iniFilePath;
 };

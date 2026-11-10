@@ -3,6 +3,7 @@
 #include "config_manager.h"
 #include "diagnostic_logger.h"
 #include "pak_tracer.h"
+#include "blackbox_recorder.h"
 #include <minhook.h>
 #include <windows.h>
 #include <libdeflate.h>
@@ -95,6 +96,7 @@ static int __stdcall Hooked_ZlibDecompress(
     DWORD outCapacity,
     DWORD* pOutWritten
 ) {
+    BlackboxScope bbScope(BB_OP_DECOMPRESSING_PAK, "PAK_Stream", (uint64_t)(uintptr_t)inBuffer, inSize);
     if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0) {
         // Step 2.3: Fast speculative pre-decompression cache lookup
         if (PakTracer_CanTryGetPredecompressed()) {
@@ -174,6 +176,7 @@ static int __stdcall SavegameDecompressImpl(
     void* outBuffer,
     DWORD* pDestLen
 ) {
+    BlackboxScope bbScope(BB_OP_DECOMPRESSING_SAVE, "SavegameCPX", (uint64_t)(uintptr_t)inBuffer, inSize);
     if (inBuffer && inSize >= 6 && outBuffer && pDestLen && *pDestLen > 0 && s_fnZlib) {
         void* dec = GetThreadDecompressor();
         if (dec) {

@@ -4,7 +4,7 @@ param(
 
 # ==============================================================================
 # Gothic 3 Optima - Release Packaging Script
-# Generates 1 Core Package + 5 Modular DXVK Variant Archives for GitHub Releases
+# Generates the core package and modular DXVK/ReShade archives for GitHub Releases
 # ==============================================================================
 $ErrorActionPreference = "Stop"
 
@@ -22,6 +22,9 @@ if (-not (Test-Path $bin)) {
 if (-not (Test-Path $packagesDir)) {
     New-Item -ItemType Directory -Path $packagesDir -Force | Out-Null
 }
+$oldPackages = Get-ChildItem -Path $packagesDir -File |
+    Where-Object { $_.Name -match '^(Gothic3Optima-.*-Core|DXVK-.*|ReShade-RTGI-Gothic3)\.zip$' }
+if ($oldPackages) { Remove-Item -LiteralPath $oldPackages.FullName -Force }
 
 # ------------------------------------------------------------------------------
 # 1. Package Gothic3Optima-Core.zip
@@ -32,10 +35,11 @@ if (Test-Path $stageCore) { Remove-Item $stageCore -Recurse -Force }
 New-Item -ItemType Directory -Path $stageCore -Force | Out-Null
 
 Copy-Item $bin (Join-Path $stageCore "dinput8.dll") -Force
+Copy-Item (Join-Path $root "G3O.ini") (Join-Path $stageCore "G3O.ini") -Force
 
 $readmeCore = @"
 ================================================================================
-GOTHIC 3 OPTIMA - DEVELOPMENT CORE ($Version)
+GOTHIC 3 OPTIMA - CORE ($Version)
 ================================================================================
 
 FEATURES INCLUDED:
@@ -47,8 +51,8 @@ FEATURES INCLUDED:
 Back up an existing game-folder dinput8.dll before installing this build.
 
 INSTALLATION:
-1. Extract 'dinput8.dll' from this archive directly into your Gothic 3 game folder
-   (where 'Gothic3.exe' is located).
+1. Extract 'dinput8.dll' and 'G3O.ini' from this archive into your Gothic 3 game folder
+   (where 'Gothic3.exe' is located). Back up any existing 'G3O.ini' first.
 2. [OPTIONAL]: DXVK is an independent graphics component, not part of G3O.
 
 CONFIGURATION AND DIAGNOSTICS:
