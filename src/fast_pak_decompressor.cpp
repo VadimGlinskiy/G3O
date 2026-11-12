@@ -1,10 +1,11 @@
 #include "fast_pak_decompressor.h"
-#include "layer_ring_arena.h"
 #include "decompressor_avx2.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
 #include "pak_tracer.h"
 #include "blackbox_recorder.h"
+#include "hook_install_policy.h"
+#include "layer_ring_arena.h"
 #include <minhook.h>
 #include <windows.h>
 #include <libdeflate.h>
@@ -99,15 +100,23 @@ static int __stdcall Hooked_ZlibDecompress(
 ) {
     BlackboxScope bbScope(BB_OP_DECOMPRESSING_PAK, "PAK_Stream", (uint64_t)(uintptr_t)inBuffer, inSize);
     if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0) {
-        // Fast path: Sliding-Window Ring Arena for heavy static layers (RB_Mod)
-        if (LayerRingArena_IsActive()) {
+        // Serve an exact RB_Mod .node block prepared by LayerRingArena when its slot is ready.
+        if (GetConfig().enableLayerRingArena && LayerRingArena_IsActive()) {
             DWORD arenaOut = 0;
+            LARGE_INTEGER t0_arena, t1_arena;
+            QueryPerformanceCounter(&t0_arena);
             if (LayerRingArena_TryGet(inBuffer, inSize, outBuffer, outCapacity, &arenaOut)) {
+                QueryPerformanceCounter(&t1_arena);
+                const LONG64 us = (s_timerFreq.QuadPart > 0)
+                    ? ((t1_arena.QuadPart - t0_arena.QuadPart) * 1000000LL / s_timerFreq.QuadPart)
+                    : 0;
                 if (pOutWritten) *pOutWritten = arenaOut;
+                InterlockedExchangeAdd64(&s_decompTimeUs, us);
                 InterlockedIncrement(&s_decompCount);
-                InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
-                InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)arenaOut);
-                return 0; // Served with zero decompression overhead from Ring Arena
+                InterlockedExchangeAdd64(&s_decompInBytes, static_cast<LONG64>(inSize));
+                InterlockedExchangeAdd64(&s_decompOutBytes, static_cast<LONG64>(arenaOut));
+                PakTracer_RecordDecompress(inBuffer, inSize, outCapacity, arenaOut, static_cast<uint64_t>(us), outBuffer);
+                return 0;
             }
         }
 
@@ -350,7 +359,11 @@ static void* FindSavegameDecompressorTarget(HMODULE hGame) {
 }
 
 bool InitializeFastPakDecompressor() {
-    if (!GetConfig().enableFastPakDecompressor) {
+    const Config& config = GetConfig();
+    if (!config.enableFastPakDecompressor) {
+        if (config.enableLayerRingArena) {
+            Log("G3O", "[LayerRingArena] Not initialized: EnableFastPakDecompressor is disabled.");
+        }
         return false;
     }
 
@@ -377,13 +390,28 @@ bool InitializeFastPakDecompressor() {
     if (hFs) {
         void* targetFs = FindDecompressorTarget(hFs);
         if (targetFs) {
-            s_targetPakDecompressor = targetFs;
-            MH_STATUS st = MH_CreateHook(targetFs, (LPVOID)Hooked_ZlibDecompress, (LPVOID*)&Real_ZlibDecompress);
-            if (st == MH_OK) {
-                MH_EnableHook(targetFs);
+            MH_STATUS createStatus = MH_OK;
+            MH_STATUS enableStatus = MH_OK;
+            MH_STATUS removeStatus = MH_OK;
+            const HookInstallResult result = InstallHookSafely(
+                [&] {
+                    createStatus = MH_CreateHook(targetFs, (LPVOID)Hooked_ZlibDecompress, (LPVOID*)&Real_ZlibDecompress);
+                    return createStatus == MH_OK;
+                },
+                [&] {
+                    enableStatus = MH_EnableHook(targetFs);
+                    return enableStatus == MH_OK;
+                },
+                [&] { removeStatus = MH_RemoveHook(targetFs); },
+                [&] { Real_ZlibDecompress = nullptr; });
+            if (result == HookInstallResult::Installed) {
+                s_targetPakDecompressor = targetFs;
                 Log("G3O", "Fast Pak Decompressor hooked successfully (FileSystem.dll!0x%p). SIMD zlib decompression active.", targetFs);
+            } else if (result == HookInstallResult::CreateFailed) {
+                Log("G3O", "Fast Pak Decompressor: Failed to create FileSystem.dll hook (code %d).", (int)createStatus);
             } else {
-                Log("G3O", "Fast Pak Decompressor: Failed to hook FileSystem.dll (code %d).", (int)st);
+                Log("G3O", "Fast Pak Decompressor: Failed to enable FileSystem.dll hook (code %d; remove code %d).",
+                    (int)enableStatus, (int)removeStatus);
             }
         } else {
             Log("G3O", "Fast Pak Decompressor: Signature not found in FileSystem.dll.");
@@ -392,18 +420,41 @@ bool InitializeFastPakDecompressor() {
         Log("G3O", "Fast Pak Decompressor: FileSystem.dll not loaded.");
     }
 
+    if (config.enableLayerRingArena) {
+        if (s_targetPakDecompressor) {
+            InitializeLayerRingArena();
+        } else {
+            Log("G3O", "[LayerRingArena] Not initialized: the FileSystem.dll PAK decompressor hook is unavailable.");
+        }
+    }
+
     // 2. Game.dll savegame decompressor hook
     HMODULE hGame = GetModuleHandleA("Game.dll");
     if (hGame) {
         void* targetGame = FindSavegameDecompressorTarget(hGame);
         if (targetGame) {
-            s_targetGameDecompressor = targetGame;
-            MH_STATUS st = MH_CreateHook(targetGame, (LPVOID)Hooked_GameUncompressThunk, (LPVOID*)&Real_GameUncompressTrampoline);
-            if (st == MH_OK) {
-                MH_EnableHook(targetGame);
+            MH_STATUS createStatus = MH_OK;
+            MH_STATUS enableStatus = MH_OK;
+            MH_STATUS removeStatus = MH_OK;
+            const HookInstallResult result = InstallHookSafely(
+                [&] {
+                    createStatus = MH_CreateHook(targetGame, (LPVOID)Hooked_GameUncompressThunk, (LPVOID*)&Real_GameUncompressTrampoline);
+                    return createStatus == MH_OK;
+                },
+                [&] {
+                    enableStatus = MH_EnableHook(targetGame);
+                    return enableStatus == MH_OK;
+                },
+                [&] { removeStatus = MH_RemoveHook(targetGame); },
+                [&] { Real_GameUncompressTrampoline = nullptr; });
+            if (result == HookInstallResult::Installed) {
+                s_targetGameDecompressor = targetGame;
                 Log("G3O", "Savegame Fast Decompressor hooked successfully (Game.dll!0x%p). SIMD savegame decompression active.", targetGame);
+            } else if (result == HookInstallResult::CreateFailed) {
+                Log("G3O", "Savegame Fast Decompressor: Failed to create Game.dll hook (code %d).", (int)createStatus);
             } else {
-                Log("G3O", "Savegame Fast Decompressor: Failed to hook Game.dll (code %d).", (int)st);
+                Log("G3O", "Savegame Fast Decompressor: Failed to enable Game.dll hook (code %d; remove code %d).",
+                    (int)enableStatus, (int)removeStatus);
             }
         } else {
             Log("G3O", "Savegame Fast Decompressor: Signature not found in Game.dll.");
@@ -416,14 +467,19 @@ bool InitializeFastPakDecompressor() {
 }
 
 void ShutdownFastPakDecompressor() {
+    ShutdownLayerRingArena();
     if (s_targetPakDecompressor) {
         MH_DisableHook(s_targetPakDecompressor);
+        MH_RemoveHook(s_targetPakDecompressor);
         s_targetPakDecompressor = nullptr;
     }
     if (s_targetGameDecompressor) {
         MH_DisableHook(s_targetGameDecompressor);
+        MH_RemoveHook(s_targetGameDecompressor);
         s_targetGameDecompressor = nullptr;
     }
+    Real_ZlibDecompress = nullptr;
+    Real_GameUncompressTrampoline = nullptr;
     if (s_tlDecompressor && s_fnFree) {
         s_fnFree(s_tlDecompressor);
         s_tlDecompressor = nullptr;

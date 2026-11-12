@@ -4,6 +4,7 @@
 #include "profiler.h"
 #include "d3d_state_cache.h"
 #include "blackbox_recorder.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <d3d9.h>
 #include <stdio.h>
@@ -250,7 +251,14 @@ static HRESULT WINAPI Hooked_D3DXCreateTextureFromFileExA(
 }
 
 static bool CreateEnableDeviceHook(void* target, LPVOID detour, LPVOID* original, void** installedTarget) {
-    if (!target || MH_CreateHook(target, detour, original) != MH_OK) return false;
+    if (!original || !installedTarget) return false;
+    *original = nullptr;
+    *installedTarget = nullptr;
+    if (!target) return false;
+    if (MH_CreateHook(target, detour, original) != MH_OK) {
+        *original = nullptr;
+        return false;
+    }
     if (MH_EnableHook(target) != MH_OK) {
         MH_RemoveHook(target);
         *original = nullptr;
@@ -469,6 +477,9 @@ void AttachD3D9DeviceIfReady(void* rawDevice) {
 
 typedef void* (__thiscall* eCDX9Device_ctor_t)(void* pThis, IDirect3DDevice9* pDevice);
 static eCDX9Device_ctor_t Real_eCDX9Device_ctor = NULL;
+static void* s_targetD3D9DeviceCtor = nullptr;
+static void* s_targetTextureFromMemory = nullptr;
+static void* s_targetTextureFromFile = nullptr;
 
 static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDirect3DDevice9* pDevice) {
     void* result = Real_eCDX9Device_ctor(pThis, pDevice);
@@ -487,21 +498,19 @@ void InitializeD3D9Optimizer() {
             if (!pCtor) {
                 Log("G3O", "D3D9 device attachment hook not installed: eCDX9Device constructor export was not found.");
             } else {
-                const MH_STATUS createStatus = MH_CreateHook(
-                    pCtor, (LPVOID)Hooked_eCDX9Device_ctor, (LPVOID*)&Real_eCDX9Device_ctor);
-                if (createStatus != MH_OK) {
-                    Log("G3O", "D3D9 device attachment hook creation failed (MinHook code %d).",
-                        (int)createStatus);
+                MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+                const HookInstallResult result = InstallHookSafely(
+                    [&] { createStatus = MH_CreateHook(pCtor, (LPVOID)Hooked_eCDX9Device_ctor,
+                                                       (LPVOID*)&Real_eCDX9Device_ctor); return createStatus == MH_OK; },
+                    [&] { enableStatus = MH_EnableHook(pCtor); return enableStatus == MH_OK; },
+                    [&] { removeStatus = MH_RemoveHook(pCtor); },
+                    [&] { Real_eCDX9Device_ctor = nullptr; });
+                if (result == HookInstallResult::Installed) {
+                    s_targetD3D9DeviceCtor = pCtor;
+                    Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
                 } else {
-                    const MH_STATUS enableStatus = MH_EnableHook(pCtor);
-                    if (enableStatus != MH_OK) {
-                        MH_RemoveHook(pCtor);
-                        Real_eCDX9Device_ctor = nullptr;
-                        Log("G3O", "D3D9 device attachment hook activation failed (MinHook code %d).",
-                            (int)enableStatus);
-                    } else {
-                        Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
-                    }
+                    Log("G3O", "D3D9 device attachment hook failed (create=%d, enable=%d, remove=%d).",
+                        (int)createStatus, (int)enableStatus, (int)removeStatus);
                 }
             }
         }
@@ -514,17 +523,57 @@ void InitializeD3D9Optimizer() {
         if (hD3DX) {
             void* pMemEx = (void*)GetProcAddress(hD3DX, "D3DXCreateTextureFromFileInMemoryEx");
             if (pMemEx) {
-                if (MH_CreateHook(pMemEx, (LPVOID)Hooked_D3DXCreateTextureFromFileInMemoryEx, (LPVOID*)&Real_D3DXCreateTextureFromFileInMemoryEx) == MH_OK) {
-                    MH_EnableHook(pMemEx);
+                MH_STATUS createStatus = MH_OK;
+                MH_STATUS enableStatus = MH_OK;
+                MH_STATUS removeStatus = MH_OK;
+                const HookInstallResult result = InstallHookSafely(
+                    [&] {
+                        createStatus = MH_CreateHook(pMemEx, (LPVOID)Hooked_D3DXCreateTextureFromFileInMemoryEx,
+                                                     (LPVOID*)&Real_D3DXCreateTextureFromFileInMemoryEx);
+                        return createStatus == MH_OK;
+                    },
+                    [&] {
+                        enableStatus = MH_EnableHook(pMemEx);
+                        return enableStatus == MH_OK;
+                    },
+                    [&] { removeStatus = MH_RemoveHook(pMemEx); },
+                    [&] { Real_D3DXCreateTextureFromFileInMemoryEx = nullptr; });
+                if (result == HookInstallResult::Installed) {
+                    s_targetTextureFromMemory = pMemEx;
                     Log("G3O", "Fast Texture Loader hooked (d3dx9_40.dll!D3DXCreateTextureFromFileInMemoryEx).");
+                } else if (result == HookInstallResult::CreateFailed) {
+                    Log("G3O", "Fast Texture Loader: failed to create memory-texture hook (MinHook code %d).", (int)createStatus);
+                } else {
+                    Log("G3O", "Fast Texture Loader: failed to enable memory-texture hook (MinHook code %d; remove code %d).",
+                        (int)enableStatus, (int)removeStatus);
                 }
             }
 
             void* pFileEx = (void*)GetProcAddress(hD3DX, "D3DXCreateTextureFromFileExA");
             if (pFileEx) {
-                if (MH_CreateHook(pFileEx, (LPVOID)Hooked_D3DXCreateTextureFromFileExA, (LPVOID*)&Real_D3DXCreateTextureFromFileExA) == MH_OK) {
-                    MH_EnableHook(pFileEx);
+                MH_STATUS createStatus = MH_OK;
+                MH_STATUS enableStatus = MH_OK;
+                MH_STATUS removeStatus = MH_OK;
+                const HookInstallResult result = InstallHookSafely(
+                    [&] {
+                        createStatus = MH_CreateHook(pFileEx, (LPVOID)Hooked_D3DXCreateTextureFromFileExA,
+                                                     (LPVOID*)&Real_D3DXCreateTextureFromFileExA);
+                        return createStatus == MH_OK;
+                    },
+                    [&] {
+                        enableStatus = MH_EnableHook(pFileEx);
+                        return enableStatus == MH_OK;
+                    },
+                    [&] { removeStatus = MH_RemoveHook(pFileEx); },
+                    [&] { Real_D3DXCreateTextureFromFileExA = nullptr; });
+                if (result == HookInstallResult::Installed) {
+                    s_targetTextureFromFile = pFileEx;
                     Log("G3O", "Fast Texture Loader hooked (d3dx9_40.dll!D3DXCreateTextureFromFileExA).");
+                } else if (result == HookInstallResult::CreateFailed) {
+                    Log("G3O", "Fast Texture Loader: failed to create file-texture hook (MinHook code %d).", (int)createStatus);
+                } else {
+                    Log("G3O", "Fast Texture Loader: failed to enable file-texture hook (MinHook code %d; remove code %d).",
+                        (int)enableStatus, (int)removeStatus);
                 }
             }
         }
@@ -533,17 +582,23 @@ void InitializeD3D9Optimizer() {
 
 void ShutdownD3D9Optimizer() {
     RemoveDeviceStateFilterHooks();
-    HMODULE hEngine = GetModuleHandleA("Engine.dll");
-    if (hEngine) {
-        void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");
-        if (pCtor) MH_DisableHook(pCtor);
+    if (s_targetD3D9DeviceCtor) {
+        MH_DisableHook(s_targetD3D9DeviceCtor);
+        MH_RemoveHook(s_targetD3D9DeviceCtor);
+        s_targetD3D9DeviceCtor = nullptr;
+        Real_eCDX9Device_ctor = nullptr;
     }
-    HMODULE hD3DX = GetModuleHandleA("d3dx9_40.dll");
-    if (hD3DX) {
-        void* pMemEx = (void*)GetProcAddress(hD3DX, "D3DXCreateTextureFromFileInMemoryEx");
-        if (pMemEx) MH_DisableHook(pMemEx);
-        void* pFileEx = (void*)GetProcAddress(hD3DX, "D3DXCreateTextureFromFileExA");
-        if (pFileEx) MH_DisableHook(pFileEx);
+    if (s_targetTextureFromMemory) {
+        MH_DisableHook(s_targetTextureFromMemory);
+        MH_RemoveHook(s_targetTextureFromMemory);
+        s_targetTextureFromMemory = nullptr;
+        Real_D3DXCreateTextureFromFileInMemoryEx = nullptr;
+    }
+    if (s_targetTextureFromFile) {
+        MH_DisableHook(s_targetTextureFromFile);
+        MH_RemoveHook(s_targetTextureFromFile);
+        s_targetTextureFromFile = nullptr;
+        Real_D3DXCreateTextureFromFileExA = nullptr;
     }
 }
 

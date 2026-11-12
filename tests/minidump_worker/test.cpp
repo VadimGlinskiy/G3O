@@ -34,6 +34,10 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID) {
     return MH_OK;
 }
 
+extern "C" MH_STATUS WINAPI MH_RemoveHook(LPVOID) {
+    return MH_OK;
+}
+
 static bool ReadDumpAt(HANDLE file, DWORD offset, void* buffer, DWORD size) {
     LARGE_INTEGER position = {};
     position.QuadPart = offset;
@@ -51,7 +55,7 @@ int main() {
     G3O::BuildRuntimeContext(runtimeContext, reportFiles, true,
                              "test dump was written", "E:\\Gothic3\\G3O\\G3O_Crash_test.dmp", 17, 23);
     if (runtimeContext.IsTruncated() ||
-        std::strstr(runtimeContext.CStr(), "[Версия G3O] 1.6.1") == nullptr ||
+        std::strstr(runtimeContext.CStr(), "[Версия G3O] 1.7.0") == nullptr ||
         std::strstr(runtimeContext.CStr(), "[Сборка G3O] ") == nullptr ||
         std::strstr(runtimeContext.CStr(), G3O_BUILD_TIMESTAMP) == nullptr ||
         std::strstr(runtimeContext.CStr(), "PID: 17") == nullptr ||

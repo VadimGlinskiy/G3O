@@ -1,6 +1,7 @@
 #include "info_manager_optimizer.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <windows.h>
 #include <atomic>
@@ -557,6 +558,27 @@ void InfoManagerOptimizer_LogStats() noexcept {
     LogOneMapResizeStats("InitHashTable", s_initStats);
 }
 
+static HookInstallResult InstallInfoManagerHook(
+    void* target,
+    LPVOID detour,
+    LPVOID* original,
+    MH_STATUS& createStatus,
+    MH_STATUS& enableStatus,
+    MH_STATUS& removeStatus)
+{
+    return InstallHookSafely(
+        [&] {
+            createStatus = MH_CreateHook(target, detour, original);
+            return createStatus == MH_OK;
+        },
+        [&] {
+            enableStatus = MH_EnableHook(target);
+            return enableStatus == MH_OK;
+        },
+        [&] { removeStatus = MH_RemoveHook(target); },
+        [&] { if (original) *original = nullptr; });
+}
+
 void InitializeInfoManagerOptimizer() {
     if (s_bInitialized) return;
 
@@ -587,74 +609,73 @@ void InitializeInfoManagerOptimizer() {
     s_expectedInitReturn  = baseAddr + 0x1CF26A;
 
     // 1. Hook gCInfoManager_PS::GetInfo (Game.dll+0x1CE270)
-    s_targetGetInfo = reinterpret_cast<void*>(baseAddr + 0x1CE270);
-    const MH_STATUS getInfoStatus = MH_CreateHook(
-        s_targetGetInfo,
-        reinterpret_cast<void*>(&Hooked_GetInfo),
-        reinterpret_cast<void**>(&Real_GetInfo));
-
-    if (getInfoStatus == MH_OK) {
-        MH_EnableHook(s_targetGetInfo);
+    void* pGetInfo = reinterpret_cast<void*>(baseAddr + 0x1CE270);
+    MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+    HookInstallResult result = InstallInfoManagerHook(
+        pGetInfo, reinterpret_cast<LPVOID>(&Hooked_GetInfo),
+        reinterpret_cast<LPVOID*>(&Real_GetInfo), createStatus, enableStatus, removeStatus);
+    if (result == HookInstallResult::Installed) {
+        s_targetGetInfo = pGetInfo;
         Log("G3O", "[InfoManager] Successfully hooked gCInfoManager_PS::GetInfo at Game.dll+0x1CE270 (O(1) Shadow Table active).");
     } else {
-        Log("G3O", "[InfoManager] Failed to create hook on Game.dll+0x1CE270 (MH_STATUS=%d).", getInfoStatus);
+        Log("G3O", "[InfoManager] GetInfo hook failed (create=%d, enable=%d, remove=%d).",
+            createStatus, enableStatus, removeStatus);
     }
 
     // 2. Hook bTValMap::InitHashTable (Game.dll+0x005E270) - Primary path for LoadInfosFromInis (return: 0x1CF26A)
-    s_targetInitHashTable = reinterpret_cast<void*>(baseAddr + 0x005E270);
-    const MH_STATUS initHookStatus = MH_CreateHook(
-        s_targetInitHashTable,
-        reinterpret_cast<void*>(&HookInitHashTableThunk),
-        &s_realInitHashTable);
-
-    if (initHookStatus == MH_OK) {
-        MH_EnableHook(s_targetInitHashTable);
+    void* pInitHashTable = reinterpret_cast<void*>(baseAddr + 0x005E270);
+    result = InstallInfoManagerHook(
+        pInitHashTable, reinterpret_cast<LPVOID>(&HookInitHashTableThunk),
+        &s_realInitHashTable, createStatus, enableStatus, removeStatus);
+    if (result == HookInstallResult::Installed) {
+        s_targetInitHashTable = pInitHashTable;
         Log("G3O", "[InfoManager] Successfully hooked bTValMap::InitHashTable at Game.dll+0x005E270 (Primary path active).");
     } else {
-        Log("G3O", "[InfoManager] Warning: Failed to hook InitHashTable at Game.dll+0x005E270 (MH_STATUS=%d).", initHookStatus);
+        Log("G3O", "[InfoManager] InitHashTable hook failed (create=%d, enable=%d, remove=%d).",
+            createStatus, enableStatus, removeStatus);
     }
 
     // 3. Micro-timing probes for bTPropertyObject<gCInfoManager_PS>::Read (0x1D0240)
     s_expectedPhaseBReturn = baseAddr + 0x1D0482;
     s_expectedPhaseCReturn = baseAddr + 0x1D048D;
 
-    s_targetPropertyObjectRead = reinterpret_cast<void*>(baseAddr + 0x1D0240);
-    const MH_STATUS propReadStatus = MH_CreateHook(
-        s_targetPropertyObjectRead,
-        reinterpret_cast<void*>(&Hooked_InfoManagerPropertyObjectRead),
-        reinterpret_cast<void**>(&Real_PropertyObjectRead));
-    if (propReadStatus == MH_OK) {
-        MH_EnableHook(s_targetPropertyObjectRead);
+    void* pPropertyObjectRead = reinterpret_cast<void*>(baseAddr + 0x1D0240);
+    result = InstallInfoManagerHook(
+        pPropertyObjectRead, reinterpret_cast<LPVOID>(&Hooked_InfoManagerPropertyObjectRead),
+        reinterpret_cast<LPVOID*>(&Real_PropertyObjectRead), createStatus, enableStatus, removeStatus);
+    if (result == HookInstallResult::Installed) {
+        s_targetPropertyObjectRead = pPropertyObjectRead;
         Log("G3O", "[InfoManager] Successfully hooked 0x1D0240 (bTPropertyObject<gCInfoManager_PS>::Read probe active).");
     } else {
-        Log("G3O", "[InfoManager] Warning: Failed to hook 0x1D0240 (MH_STATUS=%d).", propReadStatus);
+        Log("G3O", "[InfoManager] PropertyObject::Read hook failed (create=%d, enable=%d, remove=%d).",
+            createStatus, enableStatus, removeStatus);
     }
 
-    s_targetInfoManagerCreate = reinterpret_cast<void*>(baseAddr + 0x1D0090);
-    const MH_STATUS createStatus = MH_CreateHook(
-        s_targetInfoManagerCreate,
-        reinterpret_cast<void*>(&Hooked_InfoManagerCreate),
-        reinterpret_cast<void**>(&Real_InfoManagerCreate));
-    if (createStatus == MH_OK) {
-        MH_EnableHook(s_targetInfoManagerCreate);
+    void* pInfoManagerCreate = reinterpret_cast<void*>(baseAddr + 0x1D0090);
+    result = InstallInfoManagerHook(
+        pInfoManagerCreate, reinterpret_cast<LPVOID>(&Hooked_InfoManagerCreate),
+        reinterpret_cast<LPVOID*>(&Real_InfoManagerCreate), createStatus, enableStatus, removeStatus);
+    if (result == HookInstallResult::Installed) {
+        s_targetInfoManagerCreate = pInfoManagerCreate;
         Log("G3O", "[InfoManager] Successfully hooked 0x1D0090 (Phase B probe active).");
     } else {
-        Log("G3O", "[InfoManager] Warning: Failed to hook 0x1D0090 (MH_STATUS=%d).", createStatus);
+        Log("G3O", "[InfoManager] InfoManagerCreate hook failed (create=%d, enable=%d, remove=%d).",
+            createStatus, enableStatus, removeStatus);
     }
 
     if (hSharedBase) {
-        s_targetStreamReadObjectBase = reinterpret_cast<void*>(
+        void* pStreamReadObjectBase = reinterpret_cast<void*>(
             GetProcAddress(hSharedBase, "??5@YGAAVbCIStream@@AAV0@AAVbCObjectBase@@@Z"));
-        if (s_targetStreamReadObjectBase) {
-            const MH_STATUS opStatus = MH_CreateHook(
-                s_targetStreamReadObjectBase,
-                reinterpret_cast<void*>(&Hooked_StreamReadObjectBase),
-                reinterpret_cast<void**>(&Real_StreamReadObjectBase));
-            if (opStatus == MH_OK) {
-                MH_EnableHook(s_targetStreamReadObjectBase);
+        if (pStreamReadObjectBase) {
+            result = InstallInfoManagerHook(
+                pStreamReadObjectBase, reinterpret_cast<LPVOID>(&Hooked_StreamReadObjectBase),
+                reinterpret_cast<LPVOID*>(&Real_StreamReadObjectBase), createStatus, enableStatus, removeStatus);
+            if (result == HookInstallResult::Installed) {
+                s_targetStreamReadObjectBase = pStreamReadObjectBase;
                 Log("G3O", "[InfoManager] Successfully hooked operator>> at %p (Phase C probe active).", s_targetStreamReadObjectBase);
             } else {
-                Log("G3O", "[InfoManager] Warning: Failed to hook operator>> (MH_STATUS=%d).", opStatus);
+                Log("G3O", "[InfoManager] operator>> hook failed (create=%d, enable=%d, remove=%d).",
+                    createStatus, enableStatus, removeStatus);
             }
         }
     }
@@ -664,17 +685,16 @@ void InitializeInfoManagerOptimizer() {
     if (!pLoadInfos) {
         pLoadInfos = reinterpret_cast<void*>(baseAddr + 0x1CF160);
     }
-    s_targetLoadInfosFromInis = pLoadInfos;
-    if (s_targetLoadInfosFromInis) {
-        const MH_STATUS loadStatus = MH_CreateHook(
-            s_targetLoadInfosFromInis,
-            reinterpret_cast<void*>(&Hooked_LoadInfosFromInis),
-            reinterpret_cast<void**>(&Real_LoadInfosFromInis));
-        if (loadStatus == MH_OK) {
-            MH_EnableHook(s_targetLoadInfosFromInis);
+    if (pLoadInfos) {
+        result = InstallInfoManagerHook(
+            pLoadInfos, reinterpret_cast<LPVOID>(&Hooked_LoadInfosFromInis),
+            reinterpret_cast<LPVOID*>(&Real_LoadInfosFromInis), createStatus, enableStatus, removeStatus);
+        if (result == HookInstallResult::Installed) {
+            s_targetLoadInfosFromInis = pLoadInfos;
             Log("G3O", "[InfoManager] Successfully hooked LoadInfosFromInis at %p.", s_targetLoadInfosFromInis);
         } else {
-            Log("G3O", "[InfoManager] Warning: Failed to hook LoadInfosFromInis (MH_STATUS=%d).", loadStatus);
+            Log("G3O", "[InfoManager] LoadInfosFromInis hook failed (create=%d, enable=%d, remove=%d).",
+                createStatus, enableStatus, removeStatus);
         }
     }
 
@@ -686,36 +706,42 @@ void ShutdownInfoManagerOptimizer() {
 
     if (s_targetGetInfo) {
         MH_DisableHook(s_targetGetInfo);
+        MH_RemoveHook(s_targetGetInfo);
         s_targetGetInfo = nullptr;
     }
     Real_GetInfo = nullptr;
 
     if (s_targetInitHashTable) {
         MH_DisableHook(s_targetInitHashTable);
+        MH_RemoveHook(s_targetInitHashTable);
         s_targetInitHashTable = nullptr;
     }
     s_realInitHashTable = nullptr;
 
     if (s_targetPropertyObjectRead) {
         MH_DisableHook(s_targetPropertyObjectRead);
+        MH_RemoveHook(s_targetPropertyObjectRead);
         s_targetPropertyObjectRead = nullptr;
     }
     Real_PropertyObjectRead = nullptr;
 
     if (s_targetInfoManagerCreate) {
         MH_DisableHook(s_targetInfoManagerCreate);
+        MH_RemoveHook(s_targetInfoManagerCreate);
         s_targetInfoManagerCreate = nullptr;
     }
     Real_InfoManagerCreate = nullptr;
 
     if (s_targetStreamReadObjectBase) {
         MH_DisableHook(s_targetStreamReadObjectBase);
+        MH_RemoveHook(s_targetStreamReadObjectBase);
         s_targetStreamReadObjectBase = nullptr;
     }
     Real_StreamReadObjectBase = nullptr;
 
     if (s_targetLoadInfosFromInis) {
         MH_DisableHook(s_targetLoadInfosFromInis);
+        MH_RemoveHook(s_targetLoadInfosFromInis);
         s_targetLoadInfosFromInis = nullptr;
     }
     Real_LoadInfosFromInis = nullptr;

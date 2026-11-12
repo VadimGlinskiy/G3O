@@ -3,7 +3,6 @@
 #include <timeapi.h>
 #include "dinput8_proxy.h"
 #include "config_manager.h"
-#include "version_watermark.h"
 #include "diagnostic_logger.h"
 #include "crash_handler.h"
 #include "borderless_window.h"
@@ -24,13 +23,14 @@
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
 #include "pvs_prefetch_optimizer.h"
-#include "quest_load_optimizer.h"
 #include "info_manager_optimizer.h"
-#include "layer_ring_arena.h"
-#include "scoped_flat_entity_index.h"
+#include "session_start_optimizer.h"
+#include "dynamic_roi_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
 #include "pak_prefetch.h"
+#include "selective_culling_optimizer.h"
+#include "fog_optimizer.h"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -152,28 +152,28 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeClassFactoryOptimizer();
     }
 
-    // PVS Prefetch Optimizer: Adaptive Boot Radius & Deduplication for eCPVSPrefetcher3
-    if (cfg.enablePVSPrefetchOptimizer) {
-        G3O::InitializePVSPrefetchOptimizer();
-    }
+    // Initialize its shared state even when the PVS hook is off; ROI and savegame paths still use it.
+    G3O::InitializePVSPrefetchOptimizer();
 
-    // Quest Load Optimizer: Suppress redundant item/dialog queries during savegame loading
-    if (cfg.enableQuestLoadOptimizer) {
-        G3O::InitializeQuestLoadOptimizer();
-    }
 
     // Info Manager Optimizer: O(1) Shadow Table for gCInfoManager_PS::GetInfo
     if (cfg.enableInfoManagerOptimizer) {
         G3O::InitializeInfoManagerOptimizer();
     }
 
+    // Session Start Optimizer: Eliminates 12x Sleep(100) idle warm-up in gCSession::Start
+    if (cfg.enableSessionStartOptimizer) {
+        G3O::InitializeSessionStartOptimizer();
+    }
+
+    // Dynamic ROI: changes Entity.ROI while the crosshair is visible.
+    if (cfg.enableDynamicROI) {
+        G3O::InitializeDynamicROIOptimizer();
+    }
+
     // Savegame Profiler: High-resolution telemetry for savegame loading phases
     G3O::InitializeSavegameProfiler();
     G3O::InitializePakPrefetch();
-    G3O::InitializeLayerRingArena();
-    if (cfg.enableFlatEntityIndex) {
-        G3O::InitializeScopedFlatEntityIndex();
-    }
 
     if (cfg.enableSharedBaseOptimizations) {
         G3O::InitializeSharedBaseOptimizations();
@@ -189,18 +189,23 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeVegetationOptimizer();
     }
 
+    // Selective Frustum Screen-Size Culling (G3O-TASK-06: differentiates interactive items from clutter)
+    if (cfg.enableSelectiveCulling) {
+        G3O::InitializeSelectiveCullingOptimizer();
+    }
+
+    // Atmospheric Fog Expander (G3O-TASK-08: expands D3D9 fog distance for scenic vistas)
+    if (cfg.enableAtmosphericFogControl) {
+        G3O::InitializeFogOptimizer();
+    }
+
     if (cfg.enableProfiler) {
         G3O::InitializeProfiler();
     }
 
-    // Hook camera controller for dynamic widescreen FOV
+    // Hook camera FOV values in the engine's 50-75 degree range.
     if (cfg.enableDynamicFOV) {
         G3O::InitializeCameraController();
-    }
-
-    // Main menu version watermark
-    if (cfg.showWatermark) {
-        InitializeVersionHook();
     }
 
     // Optional legacy G3SE plugin loader (not part of gothic3sdk).
@@ -246,13 +251,14 @@ static void ShutdownOptima() {
     G3O::ShutdownSceneNodeOptimizer();
     G3O::ShutdownShadowCasterOptimizer();
     G3O::ShutdownClassFactoryOptimizer();
-    G3O::ShutdownPVSPrefetchOptimizer();
-    G3O::ShutdownQuestLoadOptimizer();
     G3O::ShutdownInfoManagerOptimizer();
+    G3O::ShutdownSessionStartOptimizer();
+    G3O::ShutdownDynamicROIOptimizer();
+    G3O::ShutdownPVSPrefetchOptimizer();
+    G3O::ShutdownSelectiveCullingOptimizer();
+    G3O::ShutdownFogOptimizer();
     G3O::ShutdownNavigationOptimizer();
     G3O::ShutdownVFSCacheOptimizer();
-    G3O::ShutdownLayerRingArena();
-    G3O::ShutdownScopedFlatEntityIndex();
     G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();

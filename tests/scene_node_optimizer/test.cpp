@@ -1,8 +1,10 @@
 #include <windows.h>
 #include <iostream>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include <atomic>
+#include "../../src/scene_node_policy.h"
 
 #pragma pack(push, 1)
 struct MockNode {
@@ -16,30 +18,30 @@ struct MockNode {
 #pragma pack(pop)
 
 static std::atomic<uint32_t> s_mockReallocCount{ 0 };
+static uint16_t s_mockOldCapacity = 0;
 
 static void* MockRealloc(void* /*pAdmin*/, void* pOld, uint32_t newSize) {
     s_mockReallocCount.fetch_add(1, std::memory_order_relaxed);
-    return std::realloc(pOld, newSize);
+    void* pNew = std::realloc(pOld, newSize);
+    if (pNew) {
+        const size_t oldBytes = static_cast<size_t>(s_mockOldCapacity) * sizeof(void*);
+        if (oldBytes < newSize) {
+            std::memset(static_cast<unsigned char*>(pNew) + oldBytes, 0xA5, newSize - oldBytes);
+        }
+    }
+    return pNew;
 }
 
 static void SimulatePreallocation(MockNode* pParent, MockNode* pChild) {
-    if (!pParent || !pChild) return;
-    if (pChild->m_pParent != pParent) {
-        if (pParent->m_u16Count >= 64 && pParent->m_u16Count == pParent->m_u16Capacity && pParent->m_u16Capacity < 32768) {
-            uint16_t newCap = 1024;
-            if (pParent->m_u16Capacity >= 8192) {
-                newCap = 32768;
-            } else if (pParent->m_u16Capacity >= 1024) {
-                newCap = 8192;
-            }
-
-            void* pNewBuf = MockRealloc(nullptr, pParent->m_ppChildren, newCap * sizeof(void*));
-            if (pNewBuf) {
-                pParent->m_ppChildren = reinterpret_cast<void**>(pNewBuf);
-                pParent->m_u16Capacity = newCap;
-            }
-        }
+    if (!pParent || !pChild || pChild->m_pParent == pParent ||
+        !G3O::SceneNodePolicy::ShouldPreallocate(pParent->m_u16Count, pParent->m_u16Capacity)) {
+        return;
     }
+
+    const uint16_t newCapacity = G3O::SceneNodePolicy::NextCapacity(pParent->m_u16Capacity);
+    s_mockOldCapacity = pParent->m_u16Capacity;
+    G3O::SceneNodePolicy::TryPreallocate(
+        nullptr, pParent->m_ppChildren, pParent->m_u16Capacity, newCapacity, MockRealloc);
 }
 
 static bool Expect(bool condition, const char* message) {
@@ -57,7 +59,8 @@ int main() {
     MockNode parent{};
     parent.m_u16Capacity = 16;
     parent.m_u16Count = 0;
-    parent.m_ppChildren = reinterpret_cast<void**>(std::malloc(parent.m_u16Capacity * sizeof(void*)));
+    parent.m_ppChildren = reinterpret_cast<void**>(std::malloc(32768 * sizeof(void*)));
+    std::memset(parent.m_ppChildren, 0xCC, 32768 * sizeof(void*));
 
     MockNode child{};
 
@@ -73,6 +76,8 @@ int main() {
     SimulatePreallocation(&parent, &child);
     ok &= Expect(s_mockReallocCount.load() == 1, "Preallocated once at threshold 64");
     ok &= Expect(parent.m_u16Capacity == 1024, "Capacity jumped to 1024");
+    ok &= Expect(parent.m_ppChildren[64] == nullptr && parent.m_ppChildren[1023] == nullptr,
+                 "newly allocated child slots must be zeroed before the engine sees the larger capacity");
 
     // Inside 65..1023: no reallocations needed
     parent.m_u16Count = 500;

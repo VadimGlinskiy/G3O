@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima VERSION 1.6.1 LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.7.0 LANGUAGES C CXX)
 
 configure_file(src/g3o_build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/g3o_build_info.h @ONLY)
 
@@ -31,8 +31,6 @@ add_library(dinput8 SHARED
     src/dinput8_proxy.cpp
     src/dinput8_proxy.h
     src/dinput8.def
-    src/version_watermark.cpp
-    src/version_watermark.h
     src/diagnostic_logger.cpp
     src/diagnostic_logger.h
     src/recent_event_buffer.h
@@ -73,10 +71,13 @@ add_library(dinput8 SHARED
     src/cpu_affinity_policy.h
     src/vegetation_optimizer.cpp
     src/vegetation_optimizer.h
+    src/vegetation_shadow_policy.h
     src/decompressor_avx2.c
     src/decompressor_avx2.h
     src/fast_pak_decompressor.cpp
     src/fast_pak_decompressor.h
+    src/layer_ring_arena.cpp
+    src/layer_ring_arena.h
     src/frustum_database_policy.h
     src/frustum_database_optimizer.cpp
     src/frustum_database_optimizer.h
@@ -97,14 +98,15 @@ add_library(dinput8 SHARED
     src/pvs_prefetch_policy.h
     src/pvs_prefetch_optimizer.cpp
     src/pvs_prefetch_optimizer.h
-    src/quest_load_optimizer.cpp
-    src/quest_load_optimizer.h
+
     src/info_manager_optimizer.cpp
     src/info_manager_optimizer.h
-    src/layer_ring_arena.cpp
-    src/layer_ring_arena.h
-    src/scoped_flat_entity_index.cpp
-    src/scoped_flat_entity_index.h
+    src/session_start_policy.h
+    src/session_start_optimizer.cpp
+    src/session_start_optimizer.h
+    src/dynamic_roi_policy.h
+    src/dynamic_roi_optimizer.cpp
+    src/dynamic_roi_optimizer.h
     src/property_cache_optimizer.cpp
     src/property_cache_optimizer.h
     src/entity_search_optimizer.cpp
@@ -122,6 +124,12 @@ add_library(dinput8 SHARED
     src/config_value_parser.h
     src/pak_tracer.cpp
     src/pak_tracer.h
+    src/selective_culling_policy.h
+    src/selective_culling_optimizer.cpp
+    src/selective_culling_optimizer.h
+    src/fog_policy.h
+    src/fog_optimizer.cpp
+    src/fog_optimizer.h
 )
 
 if(MSVC)

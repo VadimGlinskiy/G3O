@@ -3,6 +3,7 @@
 #include "diag_output_bridge.h"
 #include "timestamped_path.h"
 #include "g3o_output_path.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <cstdio>
 #include <cstdarg>
@@ -20,6 +21,8 @@ static thread_local bool s_forwardingOriginalDiagOutput = false;
 static volatile LONG s_logPathSequence = 0;
 static bool s_outputDebugStringHookInstalled = false;
 static bool s_diagOutputHookInstalled = false;
+static void* s_outputDebugStringTarget = nullptr;
+static void* s_diagOutputTarget = nullptr;
 static std::atomic<uint32_t> s_enginePhase{Phase_Init};
 
 void SetEnginePhase(EnginePhase phase) {
@@ -120,6 +123,21 @@ void FlushDiagnosticLog() {
 
 void ShutdownDiagnosticLogger() {
     if (!s_csInitialized) return;
+
+    if (s_outputDebugStringTarget) {
+        MH_DisableHook(s_outputDebugStringTarget);
+        MH_RemoveHook(s_outputDebugStringTarget);
+        s_outputDebugStringTarget = nullptr;
+        s_outputDebugStringHookInstalled = false;
+        s_origOutputDebugStringA = nullptr;
+    }
+    if (s_diagOutputTarget) {
+        MH_DisableHook(s_diagOutputTarget);
+        MH_RemoveHook(s_diagOutputTarget);
+        s_diagOutputTarget = nullptr;
+        s_diagOutputHookInstalled = false;
+        s_origDiagOutput = nullptr;
+    }
 
     EnterCriticalSection(&s_logCs);
     if (s_logFile) {
@@ -249,11 +267,18 @@ void HookOutputDebugStringA() {
     if (hKernel32) {
         void* pODS = (void*)GetProcAddress(hKernel32, "OutputDebugStringA");
         if (pODS) {
-            const MH_STATUS createStatus = MH_CreateHook(
-                pODS, (void*)&HookedOutputDebugStringA, (void**)&s_origOutputDebugStringA);
-            if (createStatus == MH_OK || createStatus == MH_ERROR_ALREADY_CREATED) {
-                const MH_STATUS enableStatus = MH_EnableHook(pODS);
-                s_outputDebugStringHookInstalled = enableStatus == MH_OK || enableStatus == MH_ERROR_ENABLED;
+            MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+            const HookInstallResult result = InstallHookSafely(
+                [&] { createStatus = MH_CreateHook(pODS, (void*)&HookedOutputDebugStringA, (void**)&s_origOutputDebugStringA); return createStatus == MH_OK; },
+                [&] { enableStatus = MH_EnableHook(pODS); return enableStatus == MH_OK; },
+                [&] { removeStatus = MH_RemoveHook(pODS); },
+                [&] { s_origOutputDebugStringA = nullptr; });
+            if (result == HookInstallResult::Installed) {
+                s_outputDebugStringTarget = pODS;
+                s_outputDebugStringHookInstalled = true;
+            } else {
+                Log("G3O", "OutputDebugStringA hook failed (create=%d, enable=%d, remove=%d).",
+                    createStatus, enableStatus, removeStatus);
             }
         }
     }
@@ -265,14 +290,19 @@ void HookEngineDiagOutput() {
     if (hSharedBase) {
         void* pDiag = (void*)GetProcAddress(hSharedBase, "?DiagOutput@@YAXPBDZZ");
         if (pDiag) {
-            const MH_STATUS createStatus = MH_CreateHook(
-                pDiag, (void*)&HookedDiagOutput, (void**)&s_origDiagOutput);
-            if (createStatus == MH_OK || createStatus == MH_ERROR_ALREADY_CREATED) {
-                const MH_STATUS enableStatus = MH_EnableHook(pDiag);
-                s_diagOutputHookInstalled = enableStatus == MH_OK || enableStatus == MH_ERROR_ENABLED;
-                if (s_diagOutputHookInstalled) {
-                    Log("G3O", "Hooked SharedBase.dll!DiagOutput successfully.");
-                }
+            MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+            const HookInstallResult result = InstallHookSafely(
+                [&] { createStatus = MH_CreateHook(pDiag, (void*)&HookedDiagOutput, (void**)&s_origDiagOutput); return createStatus == MH_OK; },
+                [&] { enableStatus = MH_EnableHook(pDiag); return enableStatus == MH_OK; },
+                [&] { removeStatus = MH_RemoveHook(pDiag); },
+                [&] { s_origDiagOutput = nullptr; });
+            if (result == HookInstallResult::Installed) {
+                s_diagOutputTarget = pDiag;
+                s_diagOutputHookInstalled = true;
+                Log("G3O", "Hooked SharedBase.dll!DiagOutput successfully.");
+            } else {
+                Log("G3O", "SharedBase.dll!DiagOutput hook failed (create=%d, enable=%d, remove=%d).",
+                    createStatus, enableStatus, removeStatus);
             }
         }
     }

@@ -2,6 +2,7 @@
 #include "config_manager.h"
 #include "diagnostic_logger.h"
 #include "savegame_profiler.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <windows.h>
 #include <atomic>
@@ -56,12 +57,19 @@ void InitializeNavigationOptimizer() {
         return;
     }
 
-    if (MH_CreateHook(pProc, reinterpret_cast<LPVOID>(Hooked_NavigationProcess),
-                      reinterpret_cast<LPVOID*>(&Real_NavigationProcess)) == MH_OK) {
-        if (MH_EnableHook(pProc) == MH_OK) {
-            s_targetNavProcess = pProc;
-            Log("G3O", "Navigation Optimizer initialized (gCNavigationAdmin::Process hooked at 0x%p).", pProc);
-        }
+    MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+    const HookInstallResult result = InstallHookSafely(
+        [&] { createStatus = MH_CreateHook(pProc, reinterpret_cast<LPVOID>(Hooked_NavigationProcess),
+                                           reinterpret_cast<LPVOID*>(&Real_NavigationProcess)); return createStatus == MH_OK; },
+        [&] { enableStatus = MH_EnableHook(pProc); return enableStatus == MH_OK; },
+        [&] { removeStatus = MH_RemoveHook(pProc); },
+        [&] { Real_NavigationProcess = nullptr; });
+    if (result == HookInstallResult::Installed) {
+        s_targetNavProcess = pProc;
+        Log("G3O", "Navigation Optimizer initialized (gCNavigationAdmin::Process hooked at 0x%p).", pProc);
+    } else {
+        Log("G3O", "Navigation Optimizer: hook install failed (create=%d, enable=%d, remove=%d).",
+            createStatus, enableStatus, removeStatus);
     }
 }
 

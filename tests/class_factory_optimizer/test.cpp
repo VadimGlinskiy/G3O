@@ -125,6 +125,25 @@ int main() {
         ok &= Expect(arenaOffset == savedArenaOffset, "duplicate insert must not consume arena space");
     }
 
+    // Insertion without stable key storage must fall back to the original lookup.
+    {
+        SClassNodeCacheEntry smallTable[kClassCacheCapacity] = {};
+        char tinyArena[4] = {};
+        uint32_t tinyOffset = 0;
+        char transientName[] = "eCVisual";
+        const uint32_t len = static_cast<uint32_t>(std::strlen(transientName));
+        const uint32_t hash = ComputeFastClassHash(transientName, len);
+        const uint64_t prefix = ReadPrefix8(transientName, len);
+        const SClassNodeCacheEntry* inserted = InsertIntoNodeCache(
+            smallTable, tinyArena, tinyOffset, sizeof(tinyArena),
+            mockMapA, transientName, len, hash, prefix,
+            reinterpret_cast<void*>(0x3000), 1);
+        ok &= Expect(inserted == nullptr,
+                     "cache must skip insertion when it cannot retain a stable key copy");
+        ok &= Expect(tinyOffset == 0,
+                     "failed insertion must not consume key arena space");
+    }
+
     // Lookup non-existent class
     {
         const char* missing = "eCUnknownMissingClass";

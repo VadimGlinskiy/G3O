@@ -2,6 +2,7 @@
 #include "frustum_database_policy.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <windows.h>
 #include <atomic>
@@ -130,12 +131,19 @@ void InitializeFrustumDatabaseOptimizer() {
     void* pExtract = reinterpret_cast<void*>(GetProcAddress(
         hEngine, "?ExtractFromEntity@eCFrustumDatabase@@IAE_NPAVeCEntity@@W4eECullStatus@eCFrustumFilter@@@Z"));
     if (pExtract) {
-        if (MH_CreateHook(pExtract, reinterpret_cast<LPVOID>(Hooked_ExtractFromEntity),
-                          reinterpret_cast<LPVOID*>(&Real_ExtractFromEntity)) == MH_OK) {
-            if (MH_EnableHook(pExtract) == MH_OK) {
-                s_targetExtract = pExtract;
-                Log("G3O", "Frustum Database Optimizer: Hooked eCFrustumDatabase::ExtractFromEntity (0x%p)", pExtract);
-            }
+        MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+        const HookInstallResult result = InstallHookSafely(
+            [&] { createStatus = MH_CreateHook(pExtract, reinterpret_cast<LPVOID>(Hooked_ExtractFromEntity),
+                                               reinterpret_cast<LPVOID*>(&Real_ExtractFromEntity)); return createStatus == MH_OK; },
+            [&] { enableStatus = MH_EnableHook(pExtract); return enableStatus == MH_OK; },
+            [&] { removeStatus = MH_RemoveHook(pExtract); },
+            [&] { Real_ExtractFromEntity = nullptr; });
+        if (result == HookInstallResult::Installed) {
+            s_targetExtract = pExtract;
+            Log("G3O", "Frustum Database Optimizer: Hooked eCFrustumDatabase::ExtractFromEntity (0x%p)", pExtract);
+        } else {
+            Log("G3O", "Frustum Database Optimizer: ExtractFromEntity install failed (create=%d, enable=%d, remove=%d).",
+                createStatus, enableStatus, removeStatus);
         }
     } else {
         Log("G3O", "Frustum Database Optimizer: eCFrustumDatabase::ExtractFromEntity export missing.");
@@ -144,24 +152,38 @@ void InitializeFrustumDatabaseOptimizer() {
     // 2. Hook eCEntity::~eCEntity (Destructor)
     void* pDestructor = reinterpret_cast<void*>(GetProcAddress(hEngine, "??1eCEntity@@MAE@XZ"));
     if (pDestructor) {
-        if (MH_CreateHook(pDestructor, reinterpret_cast<LPVOID>(Hooked_EntityDestructor),
-                          reinterpret_cast<LPVOID*>(&Real_EntityDestructor)) == MH_OK) {
-            if (MH_EnableHook(pDestructor) == MH_OK) {
-                s_targetDestructor = pDestructor;
-                Log("G3O", "Frustum Database Optimizer: Hooked eCEntity::~eCEntity (0x%p)", pDestructor);
-            }
+        MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+        const HookInstallResult result = InstallHookSafely(
+            [&] { createStatus = MH_CreateHook(pDestructor, reinterpret_cast<LPVOID>(Hooked_EntityDestructor),
+                                               reinterpret_cast<LPVOID*>(&Real_EntityDestructor)); return createStatus == MH_OK; },
+            [&] { enableStatus = MH_EnableHook(pDestructor); return enableStatus == MH_OK; },
+            [&] { removeStatus = MH_RemoveHook(pDestructor); },
+            [&] { Real_EntityDestructor = nullptr; });
+        if (result == HookInstallResult::Installed) {
+            s_targetDestructor = pDestructor;
+            Log("G3O", "Frustum Database Optimizer: Hooked eCEntity::~eCEntity (0x%p)", pDestructor);
+        } else {
+            Log("G3O", "Frustum Database Optimizer: entity destructor install failed (create=%d, enable=%d, remove=%d).",
+                createStatus, enableStatus, removeStatus);
         }
     }
 
     // 3. Hook eCEntity::Destroy
     void* pDestroy = reinterpret_cast<void*>(GetProcAddress(hEngine, "?Destroy@eCEntity@@UAEXXZ"));
     if (pDestroy) {
-        if (MH_CreateHook(pDestroy, reinterpret_cast<LPVOID>(Hooked_EntityDestroy),
-                          reinterpret_cast<LPVOID*>(&Real_EntityDestroy)) == MH_OK) {
-            if (MH_EnableHook(pDestroy) == MH_OK) {
-                s_targetDestroy = pDestroy;
-                Log("G3O", "Frustum Database Optimizer: Hooked eCEntity::Destroy (0x%p)", pDestroy);
-            }
+        MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+        const HookInstallResult result = InstallHookSafely(
+            [&] { createStatus = MH_CreateHook(pDestroy, reinterpret_cast<LPVOID>(Hooked_EntityDestroy),
+                                               reinterpret_cast<LPVOID*>(&Real_EntityDestroy)); return createStatus == MH_OK; },
+            [&] { enableStatus = MH_EnableHook(pDestroy); return enableStatus == MH_OK; },
+            [&] { removeStatus = MH_RemoveHook(pDestroy); },
+            [&] { Real_EntityDestroy = nullptr; });
+        if (result == HookInstallResult::Installed) {
+            s_targetDestroy = pDestroy;
+            Log("G3O", "Frustum Database Optimizer: Hooked eCEntity::Destroy (0x%p)", pDestroy);
+        } else {
+            Log("G3O", "Frustum Database Optimizer: entity Destroy install failed (create=%d, enable=%d, remove=%d).",
+                createStatus, enableStatus, removeStatus);
         }
     }
 }

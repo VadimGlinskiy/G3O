@@ -19,13 +19,13 @@ Fully compatible with Community Patch 1.75.14, Update Pack, Parallel Universe Pa
 - **Stepped Scene Node Pre-allocation (Scene Node Optimizer):** Replaces the engine's 25% incremental growth of `eCNode::m_ppChildren` with power-of-two capacity pre-allocations (1024 -> 8192 -> 32768) via native `bCMemoryAdmin::Realloc`. Eliminates 25–30 cascading reallocations per major world sector (`RB_Mod`, `SysDyn`).
 - **Directional Shadow Caster Optimizer:** Replaces quadratic backwards linear scans and `memmove` shifts in `eCShadowMapDirectionalLightBase` with an O(1) hash index and Swap-and-Pop. Eliminates up to ~8 seconds of stall during camera teleportation (`GotoLoadedPosition`) and streaming stutters during active gameplay.
 - **SharedBase Class Factory Optimizer:** Fast L1 cache for engine reflection type descriptors and Zero-Alloc `bCString` buffer reuse for `bCPropertyObjectSingleton::ReadObject`. Eliminates linear linked-list traversal across 43 hash buckets and prevents over 60,000 engine memory allocations during dynamic entity deserialization (`SysDyn`).
-- **Suppression of Idle Quest & Navigation Checks (Quest & Navigation Optimizer):** Silences redundant navigation ticks in `gCNavigationAdmin::Process` and repetitive inventory scans (`HaveNPCsAllRequiredItems` / `HasImportantInfo`) while world loading is active.
+- **Info Manager and Navigation Optimizers:** These are separate hooks. Their exact actions and activation conditions are documented next to the corresponding settings in `G3O.ini`.
 - **Component Search Optimizer (Entity Search Optimizer):** Caches vptr table entries in `eCEntity::SearchForEntity` with an early-exit path.
 - **System Timer and Thread Scheduling:** Enables 1 ms OS timer resolution (`timeBeginPeriod(1)`), assigns high process priority, and automatically pins game threads to performance cores (P-cores) while avoiding efficiency cores (E-cores).
 
 ### Display and Camera
 - **Borderless Windowed Mode:** Eliminates crashes, freezing, and resolution resets during Alt-Tab and window switching. Includes protection against accidental minimization when clicking secondary monitors (`PreventMinimizeOnFocusLoss`).
-- **Dynamic FOV:** Automatically recalculates vertical field of view to match modern widescreen aspect ratios (16:9, 21:9, 32:9). Includes in-game hotkeys for zoom adjustment (`Ctrl + [` / `Ctrl + ]`).
+- **FOV override:** Replaces engine FOV values from 50° to 75° with `DefaultFOV`; it does not adjust FOV for the monitor aspect ratio. Optional hotkeys adjust the value in steps.
 - **D3D9 State Filtering:** Deduplicates redundant `SetRenderState` and `SetSamplerState` calls when running on native Direct3D 9.
 
 ### Diagnostics and Crash Investigation
@@ -60,7 +60,7 @@ The configuration file `G3O.ini` resides next to `Gothic3.exe`. Every configurat
 1. Copy `dinput8.dll` and `G3O.ini` into your Gothic 3 game directory (beside `Gothic3.exe`).
    > Back up any existing `dinput8.dll` first (it might belong to another mod).
    > When updating G3O, back up your current `G3O.ini` before replacing it with the new default profile.
-2. Adjust `G3O.ini` if desired. The default profile matches the current tested configuration, including diagnostic logs and profilers; disable any outputs you do not need.
+2. Adjust `G3O.ini` if desired. The shipped profile matches the project's default `G3O.ini`; diagnostic logs and profilers are off by default and can be enabled individually.
 3. Optional: Install DXVK for Vulkan-based rendering.
 
 ---

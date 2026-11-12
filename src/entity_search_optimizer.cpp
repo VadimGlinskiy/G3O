@@ -2,6 +2,7 @@
 #include "entity_search_policy.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <windows.h>
 
@@ -53,14 +54,32 @@ bool InitializeEntitySearchOptimizer() {
         return false;
     }
 
-    s_targetSearchForEntity = fnSearch;
-    MH_STATUS status = MH_CreateHook(fnSearch, reinterpret_cast<LPVOID>(Hooked_SearchForEntity), reinterpret_cast<LPVOID*>(&Real_SearchForEntity));
-    if (status == MH_OK) {
-        MH_EnableHook(fnSearch);
+    MH_STATUS createStatus = MH_OK;
+    MH_STATUS enableStatus = MH_OK;
+    MH_STATUS removeStatus = MH_OK;
+    const HookInstallResult result = InstallHookSafely(
+        [&] {
+            createStatus = MH_CreateHook(fnSearch, reinterpret_cast<LPVOID>(Hooked_SearchForEntity), reinterpret_cast<LPVOID*>(&Real_SearchForEntity));
+            return createStatus == MH_OK;
+        },
+        [&] {
+            enableStatus = MH_EnableHook(fnSearch);
+            return enableStatus == MH_OK;
+        },
+        [&] { removeStatus = MH_RemoveHook(fnSearch); },
+        [&] { Real_SearchForEntity = nullptr; });
+    if (result == HookInstallResult::Installed) {
+        s_targetSearchForEntity = fnSearch;
         Log("G3O", "Entity Search Optimizer initialized (eCEntity::SearchForEntity hooked with L1 vptr cache + Early Exit).");
         return true;
     } else {
-        Log("G3O", "Entity Search Optimizer: Failed to hook SearchForEntity (code %d).", static_cast<int>(status));
+        s_targetSearchForEntity = nullptr;
+        if (result == HookInstallResult::CreateFailed) {
+            Log("G3O", "Entity Search Optimizer: Failed to create SearchForEntity hook (code %d).", static_cast<int>(createStatus));
+        } else {
+            Log("G3O", "Entity Search Optimizer: Failed to enable SearchForEntity hook (code %d; remove code %d).",
+                static_cast<int>(enableStatus), static_cast<int>(removeStatus));
+        }
         return false;
     }
 }

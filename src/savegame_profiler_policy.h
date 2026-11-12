@@ -20,7 +20,8 @@ inline bool ShouldTracePakPrefetch(const Config& config) noexcept {
 }
 
 inline bool ShouldInstallSavegameProfilerHooks(const Config& config) noexcept {
-    return config.enableSavegameAudit || config.enableProfiler || ShouldTracePakPrefetch(config);
+    return config.enableSavegameAudit || config.enableProfiler || ShouldTracePakPrefetch(config) ||
+           (config.enableLayerRingArena && config.enableFastPakDecompressor);
 }
 
 inline bool ShouldCollectSavegameAudit(const Config& config) noexcept {

@@ -32,11 +32,12 @@ int main() {
     if (path.empty()) return 2;
     bool ok = true;
     const G3O::Config defaults{};
-    ok &= Expect(defaults.enablePropertyCache && defaults.enableLayerRingArena &&
-                 defaults.enableFlatEntityIndex && !defaults.enableFlatEntityShadowVerify &&
+    ok &= Expect(!defaults.enableLayerRingArena && !defaults.enablePVSPrefetchOptimizer,
+                 "LayerRingArena and PVS prefetch should match the shipped default profile");
+    ok &= Expect(defaults.enablePropertyCache &&
                  defaults.enableVFSCache && defaults.pakCacheBudgetMB == 768 &&
-                 defaults.enableDiagnosticLog && defaults.interceptOutputDebugString &&
-                 defaults.enableProfiler && defaults.enableSavegameAudit && defaults.enableLayerAudit,
+                 !defaults.enableDiagnosticLog && !defaults.interceptOutputDebugString &&
+                 !defaults.enableProfiler && !defaults.enableSavegameAudit && !defaults.enableLayerAudit,
                  "Config defaults should match the active release profile");
     ok &= Expect(G3O::ParseKeyCode("F2junk", VK_F10) == VK_F10,
                  "partial function-key tokens should use the configured default");
@@ -50,11 +51,12 @@ int main() {
         std::ofstream ini(path);
         ini << "[General]\nEnableG3O=false\n"
             << "[Camera]\nDefaultFOV=nan\nFOVStep=0\n"
-            << "[Performance]\nEnableSharedBaseOptimizations=true\nEnableSIMDFrustumCulling=false\nTreeShadowDistance=-1\n"
+            << "[Performance]\nEnableLayerRingArena=true\nEnableSharedBaseOptimizations=true\nEnableSIMDFrustumCulling=false\nTreeShadowDistance=-1\n"
             << "VegetationGridRangeClamp=1234.0junk\n"
             << "CPUCores=999\nCPUThreads=-1\n"
             << "CPUAffinityMask=0x100000000\n"
-            << "PakCacheBudgetMB=-1\nPakPrefetchWorkers=999\n";
+            << "PakCacheBudgetMB=-1\nPakPrefetchWorkers=999\n"
+            << "FogDistanceMultiplier=-5.0\nFogEndMinDistance=-100.0\n";
     }
     G3O::LoadConfig();
     const G3O::Config invalid = G3O::GetConfig();
@@ -62,6 +64,8 @@ int main() {
     ok &= Expect(G3O::g_logCallCount == 0, "loading configuration must not log before the master switch is checked");
     ok &= Expect(invalid.enableSharedBaseOptimizations,
                  "new SharedBase option should take precedence over the legacy key");
+    ok &= Expect(invalid.enableLayerRingArena,
+                 "LayerRingArena should load its enabled setting from the INI");
     ok &= Expect(invalid.defaultFOV == 85.0f, "NaN FOV should use default");
     ok &= Expect(invalid.fovStep == 5.0f, "zero FOV step should use default");
     ok &= Expect(invalid.treeShadowDistance == 6500.0f, "negative shadow distance should use default");
@@ -70,11 +74,12 @@ int main() {
     ok &= Expect(invalid.cpuAffinityMask == 0, "mask wider than the x86 pointer should use default");
     ok &= Expect(invalid.pakCacheBudgetMB == 768, "negative cache budget should use default");
     ok &= Expect(invalid.pakPrefetchWorkers == 0, "worker count above maximum should use default");
-    ok &= Expect(invalid.enablePropertyCache && invalid.enableLayerRingArena &&
-                 invalid.enableFlatEntityIndex && !invalid.enableFlatEntityShadowVerify && invalid.enableVFSCache,
+    ok &= Expect(invalid.fogDistanceMultiplier == 2.5f, "negative fog distance multiplier should use default");
+    ok &= Expect(invalid.fogEndMinDistance == 250000.0f, "negative fog end min distance should use default");
+    ok &= Expect(invalid.enablePropertyCache && invalid.enableVFSCache,
                  "missing performance keys should use the active release profile");
-    ok &= Expect(invalid.enableDiagnosticLog && invalid.interceptOutputDebugString && invalid.enableProfiler &&
-                 invalid.enableSavegameAudit && invalid.enableLayerAudit,
+    ok &= Expect(!invalid.enableDiagnosticLog && !invalid.interceptOutputDebugString && !invalid.enableProfiler &&
+                 !invalid.enableSavegameAudit && !invalid.enableLayerAudit,
                  "missing logging keys should use the active release profile");
 
     {
@@ -89,25 +94,66 @@ int main() {
 
     DeleteFileA(path.c_str());
     G3O::LoadConfig();
-    std::ifstream generated(path);
-    const std::string text((std::istreambuf_iterator<char>(generated)), {});
+    std::string text;
+    {
+        std::ifstream generated(path);
+        text.assign(std::istreambuf_iterator<char>(generated), std::istreambuf_iterator<char>());
+    }
     const char* required[] = {
         "EnableSharedBaseOptimizations=",
         "VegetationGridRangeClamp=", "EnableVFSCache=", "CPUCores=", "CPUThreads=",
         "CPUAffinityMask=", "PakCacheBudgetMB=768", "PakPrefetchWorkers=",
-        "EnablePropertyCache=true", "EnableLayerRingArena=true", "EnableFlatEntityIndex=true", "EnableVFSCache=true",
-        "EnableD3D9StateFilter=true", "EnableDiagnosticLog=true", "InterceptOutputDebugString=true",
-        "EnableProfiler=true", "EnableSavegameAudit=true", "EnableLayerAudit=true"
+        "EnableFastPakDecompressor=true", "EnableLayerRingArena=false", "EnablePropertyCache=true", "EnableVFSCache=true",
+        "EnableSessionStartOptimizer=true", "SessionStartSleepMs=1",
+        "EnablePVSPrefetchOptimizer=false", "EnableAdaptiveROI=true", "ROIBootRadius=3600", "PVSBootRadius=3800",
+        "EnableDynamicROI=false", "BaseROI=0", "AimingROI=7500",
+        "EnableSelectiveCulling=true", "ClutterCullThreshold=0.008", "ImportantCullThreshold=0.002",
+        "EnableAtmosphericFogControl=true", "FogDistanceMultiplier=2.5", "FogEndMinDistance=250000", "PreserveUnderwaterFog=true",
+        "EnableVegetationOptimizer=true", "EnableAdaptiveTreeShadows=true",
+        "EnableD3D9StateFilter=true", "EnableDiagnosticLog=false", "InterceptOutputDebugString=false",
+        "EnableProfiler=false", "EnableSavegameAudit=false", "EnableLayerAudit=false"
     };
     for (const char* item : required) {
         ok &= Expect(text.find(item) != std::string::npos, item);
     }
     ok &= Expect(text.find("статистики кучи") == std::string::npos,
                  "generated INI should not claim heap-statistics bypasses");
+    ok &= Expect(text.find("ShowWatermark=") == std::string::npos,
+                 "generated INI should not expose the no-op watermark setting");
+    ok &= Expect(text.find("EnableQuestLoadOptimizer=") == std::string::npos,
+                 "generated INI should not expose quest checks that return false during save loading");
     ok &= Expect(text.find("EnableInfoManagerBinaryCache=") == std::string::npos,
                  "generated INI should not expose the removed compiled-info cache");
+    ok &= Expect(text.find("без проверки контрольной суммы zlib") != std::string::npos,
+                 "generated INI should explain the raw-DEFLATE fallback and its checksum behavior");
+    ok &= Expect(text.find("прогревает файловый кэш Windows") != std::string::npos &&
+                 text.find("заранее распаковывает отмеченные PAK-блоки") != std::string::npos,
+                 "generated INI should explain both archive warming and trace-based PAK pre-decompression");
+    ok &= Expect(text.find("наивысшим классом производительности Windows") != std::string::npos &&
+                 text.find("по одному логическому процессору с каждого ядра") != std::string::npos,
+                 "generated INI should explain hybrid-core selection and CPUCores affinity mapping");
+    ok &= Expect(text.find("заполнен и содержит не менее 64 элементов") != std::string::npos &&
+                 text.find("до 1024, 8192 или 32768") != std::string::npos,
+                 "generated INI should explain when the scene-node array grows and its capacity steps");
+    ok &= Expect(text.find("если известна исходная цель и EnableDynamicROI=false") != std::string::npos,
+                 "generated INI should explain the adaptive ROI activation condition");
+    ok &= Expect(text.find("изменения центра и радиуса") != std::string::npos,
+                 "generated INI should explain both parts of the PVS duplicate check");
+    ok &= Expect(text.find("EnableFlatEntityIndex=") == std::string::npos,
+                 "generated INI should not expose the removed flat entity index");
+    ok &= Expect(text.find("EnableLayerRingArena=false") != std::string::npos &&
+                 text.find("полном совпадении сжатого блока") != std::string::npos,
+                 "generated INI should match the shipped arena profile and document exact-match fallback behavior");
     ok &= Expect(text.find("EnableGuidMapOptimizer=") == std::string::npos,
                  "generated INI should not expose the removed GUID map optimizer");
+    const char* removedNpcOptions[] = {
+        "EnableCompanionPinning=", "CompanionPinMaxDistance=", "CombatantPinMaxDistance=",
+        "EnableDistanceBoneThrottling=", "BoneThrottlingDistance="
+    };
+    for (const char* option : removedNpcOptions) {
+        ok &= Expect(text.find(option) == std::string::npos,
+                     "generated INI should not expose removed NPC pinning or bone throttling options");
+    }
     ok &= Expect(text.find("EnableFrustumCulling=") == std::string::npos,
                  "unverified frustum hooks should not be exposed as an option");
     ok &= Expect(text.find("EnableSIMDFrustumCulling=") == std::string::npos,

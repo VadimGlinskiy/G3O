@@ -2,6 +2,7 @@
 #include "shadow_caster_policy.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <windows.h>
 #include <atomic>
@@ -145,38 +146,54 @@ void InitializeShadowCasterOptimizer() {
 
     ShadowIndexMap::Clear(s_shadowTable);
 
-    if (MH_CreateHook(pAdd, reinterpret_cast<LPVOID>(Hooked_AddShadowCaster),
-                      reinterpret_cast<LPVOID*>(&fpAddShadowCasterOrig)) == MH_OK &&
-        MH_EnableHook(pAdd) == MH_OK) {
-        s_targetAddShadowCaster = pAdd;
-    } else {
-        Log("G3O", "ShadowCasterOptimizer: Failed to hook AddShadowCaster.");
+    MH_STATUS addCreateStatus = MH_OK, addEnableStatus = MH_OK, addRemoveStatus = MH_OK;
+    const HookInstallResult addResult = InstallHookSafely(
+        [&] { addCreateStatus = MH_CreateHook(pAdd, reinterpret_cast<LPVOID>(Hooked_AddShadowCaster),
+                                              reinterpret_cast<LPVOID*>(&fpAddShadowCasterOrig)); return addCreateStatus == MH_OK; },
+        [&] { addEnableStatus = MH_EnableHook(pAdd); return addEnableStatus == MH_OK; },
+        [&] { addRemoveStatus = MH_RemoveHook(pAdd); },
+        [&] { fpAddShadowCasterOrig = nullptr; });
+    if (addResult != HookInstallResult::Installed) {
+        Log("G3O", "ShadowCasterOptimizer: AddShadowCaster install failed (create=%d, enable=%d, remove=%d).",
+            addCreateStatus, addEnableStatus, addRemoveStatus);
+        return;
+    }
+    s_targetAddShadowCaster = pAdd;
+
+    MH_STATUS removeCreateStatus = MH_OK, removeEnableStatus = MH_OK, removeRemoveStatus = MH_OK;
+    const HookInstallResult removeResult = InstallHookSafely(
+        [&] { removeCreateStatus = MH_CreateHook(pRemove, reinterpret_cast<LPVOID>(Hooked_RemoveShadowCaster),
+                                                 reinterpret_cast<LPVOID*>(&fpRemoveShadowCasterOrig)); return removeCreateStatus == MH_OK; },
+        [&] { removeEnableStatus = MH_EnableHook(pRemove); return removeEnableStatus == MH_OK; },
+        [&] { removeRemoveStatus = MH_RemoveHook(pRemove); },
+        [&] { fpRemoveShadowCasterOrig = nullptr; });
+    if (removeResult != HookInstallResult::Installed) {
+        Log("G3O", "ShadowCasterOptimizer: RemoveShadowCaster install failed (create=%d, enable=%d, remove=%d).",
+            removeCreateStatus, removeEnableStatus, removeRemoveStatus);
+        MH_DisableHook(s_targetAddShadowCaster);
+        MH_RemoveHook(s_targetAddShadowCaster);
+        s_targetAddShadowCaster = nullptr;
+        fpAddShadowCasterOrig = nullptr;
         return;
     }
 
-    if (MH_CreateHook(pRemove, reinterpret_cast<LPVOID>(Hooked_RemoveShadowCaster),
-                      reinterpret_cast<LPVOID*>(&fpRemoveShadowCasterOrig)) == MH_OK &&
-        MH_EnableHook(pRemove) == MH_OK) {
-        s_targetRemoveShadowCaster = pRemove;
-        Log("G3O", "ShadowCasterOptimizer: Hooked AddShadowCaster (0x%p) & RemoveShadowCaster (0x%p) [O(1) Swap-and-Pop active].",
-            pAdd, pRemove);
-    } else {
-        Log("G3O", "ShadowCasterOptimizer: Failed to hook RemoveShadowCaster.");
-        if (s_targetAddShadowCaster) {
-            MH_DisableHook(s_targetAddShadowCaster);
-            s_targetAddShadowCaster = nullptr;
-        }
-    }
+    s_targetRemoveShadowCaster = pRemove;
+    Log("G3O", "ShadowCasterOptimizer: Hooked AddShadowCaster (0x%p) & RemoveShadowCaster (0x%p) [O(1) Swap-and-Pop active].",
+        pAdd, pRemove);
 }
 
 void ShutdownShadowCasterOptimizer() {
     if (s_targetAddShadowCaster) {
         MH_DisableHook(s_targetAddShadowCaster);
+        MH_RemoveHook(s_targetAddShadowCaster);
         s_targetAddShadowCaster = nullptr;
+        fpAddShadowCasterOrig = nullptr;
     }
     if (s_targetRemoveShadowCaster) {
         MH_DisableHook(s_targetRemoveShadowCaster);
+        MH_RemoveHook(s_targetRemoveShadowCaster);
         s_targetRemoveShadowCaster = nullptr;
+        fpRemoveShadowCasterOrig = nullptr;
     }
     ShadowIndexMap::Clear(s_shadowTable);
 }

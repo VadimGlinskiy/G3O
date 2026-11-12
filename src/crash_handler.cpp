@@ -8,6 +8,7 @@
 #include "g3o_build_info.h"
 #include "blackbox_recorder.h"
 #include "pak_resolver.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <dbghelp.h>
 #include <psapi.h>
@@ -61,8 +62,72 @@ typedef LPTOP_LEVEL_EXCEPTION_FILTER (WINAPI *SetUnhandledExceptionFilter_t)(LPT
 static SetUnhandledExceptionFilter_t s_origSetUnhandledExceptionFilter = nullptr;
 static LPTOP_LEVEL_EXCEPTION_FILTER s_previousFilter = nullptr;
 static PVOID s_vehHandle = nullptr;
+static void* s_targetSetUnhandledExceptionFilter = nullptr;
+static void* s_targetCallFatalError1 = nullptr;
+static void* s_targetCallFatalError2 = nullptr;
+static void* s_targetCallExceptionError = nullptr;
+
 typedef BOOL (WINAPI *SymRefreshModuleList_t)(HANDLE hProcess);
 static SymRefreshModuleList_t s_symRefreshModuleList = nullptr;
+
+static bool InstallCrashHook(void* target, LPVOID detour, LPVOID* original,
+                             void** targetSlot, const char* hookName) {
+    if (!original || !targetSlot) return false;
+    if (!target) {
+        *original = nullptr;
+        Log("Crash", "%s hook target not found.", hookName);
+        return false;
+    }
+    if (*targetSlot) {
+        if (*targetSlot == target) return true;
+        Log("Crash", "%s hook already has a different target; installation skipped.", hookName);
+        return false;
+    }
+
+    MH_STATUS createStatus = MH_OK;
+    MH_STATUS enableStatus = MH_OK;
+    MH_STATUS removeStatus = MH_OK;
+    const HookInstallResult result = InstallHookSafely(
+        [&] {
+            createStatus = MH_CreateHook(target, detour, original);
+            return createStatus == MH_OK;
+        },
+        [&] {
+            enableStatus = MH_EnableHook(target);
+            return enableStatus == MH_OK;
+        },
+        [&] { removeStatus = MH_RemoveHook(target); },
+        [&] { *original = nullptr; });
+
+    if (result == HookInstallResult::CreateFailed) {
+        Log("Crash", "%s hook creation failed (status=%d).",
+            hookName, static_cast<int>(createStatus));
+        return false;
+    }
+    if (result == HookInstallResult::EnableFailed) {
+        Log("Crash", "%s hook enable failed (status=%d).",
+            hookName, static_cast<int>(enableStatus));
+        if (removeStatus != MH_OK) {
+            Log("Crash", "%s hook cleanup failed (status=%d).",
+                hookName, static_cast<int>(removeStatus));
+        }
+        return false;
+    }
+
+    *targetSlot = target;
+    Log("Crash", "%s hook installed at 0x%p.", hookName, target);
+    return true;
+}
+
+static void DisableCrashHook(void*& targetSlot, const char* hookName) {
+    if (!targetSlot) return;
+    const MH_STATUS status = MH_DisableHook(targetSlot);
+    if (status != MH_OK) {
+        Log("Crash", "%s hook disable failed (status=%d).",
+            hookName, static_cast<int>(status));
+    }
+    targetSlot = nullptr;
+}
 
 static volatile LONG s_dbgHelpActive = 0;
 static HANDLE s_symbolProcess = nullptr;
@@ -1248,10 +1313,9 @@ void InitializeCrashHandler() {
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
         void* pSUEF = (void*)GetProcAddress(hKernel32, "SetUnhandledExceptionFilter");
-        if (pSUEF) {
-            MH_CreateHook(pSUEF, (void*)&HookedSetUnhandledExceptionFilter, (void**)&s_origSetUnhandledExceptionFilter);
-            MH_EnableHook(pSUEF);
-        }
+        InstallCrashHook(pSUEF, (LPVOID)&HookedSetUnhandledExceptionFilter,
+            (LPVOID*)&s_origSetUnhandledExceptionFilter, &s_targetSetUnhandledExceptionFilter,
+            "SetUnhandledExceptionFilter");
     }
 
     // 3. Register VEH as secondary watchdog
@@ -1265,9 +1329,11 @@ void ShutdownCrashHandler() {
         RemoveVectoredExceptionHandler(s_vehHandle);
         s_vehHandle = nullptr;
     }
-    if (s_origSetUnhandledExceptionFilter) {
-        MH_DisableHook((void*)SetUnhandledExceptionFilter);
-    }
+    DisableCrashHook(s_targetSetUnhandledExceptionFilter, "SetUnhandledExceptionFilter");
+    DisableCrashHook(s_targetCallFatalError1, "CallFatalError overload 1");
+    DisableCrashHook(s_targetCallFatalError2, "CallFatalError overload 2");
+    DisableCrashHook(s_targetCallExceptionError, "CallExceptionError");
+    s_origSetUnhandledExceptionFilter = nullptr;
     // The dump worker is process-lifetime; joining it from DllMain can deadlock.
     ShutdownSymbolHandler();
 }
@@ -1327,25 +1393,22 @@ void HookEngineFatalErrors() {
     if (!hSharedBase) return;
 
     void* pFatal1 = (void*)GetProcAddress(hSharedBase, "?CallFatalError@bCErrorAdmin@@QAEXPBD0H@Z");
-    if (pFatal1) {
-        MH_CreateHook(pFatal1, (void*)&HookedCallFatalError1, (void**)&s_origCallFatalError1);
-        MH_EnableHook(pFatal1);
-    }
+    const bool fatal1Installed = InstallCrashHook(pFatal1, (LPVOID)&HookedCallFatalError1,
+        (LPVOID*)&s_origCallFatalError1, &s_targetCallFatalError1, "CallFatalError overload 1");
 
     void* pFatal2 = (void*)GetProcAddress(hSharedBase, "?CallFatalError@bCErrorAdmin@@QAEXPBD00H@Z");
-    if (pFatal2) {
-        MH_CreateHook(pFatal2, (void*)&HookedCallFatalError2, (void**)&s_origCallFatalError2);
-        MH_EnableHook(pFatal2);
-    }
+    const bool fatal2Installed = InstallCrashHook(pFatal2, (LPVOID)&HookedCallFatalError2,
+        (LPVOID*)&s_origCallFatalError2, &s_targetCallFatalError2, "CallFatalError overload 2");
 
     void* pExceptionError = (void*)GetProcAddress(hSharedBase, "?CallExceptionError@bCErrorAdmin@@QAEHPAUbSException_Pointers@@@Z");
-    if (pExceptionError) {
-        MH_CreateHook(pExceptionError, (void*)&HookedCallExceptionError, (void**)&s_origCallExceptionError);
-        MH_EnableHook(pExceptionError);
-        Log("G3O", "Guru interceptor hook active (?CallExceptionError@bCErrorAdmin).");
-    }
+    const bool exceptionErrorInstalled = InstallCrashHook(pExceptionError,
+        (LPVOID)&HookedCallExceptionError, (LPVOID*)&s_origCallExceptionError,
+        &s_targetCallExceptionError, "CallExceptionError");
 
-    Log("G3O", "Engine Fatal Error and Guru hooks installed in SharedBase.dll");
+    Log("G3O", "Engine error hooks in SharedBase.dll: FatalError overloads %s/%s, ExceptionError %s.",
+        fatal1Installed ? "installed" : "unavailable",
+        fatal2Installed ? "installed" : "unavailable",
+        exceptionErrorInstalled ? "installed" : "unavailable");
 }
 
 static void CaptureFatalCaller(FixedTextBuffer& callerFunction, FixedTextBuffer& stackTrace) {

@@ -8,7 +8,6 @@ namespace G3O {
 struct Config {
     // [General]
     bool enableG3O = true;
-    bool showWatermark = true;
     bool loadG3SEPlugins = true;
     bool fixVulkanLayerConflicts = true;
 
@@ -36,6 +35,7 @@ struct Config {
     bool enableSharedBaseOptimizations = true;
     bool enableEntitySearchOptimizer = true;
     bool enableFastPakDecompressor = true;
+    bool enableLayerRingArena = false;
     bool enablePropertyCache = true;
     bool enablePakPrefetch = true;
     bool enableFrustumDatabaseOptimizer = true;
@@ -44,22 +44,34 @@ struct Config {
     bool enableSceneNodeOptimizer = true;
     bool enableShadowOptimizer = true;
     bool enableClassFactoryOptimizer = true;
-    bool enablePVSPrefetchOptimizer = true;
+    bool enablePVSPrefetchOptimizer = false;
+    bool enableAdaptiveROI = true;
+    float roiBootRadius = 3600.0f;
     float pvsBootRadius = 3800.0f;
     float pvsRedundantDistance = 200.0f;
     uint32_t pvsRampUpCalls = 24;
-    bool enableQuestLoadOptimizer = true;
+
     bool enableInfoManagerOptimizer = true;
-    bool enableLayerRingArena = true;
-    bool enableFlatEntityIndex = true;
-    bool enableFlatEntityShadowVerify = false;
+    bool enableSessionStartOptimizer = true;
+    uint32_t sessionStartSleepMs = 1;
+    bool enableDynamicROI = false;
+    float baseROI = 0.0f;
+    float aimingROI = 7500.0f;
 
     // Fail-open if device threading or state-block hooks cannot be verified.
     bool enableD3D9StateFilter = true;
     bool enableFastTextureLoader = true;
     bool enableVegetationOptimizer = true;
+    bool enableAdaptiveTreeShadows = true;
     float treeShadowDistance = 6500.0f;
     float vegetationGridRangeClamp = 7500.0f;
+    bool enableSelectiveCulling = true;
+    float clutterCullThreshold = 0.008f;
+    float importantCullThreshold = 0.002f;
+    bool enableAtmosphericFogControl = true;
+    float fogDistanceMultiplier = 2.5f;
+    float fogEndMinDistance = 250000.0f;
+    bool preserveUnderwaterFog = true;
     bool enableHighPrecisionTimer = true;
     bool enableHighProcessPriority = true;
     bool enableCPUTopologyAffinity = true;
@@ -71,11 +83,11 @@ struct Config {
     int pakPrefetchWorkers = 0;        // 0 = Auto-detect based on CPU cores (up to 6)
 
     // [Logging]
-    bool enableDiagnosticLog = true;
-    bool interceptOutputDebugString = true;
-    bool enableProfiler = true;
-    bool enableSavegameAudit = true;
-    bool enableLayerAudit = true;      // Deep per-entity/property QPC hooks (19 hooks, ~0.2-0.3s overhead)
+    bool enableDiagnosticLog = false;
+    bool interceptOutputDebugString = false;
+    bool enableProfiler = false;
+    bool enableSavegameAudit = false;
+    bool enableLayerAudit = false;     // Deep per-entity/property QPC hooks (19 hooks, ~0.2-0.3s overhead)
 
     std::string iniFilePath;
 };

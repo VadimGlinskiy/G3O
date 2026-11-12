@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(minidump_worker_test VERSION 1.6.1 LANGUAGES CXX)
+project(minidump_worker_test VERSION 1.7.0 LANGUAGES CXX)
 
 configure_file(../../src/g3o_build_info.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/g3o_build_info.h @ONLY)

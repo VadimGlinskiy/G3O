@@ -1,6 +1,7 @@
 #include "class_factory_optimizer.h"
 #include "class_factory_policy.h"
 #include "diagnostic_logger.h"
+#include "hook_install_policy.h"
 #include <windows.h>
 #include <atomic>
 #include "MinHook.h"
@@ -144,16 +145,28 @@ bool InitializeClassFactoryOptimizer() {
         return false;
     }
 
-    MH_STATUS status = MH_CreateHook(pTarget, reinterpret_cast<void*>(&Hook_ClassMapFindNode),
-                                     reinterpret_cast<void**>(&s_pfnOriginalClassMapFindNode));
-    if (status != MH_OK) {
-        Log("ClassFactory", "MH_CreateHook failed with status %d", status);
-        return false;
-    }
-
-    status = MH_EnableHook(pTarget);
-    if (status != MH_OK) {
-        Log("ClassFactory", "MH_EnableHook failed with status %d", status);
+    MH_STATUS createStatus = MH_OK;
+    MH_STATUS enableStatus = MH_OK;
+    MH_STATUS removeStatus = MH_OK;
+    const HookInstallResult result = InstallHookSafely(
+        [&] {
+            createStatus = MH_CreateHook(pTarget, reinterpret_cast<void*>(&Hook_ClassMapFindNode),
+                                         reinterpret_cast<void**>(&s_pfnOriginalClassMapFindNode));
+            return createStatus == MH_OK;
+        },
+        [&] {
+            enableStatus = MH_EnableHook(pTarget);
+            return enableStatus == MH_OK;
+        },
+        [&] { removeStatus = MH_RemoveHook(pTarget); },
+        [&] { s_pfnOriginalClassMapFindNode = nullptr; });
+    if (result != HookInstallResult::Installed) {
+        if (result == HookInstallResult::CreateFailed) {
+            Log("ClassFactory", "MH_CreateHook failed with status %d", createStatus);
+        } else {
+            Log("ClassFactory", "MH_EnableHook failed with status %d; MH_RemoveHook returned %d",
+                enableStatus, removeStatus);
+        }
         return false;
     }
 
@@ -170,6 +183,7 @@ void ShutdownClassFactoryOptimizer() {
         void* pTarget = reinterpret_cast<void*>(pBase + 0x00057FB0);
         MH_DisableHook(pTarget);
         MH_RemoveHook(pTarget);
+        s_pfnOriginalClassMapFindNode = nullptr;
     }
 
     s_bInitialized = false;

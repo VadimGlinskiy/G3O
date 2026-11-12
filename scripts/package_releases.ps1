@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "v1.6.1"
+    [string]$Version = "v1.7.0"
 )
 
 # ==============================================================================
@@ -45,7 +45,6 @@ GOTHIC 3 OPTIMA - CORE ($Version)
 FEATURES INCLUDED:
 - System dinput8.dll proxy.
 
-- G3O version label in the main menu.
 - Optional legacy G3SE plugin discovery when its DLL is installed.
 
 Back up an existing game-folder dinput8.dll before installing this build.

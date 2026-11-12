@@ -103,13 +103,14 @@ static inline const SClassNodeCacheEntry* InsertIntoNodeCache(
 
     if (targetIdx == UINT32_MAX) return nullptr;
 
-    char* pszSaved = nullptr;
-    if (stringArena && (arenaOffset + u32Len + 1 <= arenaCapacity)) {
-        pszSaved = &stringArena[arenaOffset];
-        std::memcpy(pszSaved, pText, u32Len);
-        pszSaved[u32Len] = '\0';
-        arenaOffset += (u32Len + 1);
+    if (!stringArena || arenaOffset >= arenaCapacity || u32Len >= arenaCapacity - arenaOffset) {
+        return nullptr;
     }
+
+    char* pszSaved = &stringArena[arenaOffset];
+    std::memcpy(pszSaved, pText, u32Len);
+    pszSaved[u32Len] = '\0';
+    arenaOffset += (u32Len + 1);
 
     SClassNodeCacheEntry& entry = table[targetIdx];
     entry.u32Hash   = u32Hash;

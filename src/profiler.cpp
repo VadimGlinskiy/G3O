@@ -6,6 +6,7 @@
 #include "timestamped_path.h"
 #include "g3o_output_path.h"
 #include "profiler_sample_policy.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <d3d9.h>
 #include <tlhelp32.h>
@@ -55,6 +56,7 @@ static volatile LONG s_sampleCount = 0;
 // ---- Frame timing (IDirect3DDevice9::Present / eCDX9Device::SwapScreen) -----
 typedef HRESULT (STDMETHODCALLTYPE* Present_t)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
 static Present_t Real_Present = NULL;
+static void* s_targetPresent = nullptr;
 
 void ProfilerRecordPresentedFrame() {
     InvalidateD3D9StateCaches();
@@ -101,6 +103,8 @@ static HRESULT STDMETHODCALLTYPE Hooked_Present(IDirect3DDevice9* dev, const REC
 typedef int (__thiscall* SwapScreen_t)(void* pThis, HWND hWnd, const void* pSrcRect, const void* pDestRect);
 static SwapScreen_t Real_SwapScreen = NULL;
 static SwapScreen_t Real_MixerSwapScreen = NULL;
+static void* s_targetSwapScreen = nullptr;
+static void* s_targetMixerSwapScreen = nullptr;
 
 static int __fastcall Hooked_SwapScreen(void* pThis, void* /*edx*/, HWND hWnd, const void* pSrcRect, const void* pDestRect) {
     if (pThis) {
@@ -125,10 +129,20 @@ static int __fastcall Hooked_MixerSwapScreen(void* pThis, void* /*edx*/, HWND hW
 }
 
 void ProfilerHookPresent(void** vtbl) {
-    if (!vtbl || Real_Present) return;
-    if (MH_CreateHook(vtbl[17], (LPVOID)Hooked_Present, (LPVOID*)&Real_Present) == MH_OK) {
-        MH_EnableHook(vtbl[17]);
+    if (!vtbl || !vtbl[17] || s_targetPresent) return;
+    void* target = vtbl[17];
+    MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+    const HookInstallResult result = InstallHookSafely(
+        [&] { createStatus = MH_CreateHook(target, (LPVOID)Hooked_Present, (LPVOID*)&Real_Present); return createStatus == MH_OK; },
+        [&] { enableStatus = MH_EnableHook(target); return enableStatus == MH_OK; },
+        [&] { removeStatus = MH_RemoveHook(target); },
+        [&] { Real_Present = nullptr; });
+    if (result == HookInstallResult::Installed) {
+        s_targetPresent = target;
         Log("G3O", "Profiler: Present hooked for frame timing.");
+    } else {
+        Log("G3O", "Profiler: Present hook failed (create=%d, enable=%d, remove=%d).",
+            createStatus, enableStatus, removeStatus);
     }
 }
 
@@ -347,14 +361,36 @@ void InitializeProfiler() {
 
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
     void* pSwap = hEngine ? (void*)GetProcAddress(hEngine, "?SwapScreen@eCDX9Device@@UAE?AW4bEResult@@PAUHWND__@@PBVbCRect@@1@Z") : NULL;
-    if (pSwap && MH_CreateHook(pSwap, (LPVOID)Hooked_SwapScreen, (LPVOID*)&Real_SwapScreen) == MH_OK) {
-        MH_EnableHook(pSwap);
-        Log("G3O", "Profiler: Hooked Engine.dll!eCDX9Device::SwapScreen for frame timing.");
+    if (pSwap) {
+        MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+        const HookInstallResult result = InstallHookSafely(
+            [&] { createStatus = MH_CreateHook(pSwap, (LPVOID)Hooked_SwapScreen, (LPVOID*)&Real_SwapScreen); return createStatus == MH_OK; },
+            [&] { enableStatus = MH_EnableHook(pSwap); return enableStatus == MH_OK; },
+            [&] { removeStatus = MH_RemoveHook(pSwap); },
+            [&] { Real_SwapScreen = nullptr; });
+        if (result == HookInstallResult::Installed) {
+            s_targetSwapScreen = pSwap;
+            Log("G3O", "Profiler: Hooked Engine.dll!eCDX9Device::SwapScreen for frame timing.");
+        } else {
+            Log("G3O", "Profiler: eCDX9Device::SwapScreen hook failed (create=%d, enable=%d, remove=%d).",
+                createStatus, enableStatus, removeStatus);
+        }
     }
     void* pMixerSwap = hEngine ? (void*)GetProcAddress(hEngine, "?SwapScreen@eCGfxMixerAdmin@@QAE?AW4bEResult@@QAUHWND__@@PBVbCRect@@1@Z") : NULL;
-    if (pMixerSwap && MH_CreateHook(pMixerSwap, (LPVOID)Hooked_MixerSwapScreen, (LPVOID*)&Real_MixerSwapScreen) == MH_OK) {
-        MH_EnableHook(pMixerSwap);
-        Log("G3O", "Profiler: Hooked Engine.dll!eCGfxMixerAdmin::SwapScreen for frame timing.");
+    if (pMixerSwap) {
+        MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+        const HookInstallResult result = InstallHookSafely(
+            [&] { createStatus = MH_CreateHook(pMixerSwap, (LPVOID)Hooked_MixerSwapScreen, (LPVOID*)&Real_MixerSwapScreen); return createStatus == MH_OK; },
+            [&] { enableStatus = MH_EnableHook(pMixerSwap); return enableStatus == MH_OK; },
+            [&] { removeStatus = MH_RemoveHook(pMixerSwap); },
+            [&] { Real_MixerSwapScreen = nullptr; });
+        if (result == HookInstallResult::Installed) {
+            s_targetMixerSwapScreen = pMixerSwap;
+            Log("G3O", "Profiler: Hooked Engine.dll!eCGfxMixerAdmin::SwapScreen for frame timing.");
+        } else {
+            Log("G3O", "Profiler: eCGfxMixerAdmin::SwapScreen hook failed (create=%d, enable=%d, remove=%d).",
+                createStatus, enableStatus, removeStatus);
+        }
     }
 
     CreateThread(NULL, 0, ReporterThread, NULL, 0, NULL);
@@ -363,6 +399,24 @@ void InitializeProfiler() {
 }
 
 void ShutdownProfiler() {
+    if (s_targetPresent) {
+        MH_DisableHook(s_targetPresent);
+        MH_RemoveHook(s_targetPresent);
+        s_targetPresent = nullptr;
+        Real_Present = nullptr;
+    }
+    if (s_targetSwapScreen) {
+        MH_DisableHook(s_targetSwapScreen);
+        MH_RemoveHook(s_targetSwapScreen);
+        s_targetSwapScreen = nullptr;
+        Real_SwapScreen = nullptr;
+    }
+    if (s_targetMixerSwapScreen) {
+        MH_DisableHook(s_targetMixerSwapScreen);
+        MH_RemoveHook(s_targetMixerSwapScreen);
+        s_targetMixerSwapScreen = nullptr;
+        Real_MixerSwapScreen = nullptr;
+    }
     s_stop = true;
     ReportHotspots();
     std::vector<LONG> allFrames;

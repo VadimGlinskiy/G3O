@@ -2,6 +2,7 @@
 #include "diagnostic_logger.h"
 #include "config_manager.h"
 #include "savegame_profiler_policy.h"
+#include "hook_install_policy.h"
 #include "layer_audit_metrics.h"
 #include "timestamped_path.h"
 #include "g3o_output_path.h"
@@ -14,13 +15,12 @@
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
 #include "pvs_prefetch_optimizer.h"
-#include "quest_load_optimizer.h"
+
 #include "info_manager_optimizer.h"
-#include "layer_ring_arena.h"
-#include "scoped_flat_entity_index.h"
 #include "pak_tracer.h"
 #include "pak_read_at.h"
 #include "profiler.h"
+#include "layer_ring_arena.h"
 #include <minhook.h>
 #include <windows.h>
 #include <stdio.h>
@@ -1066,8 +1066,7 @@ static void LogLoadReport(double totalSec) {
         ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
     Log("G3O", "  - PVS Prefetch Streaming:         %u sync clamped (to %.0f), %u redundant skipped, %u ramped",
         PVSOptimizer_GetClampedCalls(), static_cast<double>(config.pvsBootRadius), PVSOptimizer_GetSkippedCalls(), PVSOptimizer_GetRampedCalls());
-    Log("G3O", "  - Quest/Info Checks Suppressed:   %u quest checks, %u info checks",
-        QuestLoadOptimizer_GetSuppressedQuestChecks(), QuestLoadOptimizer_GetSuppressedInfoChecks());
+
     Log("G3O", "  - Info Manager Dialog Cache:      %llu hits, %llu misses, %u rebuilds (cached %u dialogs, %u expansions)",
         InfoManagerOptimizer_GetHits(), InfoManagerOptimizer_GetMisses(),
         InfoManagerOptimizer_GetRebuilds(), InfoManagerOptimizer_GetIndexedCount(),
@@ -1189,8 +1188,7 @@ static void LogLoadReport(double totalSec) {
             ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
         fprintf(fp, "  - PVS Prefetch Streaming:         %u sync clamped (to %.0f), %u redundant skipped, %u ramped\n",
             PVSOptimizer_GetClampedCalls(), static_cast<double>(config.pvsBootRadius), PVSOptimizer_GetSkippedCalls(), PVSOptimizer_GetRampedCalls());
-        fprintf(fp, "  - Quest/Info Checks Suppressed:   %u quest checks, %u info checks\n",
-            QuestLoadOptimizer_GetSuppressedQuestChecks(), QuestLoadOptimizer_GetSuppressedInfoChecks());
+
         fprintf(fp, "  - Info Manager Dialog Cache:      %llu hits, %llu misses, %u rebuilds (cached %u dialogs, %u expansions)\n",
             InfoManagerOptimizer_GetHits(), InfoManagerOptimizer_GetMisses(),
             InfoManagerOptimizer_GetRebuilds(), InfoManagerOptimizer_GetIndexedCount(),
@@ -1645,12 +1643,23 @@ static int __fastcall Hooked_SectorDoLoadData(void* pSector, void* /*edx*/, void
 }
 
 static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
+    const Config& config = GetConfig();
+    const bool layerArenaEnabled = config.enableLayerRingArena && config.enableFastPakDecompressor;
+    const char* sectorNameForCapture = nullptr;
+    if (layerArenaEnabled) {
+        sectorNameForCapture = SafeGetSectorName(pSector);
+        if (sectorNameForCapture && std::strstr(sectorNameForCapture, "RB_Mod")) {
+            LayerRingArena_OnSectorStart(sectorNameForCapture);
+        } else {
+            LayerRingArena_OnSectorEnd();
+        }
+    }
     if (!s_isLoadActive) {
         Real_SectorOnActivate(pSector);
         return;
     }
 
-    const char* sectorNameForCapture = SafeGetSectorName(pSector);
+    if (!sectorNameForCapture) sectorNameForCapture = SafeGetSectorName(pSector);
     const bool isSysDynSector = IsTelemetryActive()
         && sectorNameForCapture
         && std::strncmp(sectorNameForCapture, "SysDyn_", sizeof("SysDyn_") - 1) == 0;
@@ -1676,9 +1685,7 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     }
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
-    LayerRingArena_OnSectorStart(sectorNameForCapture);
     Real_SectorOnActivate(pSector);
-    LayerRingArena_OnSectorEnd();
     s_collectSysDynReadDispatch = previousSysDynDispatch;
     s_isSysDynSectorActive = previousSysDynSectorActive;
     if (s_sampleThread) s_samplePhase = previousSamplePhase;
@@ -1820,9 +1827,7 @@ static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const vo
     LONG read0 = s_readCalls; LONG64 readBytes0 = s_readBytes;
     QueryPerformanceCounter(&t0);
 
-    ScopedFlatEntityIndex_OnLoadStart(pThis);
     bool r = Real_LoadGameWorld(pThis, pSaveName, isNewGame);
-    ScopedFlatEntityIndex_OnLoadEnd();
 
     QueryPerformanceCounter(&t1);
     SnapshotPhase(s_statLoadGameWorld, t0, t1, pak0, pakOut0, read0, readBytes0);
@@ -2003,34 +2008,60 @@ static void* s_targetSessionStart = nullptr;
 static void* s_targetWorldActivate = nullptr;
 static void* s_targetBuildStatic = nullptr;
 
-static bool InstallPvsMetricHook(
-    HMODULE module, const char* exportedName, LPVOID detour, LPVOID* original,
-    void** targetSlot, const char* methodName) {
-    void* target = (void*)GetProcAddress(module, exportedName);
+static bool InstallSavegameHook(
+    void* target, LPVOID detour, LPVOID* original, void** targetSlot, const char* methodName) {
+    if (!original || !targetSlot) return false;
     if (!target) {
-        Log("G3O", "Savegame Profiler: %s export not found; direct metric unavailable.", methodName);
+        *original = nullptr;
+        Log("G3O", "Savegame Profiler: %s target not found; hook unavailable.", methodName);
+        return false;
+    }
+    if (*targetSlot) {
+        if (*targetSlot == target) return true;
+        Log("G3O", "Savegame Profiler: %s hook already has a different target; installation skipped.", methodName);
         return false;
     }
 
-    const auto createStatus = MH_CreateHook(target, detour, original);
-    if (createStatus != MH_OK) {
+    MH_STATUS createStatus = MH_OK;
+    MH_STATUS enableStatus = MH_OK;
+    MH_STATUS removeStatus = MH_OK;
+    const HookInstallResult result = InstallHookSafely(
+        [&] {
+            createStatus = MH_CreateHook(target, detour, original);
+            return createStatus == MH_OK;
+        },
+        [&] {
+            enableStatus = MH_EnableHook(target);
+            return enableStatus == MH_OK;
+        },
+        [&] { removeStatus = MH_RemoveHook(target); },
+        [&] { *original = nullptr; });
+
+    if (result == HookInstallResult::CreateFailed) {
         Log("G3O", "Savegame Profiler: %s hook creation failed (status=%d).",
             methodName, static_cast<int>(createStatus));
         return false;
     }
-
-    const auto enableStatus = MH_EnableHook(target);
-    if (enableStatus != MH_OK) {
-        MH_RemoveHook(target);
-        *original = nullptr;
+    if (result == HookInstallResult::EnableFailed) {
         Log("G3O", "Savegame Profiler: %s hook enable failed (status=%d).",
             methodName, static_cast<int>(enableStatus));
+        if (removeStatus != MH_OK) {
+            Log("G3O", "Savegame Profiler: %s failed hook cleanup (status=%d).",
+                methodName, static_cast<int>(removeStatus));
+        }
         return false;
     }
 
     *targetSlot = target;
     Log("G3O", "Savegame Profiler: Hooked %s (0x%p)", methodName, target);
     return true;
+}
+
+static bool InstallPvsMetricHook(
+    HMODULE module, const char* exportedName, LPVOID detour, LPVOID* original,
+    void** targetSlot, const char* methodName) {
+    void* target = module ? reinterpret_cast<void*>(GetProcAddress(module, exportedName)) : nullptr;
+    return InstallSavegameHook(target, detour, original, targetSlot, methodName);
 }
 
 bool InitializeSavegameProfiler() {
@@ -2056,112 +2087,93 @@ bool InitializeSavegameProfiler() {
         if (hK32) {
             void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
             if (pRead) {
-                s_targetReadFile = pRead;
-                MH_CreateHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile);
-                MH_EnableHook(pRead);
+                InstallSavegameHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile,
+                    &s_targetReadFile, "kernel32!ReadFile");
             }
         }
         HMODULE hGame = GetModuleHandleA("Game.dll");
         if (hGame) {
             void* pHeader = (void*)GetProcAddress(hGame, "?GetSaveGameHeader@gCWorld@@QAE?AW4bEResult@@ABVbCString@@AAVgCSaveGameHeader@1@@Z");
             if (pHeader && !s_targetHeader) {
-                s_targetHeader = pHeader;
-                MH_CreateHook(pHeader, (LPVOID)Hooked_GetSaveGameHeader, (LPVOID*)&Real_GetSaveGameHeader);
-                MH_EnableHook(pHeader);
+                InstallSavegameHook(pHeader, (LPVOID)Hooked_GetSaveGameHeader, (LPVOID*)&Real_GetSaveGameHeader,
+                    &s_targetHeader, "gCWorld::GetSaveGameHeader");
             }
             void* pWorld = (void*)GetProcAddress(hGame, "?LoadGameWorld@gCWorld@@QAE_NABVbCString@@_N@Z");
             if (pWorld && !s_targetLoadGameWorld) {
-                s_targetLoadGameWorld = pWorld;
-                MH_CreateHook(pWorld, (LPVOID)Hooked_LoadGameWorld, (LPVOID*)&Real_LoadGameWorld);
-                MH_EnableHook(pWorld);
-                Log("G3O", "Savegame Profiler: Hooked gCWorld::LoadGameWorld (0x%p)", pWorld);
+                InstallSavegameHook(pWorld, (LPVOID)Hooked_LoadGameWorld, (LPVOID*)&Real_LoadGameWorld,
+                    &s_targetLoadGameWorld, "gCWorld::LoadGameWorld");
             }
             void* pGoto = (void*)GetProcAddress(hGame, "?GotoLoadedPosition@gCSession@@QAEXPAVeCEntity@@_N@Z");
             if (pGoto && !s_targetGotoPos) {
-                s_targetGotoPos = pGoto;
-                MH_CreateHook(pGoto, (LPVOID)Hooked_GotoLoadedPosition, (LPVOID*)&Real_GotoLoadedPosition);
-                MH_EnableHook(pGoto);
-                Log("G3O", "Savegame Profiler: Hooked gCSession::GotoLoadedPosition (0x%p)", pGoto);
+                InstallSavegameHook(pGoto, (LPVOID)Hooked_GotoLoadedPosition, (LPVOID*)&Real_GotoLoadedPosition,
+                    &s_targetGotoPos, "gCSession::GotoLoadedPosition");
             }
         }
     }
 
     HMODULE hGame = GetModuleHandleA("Game.dll");
     if (hGame) {
-        void* pHUD = FindHUDLoadGameTarget(hGame);
-        if (pHUD) {
-            s_targetHUDLoadGame = pHUD;
-            MH_CreateHook(pHUD, (LPVOID)Hooked_HUDLoadGame, (LPVOID*)&Real_HUDLoadGame);
-            MH_EnableHook(pHUD);
-            Log("G3O", "Savegame Profiler: Hooked gCHUDFileManager::LoadGame (0x%p)", pHUD);
+        if (cfg.enableSavegameAudit || cfg.enableProfiler || ShouldTracePakPrefetch(cfg)) {
+            void* pHUD = FindHUDLoadGameTarget(hGame);
+            if (pHUD) {
+                InstallSavegameHook(pHUD, (LPVOID)Hooked_HUDLoadGame, (LPVOID*)&Real_HUDLoadGame,
+                    &s_targetHUDLoadGame, "gCHUDFileManager::LoadGame");
+            }
         }
 
         if (cfg.enableSavegameAudit) {
         void* pHeader = (void*)GetProcAddress(hGame, "?GetSaveGameHeader@gCWorld@@QAE?AW4bEResult@@ABVbCString@@AAVgCSaveGameHeader@1@@Z");
         if (pHeader && !s_targetHeader) {
-            s_targetHeader = pHeader;
-            MH_CreateHook(pHeader, (LPVOID)Hooked_GetSaveGameHeader, (LPVOID*)&Real_GetSaveGameHeader);
-            MH_EnableHook(pHeader);
+            InstallSavegameHook(pHeader, (LPVOID)Hooked_GetSaveGameHeader, (LPVOID*)&Real_GetSaveGameHeader,
+                &s_targetHeader, "gCWorld::GetSaveGameHeader");
         }
 
         void* pStop = (void*)GetProcAddress(hGame, "?Stop@gCSession@@QAEXXZ");
         if (pStop) {
-            s_targetSessionStop = pStop;
-            MH_CreateHook(pStop, (LPVOID)Hooked_SessionStop, (LPVOID*)&Real_SessionStop);
-            MH_EnableHook(pStop);
+            InstallSavegameHook(pStop, (LPVOID)Hooked_SessionStop, (LPVOID*)&Real_SessionStop,
+                &s_targetSessionStop, "gCSession::Stop");
         }
 
         void* pClear = (void*)GetProcAddress(hGame, "?ClearAllEntities@gCGUIManager@@QAE_NXZ");
         if (pClear) {
-            s_targetClearEntities = pClear;
-            MH_CreateHook(pClear, (LPVOID)Hooked_ClearAllEntities, (LPVOID*)&Real_ClearAllEntities);
-            MH_EnableHook(pClear);
+            InstallSavegameHook(pClear, (LPVOID)Hooked_ClearAllEntities, (LPVOID*)&Real_ClearAllEntities,
+                &s_targetClearEntities, "gCGUIManager::ClearAllEntities");
         }
 
         void* pUnload = (void*)GetProcAddress(hGame, "?UnloadCaches@gCWorld@@QAEXXZ");
         if (pUnload) {
-            s_targetUnloadCaches = pUnload;
-            MH_CreateHook(pUnload, (LPVOID)Hooked_UnloadCaches, (LPVOID*)&Real_UnloadCaches);
-            MH_EnableHook(pUnload);
+            InstallSavegameHook(pUnload, (LPVOID)Hooked_UnloadCaches, (LPVOID*)&Real_UnloadCaches,
+                &s_targetUnloadCaches, "gCWorld::UnloadCaches");
         }
 
         void* pWorld = (void*)GetProcAddress(hGame, "?LoadGameWorld@gCWorld@@QAE_NABVbCString@@_N@Z");
         if (pWorld && !s_targetLoadGameWorld) {
-            s_targetLoadGameWorld = pWorld;
-            MH_CreateHook(pWorld, (LPVOID)Hooked_LoadGameWorld, (LPVOID*)&Real_LoadGameWorld);
-            MH_EnableHook(pWorld);
-            Log("G3O", "Savegame Profiler: Hooked gCWorld::LoadGameWorld (0x%p)", pWorld);
+            InstallSavegameHook(pWorld, (LPVOID)Hooked_LoadGameWorld, (LPVOID*)&Real_LoadGameWorld,
+                &s_targetLoadGameWorld, "gCWorld::LoadGameWorld");
         }
 
         void* pGoto = (void*)GetProcAddress(hGame, "?GotoLoadedPosition@gCSession@@QAEXPAVeCEntity@@_N@Z");
         if (pGoto && !s_targetGotoPos) {
-            s_targetGotoPos = pGoto;
-            MH_CreateHook(pGoto, (LPVOID)Hooked_GotoLoadedPosition, (LPVOID*)&Real_GotoLoadedPosition);
-            MH_EnableHook(pGoto);
-            Log("G3O", "Savegame Profiler: Hooked gCSession::GotoLoadedPosition (0x%p)", pGoto);
+            InstallSavegameHook(pGoto, (LPVOID)Hooked_GotoLoadedPosition, (LPVOID*)&Real_GotoLoadedPosition,
+                &s_targetGotoPos, "gCSession::GotoLoadedPosition");
         }
 
         void* pStart = (void*)GetProcAddress(hGame, "?Start@gCSession@@QAEXW4gESession_StartMode@@@Z");
         if (pStart) {
-            s_targetSessionStart = pStart;
-            MH_CreateHook(pStart, (LPVOID)Hooked_SessionStart, (LPVOID*)&Real_SessionStart);
-            MH_EnableHook(pStart);
-            Log("G3O", "Savegame Profiler: Hooked gCSession::Start (0x%p)", pStart);
+            InstallSavegameHook(pStart, (LPVOID)Hooked_SessionStart, (LPVOID*)&Real_SessionStart,
+                &s_targetSessionStart, "gCSession::Start");
         }
 
         void* pAct = (void*)GetProcAddress(hGame, "?WorldActivate@gCSession@@UAE?AW4bEResult@@XZ");
         if (pAct) {
-            s_targetWorldActivate = pAct;
-            MH_CreateHook(pAct, (LPVOID)Hooked_WorldActivate, (LPVOID*)&Real_WorldActivate);
-            MH_EnableHook(pAct);
+            InstallSavegameHook(pAct, (LPVOID)Hooked_WorldActivate, (LPVOID*)&Real_WorldActivate,
+                &s_targetWorldActivate, "gCSession::WorldActivate");
         }
 
         void* pWorldAct = (void*)GetProcAddress(hGame, "?Activate@gCWorld@@UAE?AW4eEResult@eCProcessibleElement@@XZ");
         if (pWorldAct) {
-            s_targetWorldActivateElem = pWorldAct;
-            MH_CreateHook(pWorldAct, (LPVOID)Hooked_WorldActivateElem, (LPVOID*)&Real_WorldActivateElem);
-            MH_EnableHook(pWorldAct);
-            Log("G3O", "Savegame Profiler: Hooked gCWorld::Activate (0x%p)", pWorldAct);
+            InstallSavegameHook(pWorldAct, (LPVOID)Hooked_WorldActivateElem, (LPVOID*)&Real_WorldActivateElem,
+                &s_targetWorldActivateElem, "gCWorld::Activate");
         }
 
         void* pEnableSec = (void*)GetProcAddress(hGame, "?EnableSectorActivation@gCSector@@SGX_N@Z");
@@ -2172,42 +2184,32 @@ bool InitializeSavegameProfiler() {
 
         void* pSecOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCSector@@MAEXXZ");
         if (pSecOnAct) {
-            s_targetSectorOnActivate = pSecOnAct;
-            MH_CreateHook(pSecOnAct, (LPVOID)Hooked_SectorOnActivate, (LPVOID*)&Real_SectorOnActivate);
-            MH_EnableHook(pSecOnAct);
-            Log("G3O", "Savegame Profiler: Hooked gCSector::OnActivate (0x%p)", pSecOnAct);
+            InstallSavegameHook(pSecOnAct, (LPVOID)Hooked_SectorOnActivate, (LPVOID*)&Real_SectorOnActivate,
+                &s_targetSectorOnActivate, "gCSector::OnActivate");
         }
 
         void* pSecDoLoad = (void*)GetProcAddress(hGame, "?DoLoadData@gCSector@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z");
         if (pSecDoLoad) {
-            s_targetSectorDoLoadData = pSecDoLoad;
-            MH_CreateHook(pSecDoLoad, (LPVOID)Hooked_SectorDoLoadData, (LPVOID*)&Real_SectorDoLoadData);
-            MH_EnableHook(pSecDoLoad);
-            Log("G3O", "Savegame Profiler: Hooked gCSector::DoLoadData (0x%p)", pSecDoLoad);
+            InstallSavegameHook(pSecDoLoad, (LPVOID)Hooked_SectorDoLoadData, (LPVOID*)&Real_SectorDoLoadData,
+                &s_targetSectorDoLoadData, "gCSector::DoLoadData");
         }
 
         void* pOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCWorld@@MAEXXZ");
         if (pOnAct) {
-            s_targetWorldOnActivate = pOnAct;
-            MH_CreateHook(pOnAct, (LPVOID)Hooked_WorldOnActivate, (LPVOID*)&Real_WorldOnActivate);
-            MH_EnableHook(pOnAct);
-            Log("G3O", "Savegame Profiler: Hooked gCWorld::OnActivate (0x%p)", pOnAct);
+            InstallSavegameHook(pOnAct, (LPVOID)Hooked_WorldOnActivate, (LPVOID*)&Real_WorldOnActivate,
+                &s_targetWorldOnActivate, "gCWorld::OnActivate");
         }
 
         void* pWorldDoLoad = (void*)GetProcAddress(hGame, "?DoLoadData@gCWorld@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z");
         if (pWorldDoLoad) {
-            s_targetWorldDoLoadData = pWorldDoLoad;
-            MH_CreateHook(pWorldDoLoad, (LPVOID)Hooked_WorldDoLoadData, (LPVOID*)&Real_WorldDoLoadData);
-            MH_EnableHook(pWorldDoLoad);
-            Log("G3O", "Savegame Profiler: Hooked gCWorld::DoLoadData (0x%p)", pWorldDoLoad);
+            InstallSavegameHook(pWorldDoLoad, (LPVOID)Hooked_WorldDoLoadData, (LPVOID*)&Real_WorldDoLoadData,
+                &s_targetWorldDoLoadData, "gCWorld::DoLoadData");
         }
 
         void* pDoAfter = (void*)GetProcAddress(hGame, "?DoAfterWorldActivate@gCWorld@@IAEXXZ");
         if (pDoAfter) {
-            s_targetDoAfterWorldActivate = pDoAfter;
-            MH_CreateHook(pDoAfter, (LPVOID)Hooked_DoAfterWorldActivate, (LPVOID*)&Real_DoAfterWorldActivate);
-            MH_EnableHook(pDoAfter);
-            Log("G3O", "Savegame Profiler: Hooked gCWorld::DoAfterWorldActivate (0x%p)", pDoAfter);
+            InstallSavegameHook(pDoAfter, (LPVOID)Hooked_DoAfterWorldActivate, (LPVOID*)&Real_DoAfterWorldActivate,
+                &s_targetDoAfterWorldActivate, "gCWorld::DoAfterWorldActivate");
         }
 
         void* pCount = (void*)GetProcAddress(hGame, "?GetSectorCount@gCWorld@@QBEHXZ");
@@ -2224,6 +2226,15 @@ bool InitializeSavegameProfiler() {
         }
     }
 
+    if (cfg.enableLayerRingArena && cfg.enableFastPakDecompressor && !cfg.enableSavegameAudit) {
+        HMODULE hGameForLayerArena = GetModuleHandleA("Game.dll");
+        void* pSecOnAct = hGameForLayerArena
+            ? reinterpret_cast<void*>(GetProcAddress(hGameForLayerArena, "?OnActivate@gCSector@@MAEXXZ"))
+            : nullptr;
+        InstallSavegameHook(pSecOnAct, (LPVOID)Hooked_SectorOnActivate,
+            (LPVOID*)&Real_SectorOnActivate, &s_targetSectorOnActivate, "gCSector::OnActivate (LayerRingArena)");
+    }
+
     if (cfg.enableSavegameAudit) {
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
     HMODULE hGame = GetModuleHandleA("Game.dll");
@@ -2235,10 +2246,8 @@ bool InitializeSavegameProfiler() {
 
         void* pElemAct = (void*)GetProcAddress(hEngine, "?Activate@eCProcessibleElement@@UAE?AW4eEResult@1@XZ");
         if (pElemAct) {
-            s_targetElementActivate = pElemAct;
-            MH_CreateHook(pElemAct, (LPVOID)Hooked_ElementActivate, (LPVOID*)&Real_ElementActivate);
-            MH_EnableHook(pElemAct);
-            Log("G3O", "Savegame Profiler: Hooked eCProcessibleElement::Activate (0x%p)", pElemAct);
+            InstallSavegameHook(pElemAct, (LPVOID)Hooked_ElementActivate, (LPVOID*)&Real_ElementActivate,
+                &s_targetElementActivate, "eCProcessibleElement::Activate");
         }
 
         void* pGeomAct = (void*)GetProcAddress(hGame, "?Activate@gCGeometryLayer@@UAE?AW4eEResult@eCProcessibleElement@@XZ");
@@ -2246,30 +2255,24 @@ bool InitializeSavegameProfiler() {
             pGeomAct = reinterpret_cast<void*>(gameBase + 0x0C7660);
         }
         if (pGeomAct) {
-            s_targetGeometryLayerActivate = pGeomAct;
-            MH_STATUS stGeom = MH_CreateHook(pGeomAct, (LPVOID)Hooked_GeometryLayerActivate, (LPVOID*)&Real_GeometryLayerActivate);
-            if (stGeom == MH_OK) {
-                MH_EnableHook(pGeomAct);
-                Log("G3O", "Savegame Profiler: Hooked gCGeometryLayer::Activate (0x%p)", pGeomAct);
-            } else {
-                Log("G3O", "Savegame Profiler: Failed to hook gCGeometryLayer::Activate (0x%p, status=%d)", pGeomAct, stGeom);
-            }
+            InstallSavegameHook(pGeomAct, (LPVOID)Hooked_GeometryLayerActivate,
+                (LPVOID*)&Real_GeometryLayerActivate, &s_targetGeometryLayerActivate,
+                "gCGeometryLayer::Activate");
         }
 
         void* pElemOnAct = (void*)GetProcAddress(hEngine, "?OnActivate@eCProcessibleElement@@MAEXXZ");
         if (pElemOnAct) {
-            s_targetElementOnActivate = pElemOnAct;
-            MH_CreateHook(pElemOnAct, (LPVOID)Hooked_ElementOnActivate, (LPVOID*)&Real_ElementOnActivate);
-            MH_EnableHook(pElemOnAct);
-            Log("G3O", "Savegame Profiler: Hooked eCProcessibleElement::OnActivate (0x%p)", pElemOnAct);
+            InstallSavegameHook(pElemOnAct, (LPVOID)Hooked_ElementOnActivate,
+                (LPVOID*)&Real_ElementOnActivate, &s_targetElementOnActivate,
+                "eCProcessibleElement::OnActivate");
         }
     }
     if (hEngine) {
         void* pBuild = (void*)GetProcAddress(hEngine, "?BuildStaticHierachy@eCPVSCellItem@@IAEXXZ");
         if (pBuild) {
-            s_targetBuildStatic = pBuild;
-            MH_CreateHook(pBuild, (LPVOID)Hooked_BuildStaticHierachy, (LPVOID*)&Real_BuildStaticHierachy);
-            MH_EnableHook(pBuild);
+            InstallSavegameHook(pBuild, (LPVOID)Hooked_BuildStaticHierachy,
+                (LPVOID*)&Real_BuildStaticHierachy, &s_targetBuildStatic,
+                "eCPVSCellItem::BuildStaticHierarchy");
         }
 
         InstallPvsMetricHook(
@@ -2289,18 +2292,14 @@ bool InitializeSavegameProfiler() {
 
         void* pDeact = (void*)GetProcAddress(hEngine, "?Deactivate@eCProcessibleElement@@QAE?AW4eEResult@1@XZ");
         if (pDeact) {
-            s_targetDeactivate = pDeact;
-            MH_CreateHook(pDeact, (LPVOID)Hooked_Deactivate, (LPVOID*)&Real_Deactivate);
-            MH_EnableHook(pDeact);
-            Log("G3O", "Savegame Profiler: Hooked eCProcessibleElement::Deactivate (0x%p)", pDeact);
+            InstallSavegameHook(pDeact, (LPVOID)Hooked_Deactivate, (LPVOID*)&Real_Deactivate,
+                &s_targetDeactivate, "eCProcessibleElement::Deactivate");
         }
 
         void* pROI = (void*)GetProcAddress(hEngine, "?FourceFullROIUpdate@eCEntityAdmin@@QAEXXZ");
         if (pROI) {
-            s_targetForceROIUpdate = pROI;
-            MH_CreateHook(pROI, (LPVOID)Hooked_ForceROIUpdate, (LPVOID*)&Real_ForceROIUpdate);
-            MH_EnableHook(pROI);
-            Log("G3O", "Savegame Profiler: Hooked eCEntityAdmin::ForceFullROIUpdate (0x%p)", pROI);
+            InstallSavegameHook(pROI, (LPVOID)Hooked_ForceROIUpdate, (LPVOID*)&Real_ForceROIUpdate,
+                &s_targetForceROIUpdate, "eCEntityAdmin::ForceFullROIUpdate");
         }
 
     }

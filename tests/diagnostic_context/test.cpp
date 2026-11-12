@@ -14,6 +14,13 @@ static void requireContains(const char* text, const char* expected) {
     }
 }
 
+static void requireAbsent(const char* text, const char* unexpected) {
+    if (text && std::strstr(text, unexpected) != nullptr) {
+        std::fprintf(stderr, "Unexpected text: %s\n", unexpected);
+        std::exit(1);
+    }
+}
+
 static bool s_forwardingSeenByOriginal = false;
 static bool s_originalCalledBeforeLocalLog = false;
 static int s_diagOutputCalls = 0;
@@ -36,6 +43,8 @@ static void FakeDiagOutput(const char* format, ...) {
 
 extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID, LPVOID, LPVOID*) { return MH_OK; }
 extern "C" MH_STATUS WINAPI MH_EnableHook(LPVOID) { return MH_OK; }
+extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID) { return MH_OK; }
+extern "C" MH_STATUS WINAPI MH_RemoveHook(LPVOID) { return MH_OK; }
 
 static void FakeOutputDebugString(const char* message) {
     ++s_outputDebugCalls;
@@ -50,7 +59,7 @@ int main() {
     G3O::AppendAppliedConfigSnapshot(configText, config);
 
     const char* const expectedKeys[] = {
-        "EnableG3O=", "ShowWatermark=", "LoadG3SEPlugins=", "FixVulkanLayerConflicts=",
+        "EnableG3O=", "LoadG3SEPlugins=", "FixVulkanLayerConflicts=",
         "EnableBorderless=", "ToggleBorderlessKey=", "AutoBorderless=", "PreventMinimizeOnFocusLoss=",
         "EnableDynamicFOV=", "DefaultFOV=", "EnableFOVHotkeys=", "DecreaseFOVKey=", "IncreaseFOVKey=", "FOVStep=",
         "EnableCrashInvestigator=", "ShowCrashDialog=", "WriteCrashDump=", "WriteCrashLog=",
@@ -62,6 +71,7 @@ int main() {
         "EnableProfiler=", "EnableSavegameAudit="
     };
     for (const char* key : expectedKeys) requireContains(configText.CStr(), key);
+    requireAbsent(configText.CStr(), "ShowWatermark=");
     if (configText.IsTruncated()) {
         std::fprintf(stderr, "Applied configuration snapshot was truncated\n");
         return 1;

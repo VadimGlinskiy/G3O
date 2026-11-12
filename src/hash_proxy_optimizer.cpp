@@ -4,6 +4,7 @@
 #include "config_manager.h"
 #include "diagnostic_logger.h"
 #include "savegame_profiler.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <windows.h>
 #include <atomic>
@@ -156,12 +157,19 @@ void InitializeHashProxyOptimizer() {
         void* pHashBCString = reinterpret_cast<void*>(GetProcAddress(
             hSharedBase, "??$g_GetHashValue@VbCString@@@@YGKABVbCString@@@Z"));
         if (pHashBCString) {
-            if (MH_CreateHook(pHashBCString, reinterpret_cast<LPVOID>(Hooked_GetHashValue_bCString),
-                              reinterpret_cast<LPVOID*>(&Real_GetHashValue_bCString)) == MH_OK) {
-                if (MH_EnableHook(pHashBCString) == MH_OK) {
-                    s_targetHash_bCString = pHashBCString;
-                    Log("G3O", "Hash Optimizer: Hooked g_GetHashValue<bCString> (0x%p)", pHashBCString);
-                }
+            MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+            const HookInstallResult result = InstallHookSafely(
+                [&] { createStatus = MH_CreateHook(pHashBCString, reinterpret_cast<LPVOID>(Hooked_GetHashValue_bCString),
+                                                   reinterpret_cast<LPVOID*>(&Real_GetHashValue_bCString)); return createStatus == MH_OK; },
+                [&] { enableStatus = MH_EnableHook(pHashBCString); return enableStatus == MH_OK; },
+                [&] { removeStatus = MH_RemoveHook(pHashBCString); },
+                [&] { Real_GetHashValue_bCString = nullptr; });
+            if (result == HookInstallResult::Installed) {
+                s_targetHash_bCString = pHashBCString;
+                Log("G3O", "Hash Optimizer: Hooked g_GetHashValue<bCString> (0x%p)", pHashBCString);
+            } else {
+                Log("G3O", "Hash Optimizer: bCString hook install failed (create=%d, enable=%d, remove=%d).",
+                    createStatus, enableStatus, removeStatus);
             }
         }
 
@@ -169,12 +177,19 @@ void InitializeHashProxyOptimizer() {
         void* pHashPAD = reinterpret_cast<void*>(GetProcAddress(
             hSharedBase, "??$g_GetHashValue@PAD@@YGKABQAD@Z"));
         if (pHashPAD) {
-            if (MH_CreateHook(pHashPAD, reinterpret_cast<LPVOID>(Hooked_GetHashValue_PAD),
-                              reinterpret_cast<LPVOID*>(&Real_GetHashValue_PAD)) == MH_OK) {
-                if (MH_EnableHook(pHashPAD) == MH_OK) {
-                    s_targetHash_PAD = pHashPAD;
-                    Log("G3O", "Hash Optimizer: Hooked g_GetHashValue<PAD> (0x%p)", pHashPAD);
-                }
+            MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+            const HookInstallResult result = InstallHookSafely(
+                [&] { createStatus = MH_CreateHook(pHashPAD, reinterpret_cast<LPVOID>(Hooked_GetHashValue_PAD),
+                                                   reinterpret_cast<LPVOID*>(&Real_GetHashValue_PAD)); return createStatus == MH_OK; },
+                [&] { enableStatus = MH_EnableHook(pHashPAD); return enableStatus == MH_OK; },
+                [&] { removeStatus = MH_RemoveHook(pHashPAD); },
+                [&] { Real_GetHashValue_PAD = nullptr; });
+            if (result == HookInstallResult::Installed) {
+                s_targetHash_PAD = pHashPAD;
+                Log("G3O", "Hash Optimizer: Hooked g_GetHashValue<PAD> (0x%p)", pHashPAD);
+            } else {
+                Log("G3O", "Hash Optimizer: PAD hook install failed (create=%d, enable=%d, remove=%d).",
+                    createStatus, enableStatus, removeStatus);
             }
         }
     }
@@ -189,12 +204,19 @@ void InitializeHashProxyOptimizer() {
         }
 
         if (pProxyGet) {
-            if (MH_CreateHook(pProxyGet, reinterpret_cast<LPVOID>(Hooked_TemplateProxyGetEntity),
-                              reinterpret_cast<LPVOID*>(&Real_TemplateProxyGetEntity)) == MH_OK) {
-                if (MH_EnableHook(pProxyGet) == MH_OK) {
-                    s_targetProxyGetEntity = pProxyGet;
-                    Log("G3O", "Proxy Optimizer: Hooked eCTemplateEntityProxy::GetEntity (0x%p)", pProxyGet);
-                }
+            MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+            const HookInstallResult result = InstallHookSafely(
+                [&] { createStatus = MH_CreateHook(pProxyGet, reinterpret_cast<LPVOID>(Hooked_TemplateProxyGetEntity),
+                                                   reinterpret_cast<LPVOID*>(&Real_TemplateProxyGetEntity)); return createStatus == MH_OK; },
+                [&] { enableStatus = MH_EnableHook(pProxyGet); return enableStatus == MH_OK; },
+                [&] { removeStatus = MH_RemoveHook(pProxyGet); },
+                [&] { Real_TemplateProxyGetEntity = nullptr; });
+            if (result == HookInstallResult::Installed) {
+                s_targetProxyGetEntity = pProxyGet;
+                Log("G3O", "Proxy Optimizer: Hooked eCTemplateEntityProxy::GetEntity (0x%p)", pProxyGet);
+            } else {
+                Log("G3O", "Proxy Optimizer: GetEntity hook install failed (create=%d, enable=%d, remove=%d).",
+                    createStatus, enableStatus, removeStatus);
             }
         }
     }

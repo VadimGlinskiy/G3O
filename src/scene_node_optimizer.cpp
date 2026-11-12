@@ -1,6 +1,8 @@
 #include "scene_node_optimizer.h"
+#include "scene_node_policy.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
+#include "hook_install_policy.h"
 #include <minhook.h>
 #include <windows.h>
 #include <atomic>
@@ -36,25 +38,16 @@ static int32_t __fastcall Hooked_AttachChild(void* pThisNode, void* /*edx*/, voi
 
         if (pChildParent != pThisNode) {
             const uintptr_t nodeAddr = reinterpret_cast<uintptr_t>(pThisNode);
-            const uint16_t u16Cap   = *reinterpret_cast<const uint16_t*>(nodeAddr + 0x10);
+            uint16_t& u16Cap = *reinterpret_cast<uint16_t*>(nodeAddr + 0x10);
             const uint16_t u16Count = *reinterpret_cast<const uint16_t*>(nodeAddr + 0x12);
 
-            if (u16Count >= 64 && u16Count == u16Cap && u16Cap < 32768) {
-                uint16_t u16NewCap = 1024;
-                if (u16Cap >= 8192) {
-                    u16NewCap = 32768;
-                } else if (u16Cap >= 1024) {
-                    u16NewCap = 8192;
-                }
-
+            if (SceneNodePolicy::ShouldPreallocate(u16Count, u16Cap)) {
+                const uint16_t u16NewCap = SceneNodePolicy::NextCapacity(u16Cap);
                 void* pMemAdmin = fpMemAdminGetInstance();
                 if (pMemAdmin) {
-                    void* pOldBuffer = *reinterpret_cast<void**>(nodeAddr + 0x14);
-                    const uint32_t newByteSize = static_cast<uint32_t>(u16NewCap) * sizeof(void*);
-                    void* pNewBuffer = fpMemAdminRealloc(pMemAdmin, pOldBuffer, newByteSize);
-                    if (pNewBuffer) {
-                        *reinterpret_cast<void**>(nodeAddr + 0x14)    = pNewBuffer;
-                        *reinterpret_cast<uint16_t*>(nodeAddr + 0x10) = u16NewCap;
+                    void**& ppChildren = *reinterpret_cast<void***>(nodeAddr + 0x14);
+                    if (SceneNodePolicy::TryPreallocate(
+                            pMemAdmin, ppChildren, u16Cap, u16NewCap, fpMemAdminRealloc)) {
                         s_nodePreallocations.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
@@ -98,12 +91,19 @@ void InitializeSceneNodeOptimizer() {
     }
 
     if (pTargetAttachChild) {
-        if (MH_CreateHook(pTargetAttachChild, reinterpret_cast<LPVOID>(Hooked_AttachChild),
-                          reinterpret_cast<LPVOID*>(&Real_AttachChild)) == MH_OK) {
-            if (MH_EnableHook(pTargetAttachChild) == MH_OK) {
-                s_targetAttachChild = pTargetAttachChild;
-                Log("G3O", "Scene Node Optimizer: Hooked eCNode::AttachChild (0x%p)", pTargetAttachChild);
-            }
+        MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+        const HookInstallResult result = InstallHookSafely(
+            [&] { createStatus = MH_CreateHook(pTargetAttachChild, reinterpret_cast<LPVOID>(Hooked_AttachChild),
+                                               reinterpret_cast<LPVOID*>(&Real_AttachChild)); return createStatus == MH_OK; },
+            [&] { enableStatus = MH_EnableHook(pTargetAttachChild); return enableStatus == MH_OK; },
+            [&] { removeStatus = MH_RemoveHook(pTargetAttachChild); },
+            [&] { Real_AttachChild = nullptr; });
+        if (result == HookInstallResult::Installed) {
+            s_targetAttachChild = pTargetAttachChild;
+            Log("G3O", "Scene Node Optimizer: Hooked eCNode::AttachChild (0x%p)", pTargetAttachChild);
+        } else {
+            Log("G3O", "Scene Node Optimizer: AttachChild hook install failed (create=%d, enable=%d, remove=%d).",
+                createStatus, enableStatus, removeStatus);
         }
     }
 }
@@ -111,7 +111,9 @@ void InitializeSceneNodeOptimizer() {
 void ShutdownSceneNodeOptimizer() {
     if (s_targetAttachChild) {
         MH_DisableHook(s_targetAttachChild);
+        MH_RemoveHook(s_targetAttachChild);
         s_targetAttachChild = nullptr;
+        Real_AttachChild = nullptr;
     }
 }
 
