@@ -16,15 +16,9 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.loadG3SEPlugins ? "true" : "false", config.fixVulkanLayerConflicts ? "true" : "false");
 
     output.Append("[Display]\n");
-    output.AppendFormat("EnableBorderless=%s\nToggleBorderlessKey=0x%X\nAutoBorderless=%s\nPreventMinimizeOnFocusLoss=%s\n",
-        config.enableBorderless ? "true" : "false", config.toggleBorderlessKey,
+    output.AppendFormat("EnableBorderless=%s\nAutoBorderless=%s\nPreventMinimizeOnFocusLoss=%s\n",
+        config.enableBorderless ? "true" : "false",
         config.autoBorderless ? "true" : "false", config.preventMinimizeOnFocusLoss ? "true" : "false");
-
-    output.Append("[Camera]\n");
-    output.AppendFormat("EnableDynamicFOV=%s\nDefaultFOV=%.9g\nEnableFOVHotkeys=%s\nDecreaseFOVKey=0x%X\nIncreaseFOVKey=0x%X\nFOVStep=%.9g\n",
-        config.enableDynamicFOV ? "true" : "false", config.defaultFOV,
-        config.enableFOVHotkeys ? "true" : "false", config.decreaseFOVKey,
-        config.increaseFOVKey, config.fovStep);
 
     output.Append("[CrashInvestigator]\n");
     output.AppendFormat("EnableCrashInvestigator=%s\nShowCrashDialog=%s\nWriteCrashDump=%s\nWriteCrashLog=%s\n",
@@ -42,6 +36,7 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         "TreeShadowDistance=%.9g\nVegetationGridRangeClamp=%.9g\n"
         "EnableSelectiveCulling=%s\nClutterCullThreshold=%.9g\nImportantCullThreshold=%.9g\n"
         "EnableAtmosphericFogControl=%s\nFogDistanceMultiplier=%.9g\nFogEndMinDistance=%.9g\nPreserveUnderwaterFog=%s\n"
+        "EnableGlobalVisualLodProbe=%s\nGlobalVisualLodProbeScale=%.9g\n"
         "EnableHighPrecisionTimer=%s\nEnableHighProcessPriority=%s\n"
         "EnableCPUTopologyAffinity=%s\nEnableVFSCache=%s\nCPUCores=%d\nCPUThreads=%d\nCPUAffinityMask=0x%llX\n"
         "PakCacheBudgetMB=%d\nPakPrefetchWorkers=%d\n",
@@ -76,6 +71,7 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.enableAtmosphericFogControl ? "true" : "false",
         config.fogDistanceMultiplier, config.fogEndMinDistance,
         config.preserveUnderwaterFog ? "true" : "false",
+        config.enableGlobalVisualLodProbe ? "true" : "false", config.globalVisualLodProbeScale,
         config.enableHighPrecisionTimer ? "true" : "false",
         config.enableHighProcessPriority ? "true" : "false",
         config.enableCPUTopologyAffinity ? "true" : "false",

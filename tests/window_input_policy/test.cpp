@@ -9,27 +9,16 @@ static bool Expect(bool condition, const char* message) {
 
 int main() {
     bool ok = true;
-    G3O::Config config{};
-    config.enableBorderless = false;
-    config.enableDynamicFOV = false;
-    config.enableFOVHotkeys = true;
-    ok &= Expect(!G3O::ShouldInstallWindowInputHook(config),
-                 "window hook should not install when borderless and dynamic FOV are disabled");
-    config.enableDynamicFOV = true;
-    ok &= Expect(G3O::ShouldInstallWindowInputHook(config),
-                 "FOV hotkeys should install the input hook without borderless mode");
-    config.enableFOVHotkeys = false;
-    ok &= Expect(!G3O::ShouldInstallWindowInputHook(config),
-                 "dynamic FOV alone should not install the hotkey window hook");
-    config.enableBorderless = true;
-    ok &= Expect(G3O::ShouldInstallWindowInputHook(config),
-                 "borderless mode should install the window hook");
-
-    ok &= Expect(G3O::IsInitialKeyDown(0), "first keydown should be accepted");
-    ok &= Expect(!G3O::IsInitialKeyDown(static_cast<LPARAM>(1u << 30)),
-                 "autorepeated keydown should not retrigger the borderless toggle");
+    ok &= Expect(G3O::IsSplashWindowClass("Splash"),
+                 "the splash window must not be selected as the game input target");
+    ok &= Expect(!G3O::IsPreferredGameWindowClass("Splash"),
+                 "the splash window must not be preferred over the game window");
+    ok &= Expect(G3O::IsPreferredGameWindowClass("Gothic3 Engine"),
+                 "the actual Gothic 3 engine window class should be preferred");
+    ok &= Expect(G3O::IsPreferredGameWindowClass("Gothic3"),
+                 "the legacy Gothic 3 window class should remain supported");
 
     if (!ok) return 1;
-    std::puts("PASS: window input policy and key-repeat detection");
+    std::puts("PASS: game window selection policy");
     return 0;
 }

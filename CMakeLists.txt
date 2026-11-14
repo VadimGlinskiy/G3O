@@ -48,8 +48,6 @@ add_library(dinput8 SHARED
     src/diag_output_bridge.h
     src/borderless_window.cpp
     src/borderless_window.h
-    src/camera_controller.cpp
-    src/camera_controller.h
     src/config_manager.cpp
     src/config_manager.h
     src/math_simd_optimizer.cpp
@@ -130,6 +128,12 @@ add_library(dinput8 SHARED
     src/fog_policy.h
     src/fog_optimizer.cpp
     src/fog_optimizer.h
+    src/global_visual_lod_probe.cpp
+    src/global_visual_lod_probe.h
+    src/global_visual_lod_probe_policy.h
+    src/focus_name_guard.cpp
+    src/focus_name_guard.h
+    src/focus_name_guard_policy.h
 )
 
 if(MSVC)

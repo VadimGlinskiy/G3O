@@ -1,6 +1,5 @@
 #include "borderless_window.h"
 #include "diagnostic_logger.h"
-#include "camera_controller.h"
 #include "config_manager.h"
 #include "window_input_policy.h"
 #include <minhook.h>
@@ -10,9 +9,7 @@ namespace G3O {
 static HWND s_gameHWnd = nullptr;
 static WNDPROC s_origWndProc = nullptr;
 static bool s_isBorderless = false;
-static RECT s_origWindowRect = { 0 };
 static LONG_PTR s_origStyle = 0;
-static LONG_PTR s_origExStyle = 0;
 
 HWND GetGameWindowHandle() {
     return s_gameHWnd;
@@ -40,27 +37,6 @@ static LRESULT CALLBACK BorderlessWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
         }
         break;
 
-    case WM_KEYDOWN:
-        // Hotkey: Configured key -> Toggle Borderless Fullscreen
-        if (cfg.enableBorderless && IsInitialKeyDown(lParam) &&
-            cfg.toggleBorderlessKey != 0 && wParam == cfg.toggleBorderlessKey) {
-            ToggleBorderlessFullscreen();
-            return 0;
-        }
-
-        // Hotkeys: Dynamic FOV adjustment
-        if (cfg.enableDynamicFOV && cfg.enableFOVHotkeys &&
-            (GetKeyState(VK_CONTROL) & 0x8000)) {
-            if ((cfg.decreaseFOVKey != 0 && wParam == cfg.decreaseFOVKey) || wParam == VK_SUBTRACT) {
-                AdjustDynamicFOV(-cfg.fovStep);
-                return 0;
-            }
-            if ((cfg.increaseFOVKey != 0 && wParam == cfg.increaseFOVKey) || wParam == VK_ADD) {
-                AdjustDynamicFOV(+cfg.fovStep);
-                return 0;
-            }
-        }
-        break;
     }
 
     if (s_origWndProc) {
@@ -73,9 +49,7 @@ static void ApplyBorderless(HWND hWnd) {
     if (!hWnd || !IsWindow(hWnd)) return;
 
     if (!s_isBorderless) {
-        GetWindowRect(hWnd, &s_origWindowRect);
         s_origStyle = GetWindowLongPtrA(hWnd, GWL_STYLE);
-        s_origExStyle = GetWindowLongPtrA(hWnd, GWL_EXSTYLE);
     }
 
     HMONITOR hMon = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
@@ -100,38 +74,37 @@ static void ApplyBorderless(HWND hWnd) {
     Log("G3O", "Borderless Fullscreen activated: %dx%d on display (%d, %d).", screenW, screenH, screenX, screenY);
 }
 
-static void RestoreWindowed(HWND hWnd) {
-    if (!hWnd || !IsWindow(hWnd) || !s_isBorderless) return;
-
-    SetWindowLongPtrA(hWnd, GWL_STYLE, s_origStyle);
-    SetWindowLongPtrA(hWnd, GWL_EXSTYLE, s_origExStyle);
-
-    int w = s_origWindowRect.right - s_origWindowRect.left;
-    int h = s_origWindowRect.bottom - s_origWindowRect.top;
-    SetWindowPos(hWnd, HWND_NOTOPMOST, s_origWindowRect.left, s_origWindowRect.top, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-
-    s_isBorderless = false;
-    Log("G3O", "Restored standard windowed mode.");
-}
-
-void ToggleBorderlessFullscreen() {
-    if (!s_gameHWnd) return;
-    if (s_isBorderless) {
-        RestoreWindowed(s_gameHWnd);
-    } else {
-        ApplyBorderless(s_gameHWnd);
-    }
-}
+struct WindowSearchContext {
+    DWORD processId;
+    HWND preferredWindow;
+    HWND fallbackWindow;
+    long long fallbackArea;
+};
 
 static BOOL CALLBACK EnumWindowsCallback(HWND hWnd, LPARAM lParam) {
+    auto* search = reinterpret_cast<WindowSearchContext*>(lParam);
     DWORD pid = 0;
     GetWindowThreadProcessId(hWnd, &pid);
-    if (pid == GetCurrentProcessId()) {
-        char className[256] = { 0 };
-        GetClassNameA(hWnd, className, sizeof(className));
-        if (strcmp(className, "CFFGFCWnd") == 0 || strcmp(className, "Gothic3") == 0) {
-            *(HWND*)lParam = hWnd;
-            return FALSE;
+    if (pid != search->processId || !IsWindowVisible(hWnd) || GetWindow(hWnd, GW_OWNER)) {
+        return TRUE;
+    }
+
+    char className[256] = { 0 };
+    GetClassNameA(hWnd, className, sizeof(className));
+    if (IsPreferredGameWindowClass(className)) {
+        search->preferredWindow = hWnd;
+        return FALSE;
+    }
+    if (IsSplashWindowClass(className)) return TRUE;
+
+    RECT rect = {};
+    if (GetWindowRect(hWnd, &rect)) {
+        const long long width = static_cast<long long>(rect.right) - rect.left;
+        const long long height = static_cast<long long>(rect.bottom) - rect.top;
+        const long long area = width > 0 && height > 0 ? width * height : 0;
+        if (area > search->fallbackArea) {
+            search->fallbackArea = area;
+            search->fallbackWindow = hWnd;
         }
     }
     return TRUE;
@@ -140,8 +113,9 @@ static BOOL CALLBACK EnumWindowsCallback(HWND hWnd, LPARAM lParam) {
 static DWORD WINAPI WindowWatcherThread(LPVOID) {
     // Gothic 3 takes 15-30 seconds to load into main menu
     for (int i = 0; i < 180 && !s_gameHWnd; ++i) {
-        HWND found = nullptr;
-        EnumWindows(EnumWindowsCallback, (LPARAM)&found);
+        WindowSearchContext search = { GetCurrentProcessId(), nullptr, nullptr, 0 };
+        EnumWindows(EnumWindowsCallback, reinterpret_cast<LPARAM>(&search));
+        HWND found = search.preferredWindow ? search.preferredWindow : search.fallbackWindow;
         if (found && IsWindow(found) && IsWindowVisible(found)) {
             s_gameHWnd = found;
             break;
@@ -149,15 +123,27 @@ static DWORD WINAPI WindowWatcherThread(LPVOID) {
         Sleep(250);
     }
 
+    if (!s_gameHWnd) {
+        Log("G3O", "Game window not found; borderless is inactive.");
+        return 0;
+    }
+
     if (s_gameHWnd) {
-        // Record original window dimensions and styles
-        GetWindowRect(s_gameHWnd, &s_origWindowRect);
+        // Record the original window style
         s_origStyle = GetWindowLongPtrA(s_gameHWnd, GWL_STYLE);
-        s_origExStyle = GetWindowLongPtrA(s_gameHWnd, GWL_EXSTYLE);
 
         // Subclass window procedure
+        SetLastError(ERROR_SUCCESS);
         s_origWndProc = (WNDPROC)SetWindowLongPtrA(s_gameHWnd, GWLP_WNDPROC, (LONG_PTR)BorderlessWndProc);
-        Log("G3O", "Game window captured (HWND 0x%p, style 0x%08X). Subclassed WndProc.", s_gameHWnd, (unsigned int)s_origStyle);
+        if (!s_origWndProc) {
+            Log("G3O", "Game window WndProc hook failed (error %lu).", GetLastError());
+            s_gameHWnd = nullptr;
+            return 0;
+        }
+        char className[256] = { 0 };
+        GetClassNameA(s_gameHWnd, className, sizeof(className));
+        Log("G3O", "Game window captured (HWND 0x%p, class '%s', style 0x%08X). Subclassed WndProc.",
+            s_gameHWnd, className, (unsigned int)s_origStyle);
 
         // Only convert frame if window is running in traditional windowed mode (has caption/borders).
         // If the game is already in fullscreen mode (WS_POPUP without WS_CAPTION), DXVK and the engine
@@ -170,11 +156,10 @@ static DWORD WINAPI WindowWatcherThread(LPVOID) {
             ApplyBorderless(s_gameHWnd);
         } else if (cfg.enableBorderless) {
             s_isBorderless = (s_origStyle & WS_CAPTION) == 0;
-            Log("G3O", "Window hook active (borderless=%s, ToggleKey=%s).",
-                s_isBorderless ? "yes" : "no", KeyCodeToString(cfg.toggleBorderlessKey).c_str());
+            Log("G3O", "Window hook active (borderless=%s).", s_isBorderless ? "yes" : "no");
         } else {
             s_isBorderless = false;
-            Log("G3O", "Window input hook active for dynamic FOV hotkeys; borderless mode is disabled.");
+            Log("G3O", "Window hook active; borderless mode is disabled.");
         }
     }
     return 0;
@@ -183,6 +168,7 @@ static DWORD WINAPI WindowWatcherThread(LPVOID) {
 void InitializeBorderlessWindow() {
     HANDLE hThread = CreateThread(nullptr, 0, WindowWatcherThread, nullptr, 0, nullptr);
     if (hThread) CloseHandle(hThread);
+    else Log("G3O", "Game window watcher thread could not be started (error %lu).", GetLastError());
 }
 
 void ShutdownBorderlessWindow() {

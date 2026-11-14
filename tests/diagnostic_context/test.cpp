@@ -60,8 +60,7 @@ int main() {
 
     const char* const expectedKeys[] = {
         "EnableG3O=", "LoadG3SEPlugins=", "FixVulkanLayerConflicts=",
-        "EnableBorderless=", "ToggleBorderlessKey=", "AutoBorderless=", "PreventMinimizeOnFocusLoss=",
-        "EnableDynamicFOV=", "DefaultFOV=", "EnableFOVHotkeys=", "DecreaseFOVKey=", "IncreaseFOVKey=", "FOVStep=",
+        "EnableBorderless=", "AutoBorderless=", "PreventMinimizeOnFocusLoss=",
         "EnableCrashInvestigator=", "ShowCrashDialog=", "WriteCrashDump=", "WriteCrashLog=",
         "EnableSharedBaseOptimizations=", "EnableFastPakDecompressor=", "EnablePropertyCache=", "EnablePakPrefetch=",
         "EnableD3D9StateFilter=", "EnableFastTextureLoader=", "EnableVegetationOptimizer=",
@@ -72,6 +71,14 @@ int main() {
     };
     for (const char* key : expectedKeys) requireContains(configText.CStr(), key);
     requireAbsent(configText.CStr(), "ShowWatermark=");
+    requireAbsent(configText.CStr(), "ToggleBorderlessKey=");
+    requireAbsent(configText.CStr(), "[Camera]");
+    requireAbsent(configText.CStr(), "EnableDynamicFOV=");
+    requireAbsent(configText.CStr(), "DefaultFOV=");
+    requireAbsent(configText.CStr(), "EnableFOVHotkeys=");
+    requireAbsent(configText.CStr(), "DecreaseFOVKey=");
+    requireAbsent(configText.CStr(), "IncreaseFOVKey=");
+    requireAbsent(configText.CStr(), "FOVStep=");
     if (configText.IsTruncated()) {
         std::fprintf(stderr, "Applied configuration snapshot was truncated\n");
         return 1;

@@ -6,7 +6,6 @@
 #include "diagnostic_logger.h"
 #include "crash_handler.h"
 #include "borderless_window.h"
-#include "camera_controller.h"
 #include "math_simd_optimizer.h"
 #include "window_input_policy.h"
 #include "d3d9_hook.h"
@@ -31,7 +30,8 @@
 #include "pak_prefetch.h"
 #include "selective_culling_optimizer.h"
 #include "fog_optimizer.h"
-
+#include "global_visual_lod_probe.h"
+#include "focus_name_guard.h"
 #pragma comment(lib, "winmm.lib")
 
 static volatile LONG s_runtimeActive = 0;
@@ -81,7 +81,7 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     }
 
     // Initialize Borderless Fullscreen manager
-    if (G3O::ShouldInstallWindowInputHook(cfg)) {
+    if (cfg.enableBorderless) {
         G3O::InitializeBorderlessWindow();
     }
 
@@ -102,6 +102,8 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     if (cfg.enableCrashInvestigator) {
         G3O::HookEngineFatalErrors();
     }
+
+    G3O::InitializeFocusNameGuard();
 
     // Fast Pak Decompressor: SIMD libdeflate zlib decompression for .pak archives & savegames
     if (cfg.enableFastPakDecompressor) {
@@ -199,13 +201,12 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeFogOptimizer();
     }
 
-    if (cfg.enableProfiler) {
-        G3O::InitializeProfiler();
+    if (cfg.enableGlobalVisualLodProbe) {
+        G3O::InitializeGlobalVisualLodProbe();
     }
 
-    // Hook camera FOV values in the engine's 50-75 degree range.
-    if (cfg.enableDynamicFOV) {
-        G3O::InitializeCameraController();
+    if (cfg.enableProfiler) {
+        G3O::InitializeProfiler();
     }
 
     // Optional legacy G3SE plugin loader (not part of gothic3sdk).
@@ -256,13 +257,14 @@ static void ShutdownOptima() {
     G3O::ShutdownDynamicROIOptimizer();
     G3O::ShutdownPVSPrefetchOptimizer();
     G3O::ShutdownSelectiveCullingOptimizer();
+    G3O::ShutdownGlobalVisualLodProbe();
     G3O::ShutdownFogOptimizer();
     G3O::ShutdownNavigationOptimizer();
     G3O::ShutdownVFSCacheOptimizer();
     G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();
-    G3O::ShutdownCameraController();
+    G3O::ShutdownFocusNameGuard();
     G3O::ShutdownBorderlessWindow();
     G3O::ShutdownCrashHandler();
     G3O::ShutdownDiagnosticLogger();

@@ -1,17 +1,18 @@
 #pragma once
 
-#include "config_manager.h"
-#include <windows.h>
+#include <cstring>
 
 namespace G3O {
 
-inline bool IsInitialKeyDown(LPARAM lParam) noexcept {
-    constexpr ULONG_PTR previousKeyState = static_cast<ULONG_PTR>(1) << 30;
-    return (static_cast<ULONG_PTR>(lParam) & previousKeyState) == 0;
+inline bool IsSplashWindowClass(const char* className) noexcept {
+    return className && std::strcmp(className, "Splash") == 0;
 }
 
-inline bool ShouldInstallWindowInputHook(const Config& config) noexcept {
-    return config.enableBorderless || (config.enableDynamicFOV && config.enableFOVHotkeys);
+inline bool IsPreferredGameWindowClass(const char* className) noexcept {
+    return className &&
+        (std::strcmp(className, "CFFGFCWnd") == 0 ||
+         std::strcmp(className, "Gothic3") == 0 ||
+         std::strcmp(className, "Gothic3 Engine") == 0);
 }
 
 } // namespace G3O

@@ -13,17 +13,8 @@ struct Config {
 
     // [Display]
     bool enableBorderless = true;
-    UINT toggleBorderlessKey = VK_F10; // Default: F10
     bool autoBorderless = true;
     bool preventMinimizeOnFocusLoss = true;
-
-    // [Camera]
-    bool enableDynamicFOV = true;
-    float defaultFOV = 85.0f;
-    bool enableFOVHotkeys = true;
-    UINT decreaseFOVKey = VK_OEM_4; // '['
-    UINT increaseFOVKey = VK_OEM_6; // ']'
-    float fovStep = 5.0f;
 
     // [CrashInvestigator]
     bool enableCrashInvestigator = true;
@@ -72,6 +63,8 @@ struct Config {
     float fogDistanceMultiplier = 2.5f;
     float fogEndMinDistance = 250000.0f;
     bool preserveUnderwaterFog = true;
+    bool enableGlobalVisualLodProbe = false;
+    float globalVisualLodProbeScale = 1.25f;
     bool enableHighPrecisionTimer = true;
     bool enableHighProcessPriority = true;
     bool enableCPUTopologyAffinity = true;
@@ -95,7 +88,5 @@ struct Config {
 const Config& GetConfig();
 void LoadConfig();
 void LogLoadedConfig();
-UINT ParseKeyCode(const std::string& keyStr, UINT defaultKey = 0);
-std::string KeyCodeToString(UINT vkCode);
 
 } // namespace G3O

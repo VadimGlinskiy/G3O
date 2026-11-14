@@ -2,7 +2,7 @@
 
 [Русский](README.md)
 
-G3O is a high-performance 32-bit `dinput8.dll` proxy library for **Gothic 3** (v1.75.14). It features engine-level optimizations for the Genome Engine (decompression, scene graph, frustum culling database, property and template caching), borderless windowed mode, dynamic field of view (FOV) controls, crash investigation tools (Crash Investigator), and load-time profiling.
+G3O is a high-performance 32-bit `dinput8.dll` proxy library for **Gothic 3** (v1.75.14). It features engine-level optimizations for the Genome Engine (decompression, scene graph, frustum culling database, property and template caching), borderless windowed mode, crash investigation tools (Crash Investigator), and load-time profiling.
 
 Fully compatible with Community Patch 1.75.14, Update Pack, Parallel Universe Patch (PUP v1.1.1), and large mod builds (Union, Questpaket, Content Mod, LTM, Conquest, and setups with 300+ mods).
 
@@ -23,9 +23,8 @@ Fully compatible with Community Patch 1.75.14, Update Pack, Parallel Universe Pa
 - **Component Search Optimizer (Entity Search Optimizer):** Caches vptr table entries in `eCEntity::SearchForEntity` with an early-exit path.
 - **System Timer and Thread Scheduling:** Enables 1 ms OS timer resolution (`timeBeginPeriod(1)`), assigns high process priority, and automatically pins game threads to performance cores (P-cores) while avoiding efficiency cores (E-cores).
 
-### Display and Camera
+### Display
 - **Borderless Windowed Mode:** Eliminates crashes, freezing, and resolution resets during Alt-Tab and window switching. Includes protection against accidental minimization when clicking secondary monitors (`PreventMinimizeOnFocusLoss`).
-- **FOV override:** Replaces engine FOV values from 50° to 75° with `DefaultFOV`; it does not adjust FOV for the monitor aspect ratio. Optional hotkeys adjust the value in steps.
 - **D3D9 State Filtering:** Deduplicates redundant `SetRenderState` and `SetSamplerState` calls when running on native Direct3D 9.
 
 ### Diagnostics and Crash Investigation

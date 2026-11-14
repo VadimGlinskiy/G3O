@@ -25,127 +25,6 @@ static std::string ToUpper(std::string str) {
     return str;
 }
 
-UINT ParseKeyCode(const std::string& rawKeyStr, UINT defaultKey) {
-    std::string key = ToUpper(Trim(rawKeyStr));
-    if (key.empty()) return defaultKey;
-
-    if (key == "NONE" || key == "DISABLED" || key == "OFF" || key == "0") return 0;
-
-    // Function keys F1 - F24
-    if (key.size() >= 2 && key[0] == 'F') {
-        int num = 0;
-        if (IniValue::ParseInt(key.c_str() + 1, 1, 24, num)) return VK_F1 + (num - 1);
-    }
-
-    // Special keys
-    if (key == "INSERT" || key == "INS") return VK_INSERT;
-    if (key == "DELETE" || key == "DEL") return VK_DELETE;
-    if (key == "HOME") return VK_HOME;
-    if (key == "END") return VK_END;
-    if (key == "PAGEUP" || key == "PGUP" || key == "PRIOR") return VK_PRIOR;
-    if (key == "PAGEDOWN" || key == "PGDN" || key == "NEXT") return VK_NEXT;
-    if (key == "SCROLL" || key == "SCROLLLOCK") return VK_SCROLL;
-    if (key == "PAUSE" || key == "BREAK") return VK_PAUSE;
-    if (key == "PRTSC" || key == "PRINTSCREEN" || key == "SNAPSHOT") return VK_SNAPSHOT;
-    if (key == "TAB") return VK_TAB;
-    if (key == "SPACE") return VK_SPACE;
-    if (key == "BACKSPACE" || key == "BS") return VK_BACK;
-    if (key == "RETURN" || key == "ENTER") return VK_RETURN;
-    if (key == "ESC" || key == "ESCAPE") return VK_ESCAPE;
-    if (key == "CAPS" || key == "CAPSLOCK") return VK_CAPITAL;
-
-    // Numpad
-    if (key == "NUMPAD0") return VK_NUMPAD0;
-    if (key == "NUMPAD1") return VK_NUMPAD1;
-    if (key == "NUMPAD2") return VK_NUMPAD2;
-    if (key == "NUMPAD3") return VK_NUMPAD3;
-    if (key == "NUMPAD4") return VK_NUMPAD4;
-    if (key == "NUMPAD5") return VK_NUMPAD5;
-    if (key == "NUMPAD6") return VK_NUMPAD6;
-    if (key == "NUMPAD7") return VK_NUMPAD7;
-    if (key == "NUMPAD8") return VK_NUMPAD8;
-    if (key == "NUMPAD9") return VK_NUMPAD9;
-    if (key == "NUMPAD_ADD" || key == "NUMPAD+" || key == "ADD") return VK_ADD;
-    if (key == "NUMPAD_SUBTRACT" || key == "NUMPAD-" || key == "SUBTRACT") return VK_SUBTRACT;
-    if (key == "NUMPAD_MULTIPLY" || key == "NUMPAD*" || key == "MULTIPLY") return VK_MULTIPLY;
-    if (key == "NUMPAD_DIVIDE" || key == "NUMPAD/" || key == "DIVIDE") return VK_DIVIDE;
-    if (key == "NUMPAD_DECIMAL" || key == "NUMPAD.") return VK_DECIMAL;
-
-    // OEM Punctuation & symbols
-    if (key == "[" || key == "{" || key == "BRACKET_LEFT" || key == "LBRACKET") return VK_OEM_4;
-    if (key == "]" || key == "}" || key == "BRACKET_RIGHT" || key == "RBRACKET") return VK_OEM_6;
-    if (key == "-" || key == "_" || key == "MINUS") return VK_OEM_MINUS;
-    if (key == "=" || key == "+" || key == "EQUALS" || key == "PLUS") return VK_OEM_PLUS;
-    if (key == ";" || key == ":" || key == "SEMICOLON") return VK_OEM_1;
-    if (key == "'" || key == "\"" || key == "QUOTE" || key == "APOSTROPHE") return VK_OEM_7;
-    if (key == "`" || key == "~" || key == "TILDE" || key == "GRAVE") return VK_OEM_3;
-    if (key == "\\" || key == "|" || key == "BACKSLASH") return VK_OEM_5;
-    if (key == "/" || key == "?" || key == "SLASH") return VK_OEM_2;
-    if (key == "," || key == "<" || key == "COMMA") return VK_OEM_COMMA;
-    if (key == "." || key == ">" || key == "PERIOD" || key == "DOT") return VK_OEM_PERIOD;
-
-    // Hex integer code e.g. "0x79"
-    if (key.size() > 2 && key[0] == '0' && key[1] == 'X') {
-        std::uintptr_t value = 0;
-        if (IniValue::ParseUnsigned(key.c_str(), 0xFF, value)) return static_cast<UINT>(value);
-    }
-
-    // Single character 'A'-'Z' or '0'-'9'
-    if (key.size() == 1) {
-        char ch = key[0];
-        if (ch >= 'A' && ch <= 'Z') return (UINT)ch;
-        if (ch >= '0' && ch <= '9') return (UINT)ch;
-    }
-
-    // Decimal integer
-    int value = 0;
-    if (IniValue::ParseInt(key.c_str(), 1, 255, value)) return static_cast<UINT>(value);
-
-    return defaultKey;
-}
-
-std::string KeyCodeToString(UINT vkCode) {
-    if (vkCode == 0) return "NONE";
-    if (vkCode >= VK_F1 && vkCode <= VK_F24) {
-        return "F" + std::to_string(vkCode - VK_F1 + 1);
-    }
-    switch (vkCode) {
-    case VK_INSERT: return "INSERT";
-    case VK_DELETE: return "DELETE";
-    case VK_HOME: return "HOME";
-    case VK_END: return "END";
-    case VK_PRIOR: return "PAGEUP";
-    case VK_NEXT: return "PAGEDOWN";
-    case VK_SCROLL: return "SCROLLLOCK";
-    case VK_PAUSE: return "PAUSE";
-    case VK_SNAPSHOT: return "PRINTSCREEN";
-    case VK_TAB: return "TAB";
-    case VK_SPACE: return "SPACE";
-    case VK_BACK: return "BACKSPACE";
-    case VK_RETURN: return "ENTER";
-    case VK_ESCAPE: return "ESCAPE";
-    case VK_OEM_4: return "[";
-    case VK_OEM_6: return "]";
-    case VK_OEM_MINUS: return "-";
-    case VK_OEM_PLUS: return "=";
-    case VK_OEM_1: return ";";
-    case VK_OEM_7: return "'";
-    case VK_OEM_3: return "`";
-    case VK_OEM_5: return "\\";
-    case VK_OEM_2: return "/";
-    case VK_OEM_COMMA: return ",";
-    case VK_OEM_PERIOD: return ".";
-    case VK_ADD: return "NUMPAD+";
-    case VK_SUBTRACT: return "NUMPAD-";
-    default:
-        if (vkCode >= 'A' && vkCode <= 'Z') return std::string(1, (char)vkCode);
-        if (vkCode >= '0' && vkCode <= '9') return std::string(1, (char)vkCode);
-        char hexBuf[16];
-        snprintf(hexBuf, sizeof(hexBuf), "0x%02X", vkCode);
-        return hexBuf;
-    }
-}
-
 static std::string ResolveIniPath() {
     char exePath[MAX_PATH] = {};
     const DWORD length = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
@@ -187,35 +66,11 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Убирает рамку окна игры и растягивает его до границ монитора.\n"
         << "EnableBorderless=true\n"
         << "\n"
-        << "; Клавиша переключения режима окна; NONE отключает эту клавишу.\n"
-        << "ToggleBorderlessKey=F10\n"
-        << "\n"
         << "; Включает окно без рамок при запуске игры.\n"
         << "AutoBorderless=true\n"
         << "\n"
         << "; В режиме без рамок подавляет обработку игрой сообщений о потере фокуса и сворачивании.\n"
         << "PreventMinimizeOnFocusLoss=true\n"
-        << "\n"
-        << "[Camera]\n"
-        << "; Подменяет значения FOV от 50 до 75 градусов на DefaultFOV (true / false).\n"
-        << "; FOV не пересчитывается по соотношению сторон экрана.\n"
-        << "EnableDynamicFOV=true\n"
-        << "\n"
-        << "; FOV, подставляемый вместо игровых значений 50–75 градусов.\n"
-        << "; Код принимает значения от 50 до 115 градусов; это технический диапазон, не рекомендация.\n"
-        << "DefaultFOV=85.0\n"
-        << "\n"
-        << "; Разрешает менять FOV горячими клавишами. Для настроенной клавиши нужно удерживать Ctrl; NumPad -/+ работают отдельно.\n"
-        << "EnableFOVHotkeys=true\n"
-        << "\n"
-        << "; Клавиша уменьшения FOV при зажатом Ctrl (дублируется на NumPad -).\n"
-        << "DecreaseFOVKey=[\n"
-        << "\n"
-        << "; Клавиша увеличения FOV при зажатом Ctrl (дублируется на NumPad +).\n"
-        << "IncreaseFOVKey=]\n"
-        << "\n"
-        << "; Шаг изменения FOV в градусах за одно нажатие горячей клавиши.\n"
-        << "FOVStep=5.0\n"
         << "\n"
         << "[CrashInvestigator]\n"
         << "; Включает обработчики G3O для необработанных исключений Windows и выбранных ошибок движка.\n"
@@ -358,6 +213,11 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Оставляет туман без изменений, если код распознаёт его как туман ближней зоны.\n"
         << "PreserveUnderwaterFog=true\n"
         << "\n"
+        << "; Экспериментально масштабирует глобальный коэффициент выбора LOD; меняет LOD всех визуальных мешей, не только воды.\n"
+        << "; Оставьте выключенным вне проверки. Масштаб: 0.25–4.0; 1.0 не меняет значение.\n"
+        << "EnableGlobalVisualLodProbe=false\n"
+        << "GlobalVisualLodProbeScale=1.25\n"
+        << "\n"
         << "; Запрашивает у Windows период таймера 1 мс; при успешном запросе возвращает прежний период при завершении G3O.\n"
         << "EnableHighPrecisionTimer=true\n"
         << "\n"
@@ -385,7 +245,7 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnableD3D9StateFilter=true\n"
         << "\n"
         << "[Logging]\n"
-        << "; Записывает сообщения G3O и прочитанные параметры конфигурации в G3O\\G3O_diagnostic_*.log.\n"
+        << "; Записывает сообщения G3O и прочитанные параметры конфигурации в файл G3O\\G3O_diagnostic_*.log.\n"
         << "EnableDiagnosticLog=false\n"
         << "\n"
         << "; Копирует вызовы OutputDebugStringA и выбранный вывод движка в журнал G3O; исходный OutputDebugStringA тоже вызывается.\n"
@@ -421,12 +281,6 @@ static bool ReadIniBoolWithLegacyKey(const char* section, const char* key,
         return ReadIniBool(section, key, defaultVal, path);
     }
     return ReadIniBool(section, legacyKey, defaultVal, path);
-}
-
-static std::string ReadIniString(const char* section, const char* key, const char* defaultVal, const char* path) {
-    char buf[256] = { 0 };
-    GetPrivateProfileStringA(section, key, defaultVal, buf, sizeof(buf), path);
-    return Trim(buf);
 }
 
 static float ReadIniFloat(const char* section, const char* key, float defaultVal,
@@ -481,20 +335,8 @@ void LoadConfig() {
 
     // [Display]
     s_config.enableBorderless = ReadIniBool("Display", "EnableBorderless", true, path);
-    std::string borderlessKeyStr = ReadIniString("Display", "ToggleBorderlessKey", "F10", path);
-    s_config.toggleBorderlessKey = ParseKeyCode(borderlessKeyStr, VK_F10);
     s_config.autoBorderless = ReadIniBool("Display", "AutoBorderless", true, path);
     s_config.preventMinimizeOnFocusLoss = ReadIniBool("Display", "PreventMinimizeOnFocusLoss", true, path);
-
-    // [Camera]
-    s_config.enableDynamicFOV = ReadIniBool("Camera", "EnableDynamicFOV", true, path);
-    s_config.defaultFOV = ReadIniFloat("Camera", "DefaultFOV", 85.0f, 50.0f, 115.0f, path);
-    s_config.enableFOVHotkeys = ReadIniBool("Camera", "EnableFOVHotkeys", true, path);
-    std::string decKeyStr = ReadIniString("Camera", "DecreaseFOVKey", "[", path);
-    s_config.decreaseFOVKey = ParseKeyCode(decKeyStr, VK_OEM_4);
-    std::string incKeyStr = ReadIniString("Camera", "IncreaseFOVKey", "]", path);
-    s_config.increaseFOVKey = ParseKeyCode(incKeyStr, VK_OEM_6);
-    s_config.fovStep = ReadIniFloat("Camera", "FOVStep", 5.0f, 0.1f, 30.0f, path);
 
     // [CrashInvestigator]
     s_config.enableCrashInvestigator = ReadIniBool("CrashInvestigator", "EnableCrashInvestigator", true, path);
@@ -542,6 +384,8 @@ void LoadConfig() {
     s_config.fogDistanceMultiplier = ReadIniFloat("Performance", "FogDistanceMultiplier", 2.5f, 0.1f, 10.0f, path);
     s_config.fogEndMinDistance = ReadIniFloat("Performance", "FogEndMinDistance", 250000.0f, 0.0f, 1000000.0f, path);
     s_config.preserveUnderwaterFog = ReadIniBool("Performance", "PreserveUnderwaterFog", true, path);
+    s_config.enableGlobalVisualLodProbe = ReadIniBool("Performance", "EnableGlobalVisualLodProbe", false, path);
+    s_config.globalVisualLodProbeScale = ReadIniFloat("Performance", "GlobalVisualLodProbeScale", 1.25f, 0.25f, 4.0f, path);
     s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
     s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
     s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);
