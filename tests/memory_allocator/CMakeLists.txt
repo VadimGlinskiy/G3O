@@ -20,5 +20,14 @@ target_link_libraries(memory_allocator_test PRIVATE
     mimalloc-static
 )
 
+add_executable(test_arena test_arena.cpp)
+target_include_directories(test_arena PRIVATE
+    ../../src
+    ../../third_party/mimalloc/include
+)
+target_link_libraries(test_arena PRIVATE
+    mimalloc-static
+)
+
 enable_testing()
 add_test(NAME memory_allocator COMMAND memory_allocator_test)

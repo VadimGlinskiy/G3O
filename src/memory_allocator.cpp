@@ -81,10 +81,14 @@ static void __stdcall Hook_MemHeap_Free(void* ptr) {
     if (mi_is_in_heap_region(ptr)) {
         s_miFreeCount.fetch_add(1, std::memory_order_relaxed);
         mi_free(ptr);
-    } else {
-        s_origFreeCount.fetch_add(1, std::memory_order_relaxed);
-        if (g_origFreeHeap) {
+        return;
+    }
+    s_origFreeCount.fetch_add(1, std::memory_order_relaxed);
+    if (g_origFreeHeap) {
+        __try {
             g_origFreeHeap(ptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Protected against foreign or invalid heap pointers
         }
     }
 }
@@ -104,7 +108,11 @@ static void* __stdcall Hook_MemHeap_ReAlloc(void* ptr, unsigned int size) {
     }
     s_origReallocCount.fetch_add(1, std::memory_order_relaxed);
     if (g_origReAllocHeap) {
-        return g_origReAllocHeap(ptr, size);
+        __try {
+            return g_origReAllocHeap(ptr, size);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
     }
     return nullptr;
 }
@@ -123,10 +131,14 @@ static void __stdcall Hook_MemHeap_FreeUnsynced(void* ptr) {
     if (mi_is_in_heap_region(ptr)) {
         s_miFreeCount.fetch_add(1, std::memory_order_relaxed);
         mi_free(ptr);
-    } else {
-        s_origFreeCount.fetch_add(1, std::memory_order_relaxed);
-        if (g_origFreeUnsynced) {
+        return;
+    }
+    s_origFreeCount.fetch_add(1, std::memory_order_relaxed);
+    if (g_origFreeUnsynced) {
+        __try {
             g_origFreeUnsynced(ptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Protected against foreign or invalid heap pointers
         }
     }
 }
@@ -146,7 +158,11 @@ static void* __stdcall Hook_MemHeap_ReAllocUnsynced(void* ptr, unsigned int size
     }
     s_origReallocCount.fetch_add(1, std::memory_order_relaxed);
     if (g_origReAllocUnsynced) {
-        return g_origReAllocUnsynced(ptr, size);
+        __try {
+            return g_origReAllocUnsynced(ptr, size);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
     }
     return nullptr;
 }
@@ -165,10 +181,13 @@ static void __stdcall Hook_MemHeap_FreeShortUsage(void* ptr) {
     if (mi_is_in_heap_region(ptr)) {
         s_miFreeCount.fetch_add(1, std::memory_order_relaxed);
         mi_free(ptr);
-    } else {
-        s_origFreeCount.fetch_add(1, std::memory_order_relaxed);
-        if (g_origFreeShortUsage) {
+        return;
+    }
+    s_origFreeCount.fetch_add(1, std::memory_order_relaxed);
+    if (g_origFreeShortUsage) {
+        __try {
             g_origFreeShortUsage(ptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
 }
@@ -187,10 +206,13 @@ static void __stdcall Hook_MemHeap_FreeShortUsageUnsynced(void* ptr) {
     if (mi_is_in_heap_region(ptr)) {
         s_miFreeCount.fetch_add(1, std::memory_order_relaxed);
         mi_free(ptr);
-    } else {
-        s_origFreeCount.fetch_add(1, std::memory_order_relaxed);
-        if (g_origFreeShortUsageUnsynced) {
+        return;
+    }
+    s_origFreeCount.fetch_add(1, std::memory_order_relaxed);
+    if (g_origFreeShortUsageUnsynced) {
+        __try {
             g_origFreeShortUsageUnsynced(ptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
 }
@@ -217,7 +239,7 @@ static void ConfigureMimallocTuning() {
         mi_arena_id_t arena_id = 0;
         int res = mi_reserve_os_memory_ex(size, false, false, false, &arena_id);
         if (res == 0) {
-            Log("G3O", "MemoryAllocator: mimalloc bounded arena reserved: %zu MB (id %d).",
+            Log("G3O", "MemoryAllocator: mimalloc bounded arena reserved: %zu MB (id %p).",
                 size / (1024 * 1024), arena_id);
             break;
         }
@@ -239,75 +261,93 @@ bool InitializeMemoryAllocator(int mode) {
         return false;
     }
 
+    // 1. Resolve target entrypoints
     // ShortUsage hooks (Mode 1 & Mode 2)
     s_targetAllocShort = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?AllocShortUsage@MemHeap@@SGPAXI@Z"));
     s_targetFreeShort = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?FreeShortUsage@MemHeap@@SGXPAX@Z"));
     s_targetAllocShortUnsync = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?AllocShortUsageUnsynced@MemHeap@@SGPAXI@Z"));
     s_targetFreeShortUnsync = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?FreeShortUsageUnsynced@MemHeap@@SGXPAX@Z"));
 
-    if (s_targetAllocShort) {
-        MH_CreateHook(s_targetAllocShort, reinterpret_cast<void*>(&Hook_MemHeap_AllocShortUsage),
-                      reinterpret_cast<void**>(&g_origAllocShortUsage));
-        MH_EnableHook(s_targetAllocShort);
+    if (mode >= 2) {
+        s_targetAlloc = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?Alloc@MemHeap@@SGPAXI@Z"));
+        s_targetFree = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?Free@MemHeap@@SGXPAX@Z"));
+        s_targetReAlloc = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?ReAlloc@MemHeap@@SGPAXPAXI@Z"));
+        s_targetAllocUnsync = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?AllocUnsynced@MemHeap@@SGPAXI@Z"));
+        s_targetFreeUnsync = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?FreeUnsynced@MemHeap@@SGXPAX@Z"));
+        s_targetReAllocUnsync = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?ReAllocUnsynced@MemHeap@@SGPAXPAXI@Z"));
     }
+
+    // 2. Create hooks without enabling yet
     if (s_targetFreeShort) {
         MH_CreateHook(s_targetFreeShort, reinterpret_cast<void*>(&Hook_MemHeap_FreeShortUsage),
                       reinterpret_cast<void**>(&g_origFreeShortUsage));
-        MH_EnableHook(s_targetFreeShort);
-    }
-    if (s_targetAllocShortUnsync) {
-        MH_CreateHook(s_targetAllocShortUnsync, reinterpret_cast<void*>(&Hook_MemHeap_AllocShortUsageUnsynced),
-                      reinterpret_cast<void**>(&g_origAllocShortUsageUnsynced));
-        MH_EnableHook(s_targetAllocShortUnsync);
     }
     if (s_targetFreeShortUnsync) {
         MH_CreateHook(s_targetFreeShortUnsync, reinterpret_cast<void*>(&Hook_MemHeap_FreeShortUsageUnsynced),
                       reinterpret_cast<void**>(&g_origFreeShortUsageUnsynced));
-        MH_EnableHook(s_targetFreeShortUnsync);
+    }
+    if (s_targetAllocShort) {
+        MH_CreateHook(s_targetAllocShort, reinterpret_cast<void*>(&Hook_MemHeap_AllocShortUsage),
+                      reinterpret_cast<void**>(&g_origAllocShortUsage));
+    }
+    if (s_targetAllocShortUnsync) {
+        MH_CreateHook(s_targetAllocShortUnsync, reinterpret_cast<void*>(&Hook_MemHeap_AllocShortUsageUnsynced),
+                      reinterpret_cast<void**>(&g_origAllocShortUsageUnsynced));
     }
 
     if (mode >= 2) {
-        // Mode 2: Full MemHeap replacement with Safe Dispatch Free
-        s_targetAlloc = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?Alloc@MemHeap@@SGPAXI@Z"));
-        s_targetFree = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?Free@MemHeap@@SGXPAX@Z"));
-        s_targetReAlloc = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?ReAlloc@MemHeap@@SGPAXPAXI@Z"));
-
-        s_targetAllocUnsync = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?AllocUnsynced@MemHeap@@SGPAXI@Z"));
-        s_targetFreeUnsync = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?FreeUnsynced@MemHeap@@SGXPAX@Z"));
-        s_targetReAllocUnsync = reinterpret_cast<void*>(GetProcAddress(hSharedBase, "?ReAllocUnsynced@MemHeap@@SGPAXPAXI@Z"));
-
-        if (s_targetAlloc) {
-            MH_CreateHook(s_targetAlloc, reinterpret_cast<void*>(&Hook_MemHeap_Alloc),
-                          reinterpret_cast<void**>(&g_origAlloc));
-            MH_EnableHook(s_targetAlloc);
-        }
         if (s_targetFree) {
             MH_CreateHook(s_targetFree, reinterpret_cast<void*>(&Hook_MemHeap_Free),
                           reinterpret_cast<void**>(&g_origFreeHeap));
-            MH_EnableHook(s_targetFree);
-        }
-        if (s_targetReAlloc) {
-            MH_CreateHook(s_targetReAlloc, reinterpret_cast<void*>(&Hook_MemHeap_ReAlloc),
-                          reinterpret_cast<void**>(&g_origReAllocHeap));
-            MH_EnableHook(s_targetReAlloc);
-        }
-
-        if (s_targetAllocUnsync) {
-            MH_CreateHook(s_targetAllocUnsync, reinterpret_cast<void*>(&Hook_MemHeap_AllocUnsynced),
-                          reinterpret_cast<void**>(&g_origAllocUnsynced));
-            MH_EnableHook(s_targetAllocUnsync);
         }
         if (s_targetFreeUnsync) {
             MH_CreateHook(s_targetFreeUnsync, reinterpret_cast<void*>(&Hook_MemHeap_FreeUnsynced),
                           reinterpret_cast<void**>(&g_origFreeUnsynced));
-            MH_EnableHook(s_targetFreeUnsync);
+        }
+        if (s_targetReAlloc) {
+            MH_CreateHook(s_targetReAlloc, reinterpret_cast<void*>(&Hook_MemHeap_ReAlloc),
+                          reinterpret_cast<void**>(&g_origReAllocHeap));
         }
         if (s_targetReAllocUnsync) {
             MH_CreateHook(s_targetReAllocUnsync, reinterpret_cast<void*>(&Hook_MemHeap_ReAllocUnsynced),
                           reinterpret_cast<void**>(&g_origReAllocUnsynced));
-            MH_EnableHook(s_targetReAllocUnsync);
         }
+        if (s_targetAlloc) {
+            MH_CreateHook(s_targetAlloc, reinterpret_cast<void*>(&Hook_MemHeap_Alloc),
+                          reinterpret_cast<void**>(&g_origAlloc));
+        }
+        if (s_targetAllocUnsync) {
+            MH_CreateHook(s_targetAllocUnsync, reinterpret_cast<void*>(&Hook_MemHeap_AllocUnsynced),
+                          reinterpret_cast<void**>(&g_origAllocUnsynced));
+        }
+    }
 
+    // 3. Queue enable all created allocator hooks
+    void* activeTargets[] = {
+        s_targetFreeShort, s_targetFreeShortUnsync,
+        s_targetAllocShort, s_targetAllocShortUnsync,
+        s_targetFree, s_targetFreeUnsync,
+        s_targetReAlloc, s_targetReAllocUnsync,
+        s_targetAlloc, s_targetAllocUnsync
+    };
+
+    for (void* target : activeTargets) {
+        if (target) {
+            MH_QueueEnableHook(target);
+        }
+    }
+
+    // 4. Atomically apply all queued hooks simultaneously in one thread-freeze pass
+    MH_STATUS status = MH_ApplyQueued();
+    if (status != MH_OK) {
+        Log("G3O", "MemoryAllocator: MH_ApplyQueued failed (%d); activating individually (Frees first).", status);
+        // Fallback: strictly activate Free hooks before Alloc hooks
+        for (void* target : activeTargets) {
+            if (target) MH_EnableHook(target);
+        }
+    }
+
+    if (mode >= 2) {
         Log("G3O", "MemoryAllocator: AllocatorMode=2 (Full MemHeap + Safe Dispatch Free active).");
     } else {
         Log("G3O", "MemoryAllocator: AllocatorMode=1 (ShortUsage / ScrapHeap mimalloc replacement active).");
@@ -321,14 +361,22 @@ void ShutdownMemoryAllocator() {
     if (!s_hooksInstalled) return;
 
     void* hooks[] = {
-        s_targetAllocShort, s_targetFreeShort, s_targetAllocShortUnsync, s_targetFreeShortUnsync,
-        s_targetAlloc, s_targetFree, s_targetReAlloc,
-        s_targetAllocUnsync, s_targetFreeUnsync, s_targetReAllocUnsync
+        s_targetAllocShort, s_targetAllocShortUnsync,
+        s_targetAlloc, s_targetAllocUnsync,
+        s_targetReAlloc, s_targetReAllocUnsync,
+        s_targetFreeShort, s_targetFreeShortUnsync,
+        s_targetFree, s_targetFreeUnsync
     };
 
     for (void* target : hooks) {
         if (target) {
-            MH_DisableHook(target);
+            MH_QueueDisableHook(target);
+        }
+    }
+    MH_ApplyQueued();
+
+    for (void* target : hooks) {
+        if (target) {
             MH_RemoveHook(target);
         }
     }

@@ -92,15 +92,13 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeBorderlessWindow();
     }
 
-    // Wait for engine libraries; hook DiagOutput as soon as SharedBase.dll appears.
-    int maxWaitMs = 5000;
-    while ((!GetModuleHandleA("SharedBase.dll") || !GetModuleHandleA("GFC.dll") || !GetModuleHandleA("FileSystem.dll") || !GetModuleHandleA("Game.dll") || !GetModuleHandleA("Engine.dll")) && maxWaitMs > 0) {
-        if (cfg.enableCrashInvestigator || cfg.interceptOutputDebugString) {
-            G3O::HookEngineDiagOutput();
-        }
-        Sleep(2);
-        maxWaitMs -= 2;
+    // 1. Wait for SharedBase.dll (core foundation of Gothic 3 engine: MemHeap, DiagOutput, error handlers)
+    int maxWaitSharedBaseMs = 2000;
+    while (!GetModuleHandleA("SharedBase.dll") && maxWaitSharedBaseMs > 0) {
+        Sleep(1);
+        maxWaitSharedBaseMs -= 1;
     }
+
     if (cfg.enableCrashInvestigator || cfg.interceptOutputDebugString) {
         G3O::HookEngineDiagOutput();
     }
@@ -110,12 +108,21 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::HookEngineFatalErrors();
     }
 
+    // Initialize Memory Allocator immediately when SharedBase.dll is loaded,
+    // BEFORE game subsystems (FileSystem, Engine, Game) start mounting pak files and allocating buffers.
     if (cfg.allocatorMode > 0) {
         G3O::InitializeMemoryAllocator(cfg.allocatorMode);
     }
 
     if (cfg.enableCrashGuards) {
         G3O::InitializeCrashGuards();
+    }
+
+    // 2. Wait for remaining engine libraries (GFC.dll, FileSystem.dll, Game.dll, Engine.dll)
+    int maxWaitEngineMs = 5000;
+    while ((!GetModuleHandleA("GFC.dll") || !GetModuleHandleA("FileSystem.dll") || !GetModuleHandleA("Game.dll") || !GetModuleHandleA("Engine.dll")) && maxWaitEngineMs > 0) {
+        Sleep(2);
+        maxWaitEngineMs -= 2;
     }
 
     // Fast Pak Decompressor: SIMD libdeflate zlib decompression for .pak archives & savegames
