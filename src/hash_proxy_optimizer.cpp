@@ -11,45 +11,14 @@
 
 namespace G3O {
 
-using GetHashValue_bCString_t = unsigned long (__stdcall*)(const void* pStr);
-using GetHashValue_PAD_t = unsigned long (__stdcall*)(const char* const* ppStr);
 using TemplateProxyGetEntity_t = void* (__thiscall*)(void* pThis);
 
-static GetHashValue_bCString_t Real_GetHashValue_bCString = nullptr;
-static GetHashValue_PAD_t Real_GetHashValue_PAD = nullptr;
 static TemplateProxyGetEntity_t Real_TemplateProxyGetEntity = nullptr;
-
-static void* s_targetHash_bCString = nullptr;
-static void* s_targetHash_PAD = nullptr;
 static void* s_targetProxyGetEntity = nullptr;
 
-static std::atomic<uint32_t> s_hashCalls{0};
 static std::atomic<uint32_t> s_proxyHits{0};
 static std::atomic<uint32_t> s_proxyNegHits{0};
 static std::atomic<uint32_t> s_proxyMisses{0};
-
-static unsigned long __stdcall Hooked_GetHashValue_bCString(const void* pStr) {
-    if (!pStr) return 0;
-    const char* pData = *reinterpret_cast<const char* const*>(pStr);
-    if (!pData || *pData == '\0') return 0;
-
-    s_hashCalls.fetch_add(1, std::memory_order_relaxed);
-
-    int len = *reinterpret_cast<const int*>(pData - 8);
-    if (len > 0 && len <= 4096) {
-        return FastDJB2_Length(pData, len);
-    }
-    return FastDJB2_NullTerminated(pData);
-}
-
-static unsigned long __stdcall Hooked_GetHashValue_PAD(const char* const* ppStr) {
-    if (!ppStr) return 0;
-    const char* str = *ppStr;
-    if (!str) return 0;
-
-    s_hashCalls.fetch_add(1, std::memory_order_relaxed);
-    return FastDJB2_NullTerminated(str);
-}
 
 // In eCTemplateEntityProxy (12 bytes):
 //   +0x04: eCTemplateEntity* m_pEntityCached (if resolved)
@@ -122,7 +91,7 @@ static void* __fastcall Hooked_TemplateProxyGetEntity(void* pThis, void* /*edx*/
 }
 
 std::uint32_t HashProxy_GetHashHits() noexcept {
-    return s_hashCalls.load(std::memory_order_relaxed);
+    return 0;
 }
 
 std::uint32_t HashProxy_GetProxyHits() noexcept {
@@ -151,52 +120,9 @@ void InitializeHashProxyOptimizer() {
         return;
     }
 
-    HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
-    if (hSharedBase) {
-        // 1. Hook g_GetHashValue<bCString>
-        void* pHashBCString = reinterpret_cast<void*>(GetProcAddress(
-            hSharedBase, "??$g_GetHashValue@VbCString@@@@YGKABVbCString@@@Z"));
-        if (pHashBCString) {
-            MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
-            const HookInstallResult result = InstallHookSafely(
-                [&] { createStatus = MH_CreateHook(pHashBCString, reinterpret_cast<LPVOID>(Hooked_GetHashValue_bCString),
-                                                   reinterpret_cast<LPVOID*>(&Real_GetHashValue_bCString)); return createStatus == MH_OK; },
-                [&] { enableStatus = MH_EnableHook(pHashBCString); return enableStatus == MH_OK; },
-                [&] { removeStatus = MH_RemoveHook(pHashBCString); },
-                [&] { Real_GetHashValue_bCString = nullptr; });
-            if (result == HookInstallResult::Installed) {
-                s_targetHash_bCString = pHashBCString;
-                Log("G3O", "Hash Optimizer: Hooked g_GetHashValue<bCString> (0x%p)", pHashBCString);
-            } else {
-                Log("G3O", "Hash Optimizer: bCString hook install failed (create=%d, enable=%d, remove=%d).",
-                    createStatus, enableStatus, removeStatus);
-            }
-        }
-
-        // 2. Hook g_GetHashValue<PAD>
-        void* pHashPAD = reinterpret_cast<void*>(GetProcAddress(
-            hSharedBase, "??$g_GetHashValue@PAD@@YGKABQAD@Z"));
-        if (pHashPAD) {
-            MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
-            const HookInstallResult result = InstallHookSafely(
-                [&] { createStatus = MH_CreateHook(pHashPAD, reinterpret_cast<LPVOID>(Hooked_GetHashValue_PAD),
-                                                   reinterpret_cast<LPVOID*>(&Real_GetHashValue_PAD)); return createStatus == MH_OK; },
-                [&] { enableStatus = MH_EnableHook(pHashPAD); return enableStatus == MH_OK; },
-                [&] { removeStatus = MH_RemoveHook(pHashPAD); },
-                [&] { Real_GetHashValue_PAD = nullptr; });
-            if (result == HookInstallResult::Installed) {
-                s_targetHash_PAD = pHashPAD;
-                Log("G3O", "Hash Optimizer: Hooked g_GetHashValue<PAD> (0x%p)", pHashPAD);
-            } else {
-                Log("G3O", "Hash Optimizer: PAD hook install failed (create=%d, enable=%d, remove=%d).",
-                    createStatus, enableStatus, removeStatus);
-            }
-        }
-    }
-
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
     if (hEngine) {
-        // 3. Hook eCTemplateEntityProxy::GetEntity
+        // Hook eCTemplateEntityProxy::GetEntity
         void* pProxyGet = reinterpret_cast<void*>(GetProcAddress(
             hEngine, "?GetEntity@eCTemplateEntityProxy@@QAEPAVeCTemplateEntity@@XZ"));
         if (!pProxyGet) {
@@ -223,16 +149,6 @@ void InitializeHashProxyOptimizer() {
 }
 
 void ShutdownHashProxyOptimizer() {
-    if (s_targetHash_bCString) {
-        MH_DisableHook(s_targetHash_bCString);
-        MH_RemoveHook(s_targetHash_bCString);
-        s_targetHash_bCString = nullptr;
-    }
-    if (s_targetHash_PAD) {
-        MH_DisableHook(s_targetHash_PAD);
-        MH_RemoveHook(s_targetHash_PAD);
-        s_targetHash_PAD = nullptr;
-    }
     if (s_targetProxyGetEntity) {
         MH_DisableHook(s_targetProxyGetEntity);
         MH_RemoveHook(s_targetProxyGetEntity);
