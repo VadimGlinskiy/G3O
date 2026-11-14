@@ -36,32 +36,20 @@ static bool __fastcall Hooked_BoxIntersectsBox(const Box3* pThis, void* /*edx*/,
 // ---------------------------------------------------------------------------
 
 static bool __fastcall Hooked_CompareFast(const void* pThis, void* /*edx*/, const void* pOther) {
-    const char* str1 = pThis ? *static_cast<const char* const*>(pThis) : nullptr;
-    const char* str2 = pOther ? *static_cast<const char* const*>(pOther) : nullptr;
-    return SharedBase::CompareString(str1, str2);
+    return SharedBase::FastStringCompare(pThis, pOther);
 }
 
 // ---------------------------------------------------------------------------
-// 5. Case-insensitive equality replacement uses the complete null-terminated text.
+// 5. Case-insensitive equality replacement uses length-bounded comparison.
 // ---------------------------------------------------------------------------
 
 static bool __fastcall Hooked_CompareNoCaseFast(const void* pThis, void* /*edx*/, const void* pOther) {
-    const char* str1 = pThis ? *static_cast<const char* const*>(pThis) : nullptr;
-    const char* str2 = pOther ? *static_cast<const char* const*>(pOther) : nullptr;
-    return SharedBase::CompareStringNoCase(str1, str2);
-}
-
-// ---------------------------------------------------------------------------
-// 6. Gothic 3 targets Windows NT; bypass the legacy platform check.
-// ---------------------------------------------------------------------------
-
-static BOOL __stdcall Hooked_IsNT() {
-    return TRUE;
+    return SharedBase::FastStringCompareNoCase(pThis, pOther);
 }
 
 // ---------------------------------------------------------------------------
 // Initialization & Shutdown
-static void* s_sharedBaseHookTargets[4] = {};
+static void* s_sharedBaseHookTargets[3] = {};
 
 void InitializeSharedBaseOptimizations() {
     HMODULE hSharedBase = GetModuleHandleA("SharedBase.dll");
@@ -125,26 +113,6 @@ void InitializeSharedBaseOptimizations() {
         }
     } else {
         Log("G3O", "SharedBase case-insensitive string comparison export is missing; optimization skipped.");
-    }
-
-    // 4. Hook _IsNT@0
-    void* pIsNT = (void*)GetProcAddress(hSharedBase, "_IsNT@0");
-    if (pIsNT) {
-        MH_STATUS status = MH_CreateHook(pIsNT, (LPVOID)Hooked_IsNT, nullptr);
-        if (status == MH_OK) {
-            status = MH_EnableHook(pIsNT);
-            if (status == MH_OK) {
-                s_sharedBaseHookTargets[3] = pIsNT;
-                Log("G3O", "SharedBase Windows NT check hook enabled.");
-            } else {
-                MH_RemoveHook(pIsNT);
-                Log("G3O", "SharedBase Windows NT check hook activation failed (code %d).", (int)status);
-            }
-        } else {
-            Log("G3O", "SharedBase Windows NT check hook creation failed (code %d).", (int)status);
-        }
-    } else {
-        Log("G3O", "SharedBase Windows NT check export is missing; optimization skipped.");
     }
 }
 

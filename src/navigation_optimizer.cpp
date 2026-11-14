@@ -43,34 +43,10 @@ void InitializeNavigationOptimizer() {
         Log("G3O", "Navigation Optimizer is disabled by configuration.");
         return;
     }
-
-    HMODULE hGame = GetModuleHandleA("Game.dll");
-    if (!hGame) {
-        Log("G3O", "Navigation Optimizer: Game.dll not loaded.");
-        return;
-    }
-
-    // ?Process@gCNavigationAdmin@@UAEXXZ (RVA 0x00120720 in Game.dll)
-    void* pProc = reinterpret_cast<void*>(GetProcAddress(hGame, "?Process@gCNavigationAdmin@@UAEXXZ"));
-    if (!pProc) {
-        Log("G3O", "Navigation Optimizer: ?Process@gCNavigationAdmin@@UAEXXZ not found in Game.dll.");
-        return;
-    }
-
-    MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
-    const HookInstallResult result = InstallHookSafely(
-        [&] { createStatus = MH_CreateHook(pProc, reinterpret_cast<LPVOID>(Hooked_NavigationProcess),
-                                           reinterpret_cast<LPVOID*>(&Real_NavigationProcess)); return createStatus == MH_OK; },
-        [&] { enableStatus = MH_EnableHook(pProc); return enableStatus == MH_OK; },
-        [&] { removeStatus = MH_RemoveHook(pProc); },
-        [&] { Real_NavigationProcess = nullptr; });
-    if (result == HookInstallResult::Installed) {
-        s_targetNavProcess = pProc;
-        Log("G3O", "Navigation Optimizer initialized (gCNavigationAdmin::Process hooked at 0x%p).", pProc);
-    } else {
-        Log("G3O", "Navigation Optimizer: hook install failed (create=%d, enable=%d, remove=%d).",
-            createStatus, enableStatus, removeStatus);
-    }
+    // gCNavigationAdmin::Process is only invoked by the main loop during active gameplay frames
+    // (never during modal savegame loading). Hooking it adds unnecessary per-frame detour overhead.
+    // Retired to zero-overhead no-op.
+    Log("G3O", "Navigation Optimizer: gCNavigationAdmin::Process hook retired (zero per-frame detour overhead).");
 }
 
 void ShutdownNavigationOptimizer() {

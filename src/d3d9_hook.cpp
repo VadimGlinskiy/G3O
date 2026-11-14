@@ -481,6 +481,29 @@ static void* s_targetD3D9DeviceCtor = nullptr;
 static void* s_targetTextureFromMemory = nullptr;
 static void* s_targetTextureFromFile = nullptr;
 
+static bool TryAttachExistingD3D9Device(HMODULE hEngine) {
+    if (!hEngine) return false;
+    // Engine.dll + 0x602DA0 holds the global m_pAPIDevice pointer (eCDX9Device*)
+    BYTE* pBase = reinterpret_cast<BYTE*>(hEngine);
+    void** ppAPIDevice = reinterpret_cast<void**>(pBase + 0x602DA0);
+    if (!IsBadReadPtr(ppAPIDevice, sizeof(void*)) && *ppAPIDevice) {
+        BYTE* pAPIDevice = reinterpret_cast<BYTE*>(*ppAPIDevice);
+        if (!IsBadReadPtr(pAPIDevice, 16)) {
+            void* pVTable = *reinterpret_cast<void**>(pAPIDevice);
+            void* expectedVTable = reinterpret_cast<void*>(pBase + 0x42AAFC); // ??_7eCDX9Device@@6B@
+            if (pVTable == expectedVTable) {
+                IDirect3DDevice9* pDevice = *reinterpret_cast<IDirect3DDevice9**>(pAPIDevice + 0x08);
+                if (pDevice) {
+                    Log("G3O", "Direct3D 9 device captured from active eCDX9Device singleton (device=%p).", pDevice);
+                    AttachD3D9DeviceIfReady(pDevice);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDirect3DDevice9* pDevice) {
     void* result = Real_eCDX9Device_ctor(pThis, pDevice);
     InvalidateD3D9StateCaches();
@@ -494,23 +517,26 @@ void InitializeD3D9Optimizer() {
         if (!hEngine) {
             Log("G3O", "D3D9 device attachment hook not installed: Engine.dll is not loaded.");
         } else {
-            void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");
-            if (!pCtor) {
-                Log("G3O", "D3D9 device attachment hook not installed: eCDX9Device constructor export was not found.");
-            } else {
-                MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
-                const HookInstallResult result = InstallHookSafely(
-                    [&] { createStatus = MH_CreateHook(pCtor, (LPVOID)Hooked_eCDX9Device_ctor,
-                                                       (LPVOID*)&Real_eCDX9Device_ctor); return createStatus == MH_OK; },
-                    [&] { enableStatus = MH_EnableHook(pCtor); return enableStatus == MH_OK; },
-                    [&] { removeStatus = MH_RemoveHook(pCtor); },
-                    [&] { Real_eCDX9Device_ctor = nullptr; });
-                if (result == HookInstallResult::Installed) {
-                    s_targetD3D9DeviceCtor = pCtor;
-                    Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
+            // First attempt to capture the device if eCDX9Device has already been constructed
+            if (!TryAttachExistingD3D9Device(hEngine)) {
+                void* pCtor = (void*)GetProcAddress(hEngine, "??0eCDX9Device@@IAE@PAUIDirect3DDevice9@@@Z");
+                if (!pCtor) {
+                    Log("G3O", "D3D9 device attachment hook not installed: eCDX9Device constructor export was not found.");
                 } else {
-                    Log("G3O", "D3D9 device attachment hook failed (create=%d, enable=%d, remove=%d).",
-                        (int)createStatus, (int)enableStatus, (int)removeStatus);
+                    MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+                    const HookInstallResult result = InstallHookSafely(
+                        [&] { createStatus = MH_CreateHook(pCtor, (LPVOID)Hooked_eCDX9Device_ctor,
+                                                           (LPVOID*)&Real_eCDX9Device_ctor); return createStatus == MH_OK; },
+                        [&] { enableStatus = MH_EnableHook(pCtor); return enableStatus == MH_OK; },
+                        [&] { removeStatus = MH_RemoveHook(pCtor); },
+                        [&] { Real_eCDX9Device_ctor = nullptr; });
+                    if (result == HookInstallResult::Installed) {
+                        s_targetD3D9DeviceCtor = pCtor;
+                        Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
+                    } else {
+                        Log("G3O", "D3D9 device attachment hook failed (create=%d, enable=%d, remove=%d).",
+                            (int)createStatus, (int)enableStatus, (int)removeStatus);
+                    }
                 }
             }
         }

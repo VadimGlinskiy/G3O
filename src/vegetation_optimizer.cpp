@@ -125,22 +125,26 @@ void InitializeVegetationOptimizer() {
         }
     }
 
-    // Hook vegetation grid caching range
-    void* pCalcRect = (void*)GetProcAddress(s_hEngine, "?CalculateCacheRect@eCVegetation_Grid@@IAEXABVeCCameraBase@@AAVbCRect@@@Z");
-    if (pCalcRect) {
-        MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
-        const HookInstallResult result = InstallHookSafely(
-            [&] { createStatus = MH_CreateHook(pCalcRect, (LPVOID)Hooked_CalculateCacheRect, (LPVOID*)&Real_CalculateCacheRect); return createStatus == MH_OK; },
-            [&] { enableStatus = MH_EnableHook(pCalcRect); return enableStatus == MH_OK; },
-            [&] { removeStatus = MH_RemoveHook(pCalcRect); },
-            [&] { Real_CalculateCacheRect = nullptr; });
-        if (result == HookInstallResult::Installed) {
-            s_targetCalculateCacheRect = pCalcRect;
-            Log("G3O", "Vegetation Optimizer: Grass cache grid radius clamped to %.1f units.", cfg.vegetationGridRangeClamp);
-        } else {
-            Log("G3O", "Vegetation Optimizer: CalculateCacheRect hook failed (create=%d, enable=%d, remove=%d).",
-                createStatus, enableStatus, removeStatus);
+    // Hook vegetation grid caching range only if clamping is actively configured (> 0.0f)
+    if (cfg.vegetationGridRangeClamp > 0.0f) {
+        void* pCalcRect = (void*)GetProcAddress(s_hEngine, "?CalculateCacheRect@eCVegetation_Grid@@IAEXABVeCCameraBase@@AAVbCRect@@@Z");
+        if (pCalcRect) {
+            MH_STATUS createStatus = MH_OK, enableStatus = MH_OK, removeStatus = MH_OK;
+            const HookInstallResult result = InstallHookSafely(
+                [&] { createStatus = MH_CreateHook(pCalcRect, (LPVOID)Hooked_CalculateCacheRect, (LPVOID*)&Real_CalculateCacheRect); return createStatus == MH_OK; },
+                [&] { enableStatus = MH_EnableHook(pCalcRect); return enableStatus == MH_OK; },
+                [&] { removeStatus = MH_RemoveHook(pCalcRect); },
+                [&] { Real_CalculateCacheRect = nullptr; });
+            if (result == HookInstallResult::Installed) {
+                s_targetCalculateCacheRect = pCalcRect;
+                Log("G3O", "Vegetation Optimizer: Grass cache grid radius clamped to %.1f units.", cfg.vegetationGridRangeClamp);
+            } else {
+                Log("G3O", "Vegetation Optimizer: CalculateCacheRect hook failed (create=%d, enable=%d, remove=%d).",
+                    createStatus, enableStatus, removeStatus);
+            }
         }
+    } else {
+        Log("G3O", "Vegetation Optimizer: CalculateCacheRect hook skipped (VegetationGridRangeClamp=0; full view distance preserved without detour overhead).");
     }
 }
 

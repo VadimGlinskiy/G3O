@@ -119,8 +119,14 @@ static int __fastcall Hooked_SwapScreen(void* pThis, void* /*edx*/, HWND hWnd, c
 
 static int __fastcall Hooked_MixerSwapScreen(void* pThis, void* /*edx*/, HWND hWnd, const void* pSrcRect, const void* pDestRect) {
     if (pThis) {
+        BYTE* pMixer = reinterpret_cast<BYTE*>(pThis);
+        void* pAPIDevice = *reinterpret_cast<void**>(pMixer + 0x0C);
+        if (pAPIDevice) {
+            void* pDevice = *reinterpret_cast<void**>(reinterpret_cast<BYTE*>(pAPIDevice) + 0x08);
+            if (pDevice) AttachD3D9DeviceIfReady(pDevice);
+        }
         // [pThis + 0x44] is m_iSkipNextSwapScreens; only record when frame is actually swapped
-        int skipCount = *reinterpret_cast<int*>(reinterpret_cast<BYTE*>(pThis) + 0x44);
+        int skipCount = *reinterpret_cast<int*>(pMixer + 0x44);
         if (skipCount <= 0 && !Real_Present) {
             ProfilerRecordPresentedFrame();
         }
