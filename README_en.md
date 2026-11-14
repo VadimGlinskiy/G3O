@@ -68,9 +68,11 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
   Global crash handler. Catches unhandled Win32 exceptions (SEH), engine `FatalError` crashes, and "Where is the guru?" dialogs, producing detailed diagnostic reports.
 
 * **`EnableCrashGuards`** (default `true`)<br>
-  Engine crash guards against common null-pointer and missing-object exceptions.<br>
-  *Vanilla issue:* When the game or a mod references missing bones or unloaded animations (such as during `DrawFocusName` when targeting newly spawned creatures), the engine crashes with "Where is the guru?".<br>
-  *G3O solution:* Intercepts invalid calls safely and skips them, allowing gameplay to continue uninterrupted.
+  Comprehensive engine crash guards against null-pointer exceptions and missing objects.<br>
+  *Intercepted crash paths:*
+  1. `DrawFocusName` (`Game.dll`): skips focus label rendering when targeting newly spawned Human/Orc NPCs without an assembled animation actor.
+  2. `GetBoneMatrix` (`Engine.dll`): prevents Access Violation (`0x000001B4`) when calculating bone transforms during ragdoll physics or entity despawns with detached actor/skeleton hierarchies.
+  3. `FindStack` / `FindStackIndex` (`Game.dll`): safely intercepts null item template entity lookups, preventing the fatal `CallFatalError` ("Where is the guru? - Template is invalid (null)").
 
 * **`ShowCrashDialog`** (default `true`)<br>
   Shows an informative error dialog on crash displaying the offending module and crash address instead of closing silently.
@@ -179,6 +181,16 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
   Pins the game to performance cores (P-cores).<br>
   *Vanilla issue:* On hybrid CPUs (Intel 12th gen and newer), Windows often incorrectly schedules the main Gothic 3 thread onto slow efficiency cores (E-cores), cutting performance in half.<br>
   *G3O solution:* Detects CPU topology and ensures threads run exclusively on high-performance cores.
+
+---
+
+### [Memory] — High-Performance Heap Allocator (mimalloc)
+
+* **`AllocatorMode`** (default `0` — Vanilla)<br>
+  Integrates Microsoft mimalloc, configured specifically for 32-bit Large Address Aware game execution (based on the proven architecture from Psycho Engine Fixes: 8MB private arenas, demand paging, reset-on-purge without decommit to eliminate virtual address space fragmentation).
+  * `0` — Vanilla engine allocators (maximum compatibility).
+  * `1` — `ShortUsage` / `ScrapHeap` replacement. Accelerates per-frame scratch strings and temporary buffers with zero risk of cross-module free conflicts.
+  * `2` — Full `MemHeap` and `bCMemoryAdmin` replacement with `Safe Dispatch Free` (`mi_is_in_heap_region`). Eliminates memory fragmentation and prevents micro-stutters during marathon play sessions.
 
 ---
 

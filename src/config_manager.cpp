@@ -94,8 +94,8 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnableCrashInvestigator=true\n"
         << "\n"
         << "; Защита от сбоев при поврежденных объектах (Crash Guards).\n"
-        << "; Перехватывает вызовы функций движка с нулевыми или некорректными указателями (например, при спавне мобов без анимации)\n"
-        << "; и безопасно пропускает их вместо вылета с ошибкой «Where is the guru?».\n"
+        << "; Перехватывает вызовы функций движка с нулевыми указателями (DrawFocusName без актера, кости GetBoneMatrix в регдоллах, FindStack с null-шаблоном)\n"
+        << "; и безопасно пропускает их вместо вылета с ошибкой «Where is the guru?» или Access Violation.\n"
         << "EnableCrashGuards=true\n"
         << "\n"
         << "; Показ информативного окна при вылете игры.\n"
@@ -252,6 +252,14 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnableD3D9StateFilter=true\n"
         << "\n"
         << "\n"
+        << "[Memory]\n"
+        << "; Режим высокопроизводительного менеджера кучи mimalloc (0, 1, 2).\n"
+        << "; 0 = Стандартный аллокатор движка (максимальная совместимость).\n"
+        << "; 1 = Замена ShortUsage / ScrapHeap (ускоряет покадровые временные буферы без риска межмодульных конфликтов).\n"
+        << "; 2 = Полная замена MemHeap и bCMemoryAdmin с Safe Dispatch Free (максимальная скорость и снижение фрагментации VAS).\n"
+        << "AllocatorMode=0\n"
+        << "\n"
+        << "\n"
         << "[Logging]\n"
         << "; Запись подробного журнала работы G3O в файл G3O\\G3O_diagnostic_*.log (для обычной игры держите false).\n"
         << "EnableDiagnosticLog=false\n"
@@ -395,6 +403,9 @@ void LoadConfig() {
     s_config.cpuAffinityMask = ReadIniHex("Performance", "CPUAffinityMask", 0, path);
     s_config.pakCacheBudgetMB = ReadIniInt("Performance", "PakCacheBudgetMB", 768, 0, 1024, path);
     s_config.pakPrefetchWorkers = ReadIniInt("Performance", "PakPrefetchWorkers", 0, 0, 8, path);
+
+    // [Memory]
+    s_config.allocatorMode = ReadIniInt("Memory", "AllocatorMode", 0, 0, 2, path);
 
     // [Logging]
     s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", false, path);

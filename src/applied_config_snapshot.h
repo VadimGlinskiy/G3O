@@ -74,6 +74,9 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         static_cast<unsigned long long>(config.cpuAffinityMask),
         config.pakCacheBudgetMB, config.pakPrefetchWorkers);
 
+    output.Append("[Memory]\n");
+    output.AppendFormat("AllocatorMode=%d\n", config.allocatorMode);
+
     output.Append("[Logging]\n");
     output.AppendFormat("EnableDiagnosticLog=%s\nInterceptOutputDebugString=%s\nEnableProfiler=%s\nEnableSavegameAudit=%s\n",
         config.enableDiagnosticLog ? "true" : "false",

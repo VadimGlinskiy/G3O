@@ -100,6 +100,7 @@ int main() {
         "EnableAtmosphericFogControl=true", "FogDistanceMultiplier=2.5", "FogEndMinDistance=250000", "PreserveUnderwaterFog=true",
         "EnableVegetationOptimizer=true", "EnableAdaptiveTreeShadows=true",
         "WindowCursorLock=true", "InputSystemKeyPassthrough=true", "EnableCrashGuards=true", "LoadReShade=true",
+        "AllocatorMode=0",
         "EnableD3D9StateFilter=true", "EnableDiagnosticLog=false", "InterceptOutputDebugString=false",
         "EnableProfiler=false", "EnableSavegameAudit=false", "EnableLayerAudit=false"
     };

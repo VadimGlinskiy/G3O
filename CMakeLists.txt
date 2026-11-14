@@ -25,6 +25,13 @@ set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
 set(LIBDEFLATE_BUILD_GZIP OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/libdeflate)
 
+set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/mimalloc)
+
 # Main dinput8.dll Proxy library
 add_library(dinput8 SHARED
     src/main.cpp
@@ -125,6 +132,11 @@ add_library(dinput8 SHARED
     src/focus_name_guard.cpp
     src/focus_name_guard.h
     src/focus_name_guard_policy.h
+    src/crash_guards.cpp
+    src/crash_guards.h
+    src/crash_guards_policy.h
+    src/memory_allocator.cpp
+    src/memory_allocator.h
 )
 
 if(MSVC)
@@ -138,6 +150,7 @@ target_include_directories(dinput8 PRIVATE
     third_party/minhook/include
     third_party/libdeflate
     third_party/libdeflate/lib
+    third_party/mimalloc/include
 )
 
 target_compile_definitions(dinput8 PRIVATE G3O_BUILD_CONFIGURATION=\"$<CONFIG>\")
@@ -145,6 +158,7 @@ target_compile_definitions(dinput8 PRIVATE G3O_BUILD_CONFIGURATION=\"$<CONFIG>\"
 target_link_libraries(dinput8 PRIVATE
     minhook
     libdeflate_static
+    mimalloc-static
     dbghelp
     psapi
     version

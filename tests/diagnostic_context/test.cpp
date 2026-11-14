@@ -66,7 +66,7 @@ int main() {
         "EnableD3D9StateFilter=", "EnableFastTextureLoader=", "EnableVegetationOptimizer=",
         "TreeShadowDistance=", "VegetationGridRangeClamp=", "EnableHighPrecisionTimer=", "EnableHighProcessPriority=",
         "EnableCPUTopologyAffinity=", "EnableVFSCache=", "CPUCores=", "CPUThreads=", "CPUAffinityMask=",
-        "PakCacheBudgetMB=", "PakPrefetchWorkers=", "EnableDiagnosticLog=", "InterceptOutputDebugString=",
+        "PakCacheBudgetMB=", "PakPrefetchWorkers=", "AllocatorMode=", "EnableDiagnosticLog=", "InterceptOutputDebugString=",
         "EnableProfiler=", "EnableSavegameAudit="
     };
     for (const char* key : expectedKeys) requireContains(configText.CStr(), key);

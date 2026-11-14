@@ -68,6 +68,9 @@ struct Config {
     int pakCacheBudgetMB = 768;        // Rolling pre-decompression memory budget (MB)
     int pakPrefetchWorkers = 0;        // 0 = Auto-detect based on CPU cores (up to 6)
 
+    // [Memory]
+    int allocatorMode = 0;             // 0 = Vanilla, 1 = ShortUsage / ScrapHeap, 2 = Full MemHeap
+
     // [Logging]
     bool enableDiagnosticLog = false;
     bool interceptOutputDebugString = false;

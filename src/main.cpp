@@ -28,7 +28,8 @@
 #include "pak_prefetch.h"
 #include "selective_culling_optimizer.h"
 #include "fog_optimizer.h"
-#include "focus_name_guard.h"
+#include "crash_guards.h"
+#include "memory_allocator.h"
 #pragma comment(lib, "winmm.lib")
 
 static volatile LONG s_runtimeActive = 0;
@@ -109,8 +110,12 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::HookEngineFatalErrors();
     }
 
+    if (cfg.allocatorMode > 0) {
+        G3O::InitializeMemoryAllocator(cfg.allocatorMode);
+    }
+
     if (cfg.enableCrashGuards) {
-        G3O::InitializeFocusNameGuard();
+        G3O::InitializeCrashGuards();
     }
 
     // Fast Pak Decompressor: SIMD libdeflate zlib decompression for .pak archives & savegames
@@ -256,7 +261,8 @@ static void ShutdownOptima() {
     G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();
-    G3O::ShutdownFocusNameGuard();
+    G3O::ShutdownMemoryAllocator();
+    G3O::ShutdownCrashGuards();
     G3O::ShutdownBorderlessWindow();
     G3O::ShutdownCrashHandler();
     G3O::ShutdownDiagnosticLogger();
