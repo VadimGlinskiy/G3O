@@ -74,11 +74,25 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; В безрамочном режиме не дает игре сворачиваться при потере фокуса (например, при клике на второй монитор).\n"
         << "PreventMinimizeOnFocusLoss=true\n"
         << "\n"
+        << "; Блокировка курсора мыши внутри окна игры (true / false).\n"
+        << "; В полноэкранном окне не позволяет курсору случайно вылетать за границы монитора на второй экран.\n"
+        << "; При сворачивании через Alt+Tab или потере фокуса курсор мгновенно освобождается.\n"
+        << "WindowCursorLock=true\n"
+        << "\n"
+        << "; Проброс мультимедийных клавиш клавиатуры (true / false).\n"
+        << "; Разрешает работу кнопок регулировки громкости, отключения звука и переключения треков (Play/Pause) прямо во время игры.\n"
+        << "InputSystemKeyPassthrough=true\n"
+        << "\n"
         << "\n"
         << "[CrashInvestigator]\n"
         << "; Система диагностики и перехвата вылетов.\n"
         << "; Отслеживает критические сбои и сохраняет подробную информацию о причине в папку G3O\\.\n"
         << "EnableCrashInvestigator=true\n"
+        << "\n"
+        << "; Защита от сбоев при поврежденных объектах (Crash Guards).\n"
+        << "; Перехватывает вызовы функций движка с нулевыми или некорректными указателями (например, при спавне мобов без анимации)\n"
+        << "; и безопасно пропускает их вместо вылета с ошибкой «Where is the guru?».\n"
+        << "EnableCrashGuards=true\n"
         << "\n"
         << "; Показ информативного окна при вылете игры.\n"
         << "; Показывает понятный диалог в случае необработанного Win32-исключения с указанием модуля и адреса сбоя.\n"
@@ -326,9 +340,12 @@ void LoadConfig() {
     s_config.enableBorderless = ReadIniBool("Display", "EnableBorderless", true, path);
     s_config.autoBorderless = ReadIniBool("Display", "AutoBorderless", true, path);
     s_config.preventMinimizeOnFocusLoss = ReadIniBool("Display", "PreventMinimizeOnFocusLoss", true, path);
+    s_config.windowCursorLock = ReadIniBool("Display", "WindowCursorLock", true, path);
+    s_config.inputSystemKeyPassthrough = ReadIniBool("Display", "InputSystemKeyPassthrough", true, path);
 
     // [CrashInvestigator]
     s_config.enableCrashInvestigator = ReadIniBool("CrashInvestigator", "EnableCrashInvestigator", true, path);
+    s_config.enableCrashGuards = ReadIniBool("CrashInvestigator", "EnableCrashGuards", true, path);
     s_config.showCrashDialog = ReadIniBool("CrashInvestigator", "ShowCrashDialog", true, path);
     s_config.writeCrashDump = ReadIniBool("CrashInvestigator", "WriteCrashDump", true, path);
     s_config.writeCrashLog = ReadIniBool("CrashInvestigator", "WriteCrashLog", true, path);

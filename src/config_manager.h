@@ -15,9 +15,12 @@ struct Config {
     bool enableBorderless = true;
     bool autoBorderless = true;
     bool preventMinimizeOnFocusLoss = true;
+    bool windowCursorLock = true;
+    bool inputSystemKeyPassthrough = true;
 
     // [CrashInvestigator]
     bool enableCrashInvestigator = true;
+    bool enableCrashGuards = true;
     bool showCrashDialog = true;
     bool writeCrashDump = true;
     bool writeCrashLog = true;

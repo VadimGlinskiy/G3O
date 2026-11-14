@@ -100,7 +100,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::HookEngineFatalErrors();
     }
 
-    G3O::InitializeFocusNameGuard();
+    if (cfg.enableCrashGuards) {
+        G3O::InitializeFocusNameGuard();
+    }
 
     // Fast Pak Decompressor: SIMD libdeflate zlib decompression for .pak archives & savegames
     if (cfg.enableFastPakDecompressor) {

@@ -16,13 +16,16 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.loadG3SEPlugins ? "true" : "false", config.fixVulkanLayerConflicts ? "true" : "false");
 
     output.Append("[Display]\n");
-    output.AppendFormat("EnableBorderless=%s\nAutoBorderless=%s\nPreventMinimizeOnFocusLoss=%s\n",
+    output.AppendFormat("EnableBorderless=%s\nAutoBorderless=%s\nPreventMinimizeOnFocusLoss=%s\nWindowCursorLock=%s\nInputSystemKeyPassthrough=%s\n",
         config.enableBorderless ? "true" : "false",
-        config.autoBorderless ? "true" : "false", config.preventMinimizeOnFocusLoss ? "true" : "false");
+        config.autoBorderless ? "true" : "false", config.preventMinimizeOnFocusLoss ? "true" : "false",
+        config.windowCursorLock ? "true" : "false", config.inputSystemKeyPassthrough ? "true" : "false");
 
     output.Append("[CrashInvestigator]\n");
-    output.AppendFormat("EnableCrashInvestigator=%s\nShowCrashDialog=%s\nWriteCrashDump=%s\nWriteCrashLog=%s\n",
-        config.enableCrashInvestigator ? "true" : "false", config.showCrashDialog ? "true" : "false",
+    output.AppendFormat("EnableCrashInvestigator=%s\nEnableCrashGuards=%s\nShowCrashDialog=%s\nWriteCrashDump=%s\nWriteCrashLog=%s\n",
+        config.enableCrashInvestigator ? "true" : "false",
+        config.enableCrashGuards ? "true" : "false",
+        config.showCrashDialog ? "true" : "false",
         config.writeCrashDump ? "true" : "false", config.writeCrashLog ? "true" : "false");
 
     output.Append("[Performance]\n");

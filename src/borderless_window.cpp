@@ -19,11 +19,54 @@ bool IsBorderlessActive() {
     return s_isBorderless;
 }
 
+static void UpdateCursorClip(HWND hWnd, bool bActive) {
+    const Config& cfg = GetConfig();
+    const bool isForeground = (GetForegroundWindow() == hWnd);
+    if (!ShouldClipCursor(cfg.windowCursorLock, bActive, isForeground)) {
+        ClipCursor(nullptr);
+        return;
+    }
+
+    if (hWnd && IsWindow(hWnd)) {
+        RECT rcClient = {};
+        if (GetClientRect(hWnd, &rcClient)) {
+            POINT pt1 = { rcClient.left, rcClient.top };
+            POINT pt2 = { rcClient.right, rcClient.bottom };
+            ClientToScreen(hWnd, &pt1);
+            ClientToScreen(hWnd, &pt2);
+            RECT rcClip = { pt1.x, pt1.y, pt2.x, pt2.y };
+            ClipCursor(&rcClip);
+            return;
+        }
+    }
+    ClipCursor(nullptr);
+}
+
 static LRESULT CALLBACK BorderlessWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     const Config& cfg = GetConfig();
 
     switch (uMsg) {
+    case WM_ACTIVATE:
+        UpdateCursorClip(hWnd, LOWORD(wParam) != WA_INACTIVE);
+        break;
+
+    case WM_SETFOCUS:
+        UpdateCursorClip(hWnd, true);
+        break;
+
+    case WM_KILLFOCUS:
+        UpdateCursorClip(hWnd, false);
+        break;
+
+    case WM_SIZE:
+    case WM_WINDOWPOSCHANGED:
+        if (GetForegroundWindow() == hWnd) {
+            UpdateCursorClip(hWnd, true);
+        }
+        break;
+
     case WM_ACTIVATEAPP:
+        UpdateCursorClip(hWnd, wParam != FALSE);
         if (cfg.preventMinimizeOnFocusLoss && s_isBorderless && wParam == FALSE) {
             // Prevent Gothic 3 from freezing or minimizing on Alt+Tab focus loss
             return 0;
@@ -37,6 +80,21 @@ static LRESULT CALLBACK BorderlessWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
         }
         break;
 
+    case WM_APPCOMMAND:
+        if (cfg.inputSystemKeyPassthrough) {
+            // Forward multimedia/app commands directly to DefWindowProc so the OS handles them
+            return DefWindowProcA(hWnd, uMsg, wParam, lParam);
+        }
+        break;
+
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+        if (cfg.inputSystemKeyPassthrough && IsMediaKey(wParam)) {
+            return DefWindowProcA(hWnd, uMsg, wParam, lParam);
+        }
+        break;
     }
 
     if (s_origWndProc) {
@@ -71,6 +129,7 @@ static void ApplyBorderless(HWND hWnd) {
     SetWindowPos(hWnd, HWND_TOP, screenX, screenY, screenW, screenH, SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 
     s_isBorderless = true;
+    UpdateCursorClip(hWnd, true);
     Log("G3O", "Borderless Fullscreen activated: %dx%d on display (%d, %d).", screenW, screenH, screenX, screenY);
 }
 
@@ -172,6 +231,7 @@ void InitializeBorderlessWindow() {
 }
 
 void ShutdownBorderlessWindow() {
+    ClipCursor(nullptr);
     if (s_gameHWnd && s_origWndProc) {
         SetWindowLongPtrA(s_gameHWnd, GWLP_WNDPROC, (LONG_PTR)s_origWndProc);
         s_origWndProc = nullptr;
