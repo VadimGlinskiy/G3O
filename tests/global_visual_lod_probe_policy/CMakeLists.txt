@@ -1,9 +1,0 @@
-cmake_minimum_required(VERSION 3.20)
-project(global_visual_lod_probe_policy_test LANGUAGES CXX)
-
-add_executable(global_visual_lod_probe_policy_test test.cpp)
-target_include_directories(global_visual_lod_probe_policy_test PRIVATE ../../src)
-target_compile_features(global_visual_lod_probe_policy_test PRIVATE cxx_std_17)
-
-enable_testing()
-add_test(NAME global_visual_lod_probe_policy COMMAND global_visual_lod_probe_policy_test)

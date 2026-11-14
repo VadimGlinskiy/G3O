@@ -32,20 +32,18 @@ int main() {
     if (path.empty()) return 2;
     bool ok = true;
     const G3O::Config defaults{};
-    ok &= Expect(!defaults.enableLayerRingArena && !defaults.enablePVSPrefetchOptimizer,
-                 "LayerRingArena and PVS prefetch should match the shipped default profile");
+    ok &= Expect(!defaults.enableLayerRingArena,
+                 "LayerRingArena should match the shipped default profile");
     ok &= Expect(defaults.enablePropertyCache &&
                  defaults.enableVFSCache && defaults.pakCacheBudgetMB == 768 &&
                  !defaults.enableDiagnosticLog && !defaults.interceptOutputDebugString &&
                  !defaults.enableProfiler && !defaults.enableSavegameAudit && !defaults.enableLayerAudit,
                  "Config defaults should match the active release profile");
-    ok &= Expect(!defaults.enableGlobalVisualLodProbe && defaults.globalVisualLodProbeScale == 1.25f,
-                 "global visual LOD probe should default off with a bounded test scale");
     DeleteFileA(path.c_str());
     {
         std::ofstream ini(path);
         ini << "[General]\nEnableG3O=false\n"
-            << "[Performance]\nEnableLayerRingArena=true\nEnableSharedBaseOptimizations=true\nEnableSIMDFrustumCulling=false\nEnableGlobalVisualLodProbe=true\nGlobalVisualLodProbeScale=nan\nTreeShadowDistance=-1\n"
+            << "[Performance]\nEnableLayerRingArena=true\nEnableSharedBaseOptimizations=true\nEnableSIMDFrustumCulling=false\nTreeShadowDistance=-1\n"
             << "VegetationGridRangeClamp=1234.0junk\n"
             << "CPUCores=999\nCPUThreads=-1\n"
             << "CPUAffinityMask=0x100000000\n"
@@ -55,8 +53,6 @@ int main() {
     G3O::LoadConfig();
     const G3O::Config invalid = G3O::GetConfig();
     ok &= Expect(!invalid.enableG3O, "master switch should load from INI");
-    ok &= Expect(invalid.enableGlobalVisualLodProbe && invalid.globalVisualLodProbeScale == 1.25f,
-                 "invalid LOD probe scale should use its safe default without disabling the opt-in hook");
     ok &= Expect(G3O::g_logCallCount == 0, "loading configuration must not log before the master switch is checked");
     ok &= Expect(invalid.enableSharedBaseOptimizations,
                  "new SharedBase option should take precedence over the legacy key");
@@ -80,14 +76,12 @@ int main() {
     {
         std::ofstream ini(path);
         ini << "[General]\nEnableG3O=false\n"
-            << "[Performance]\nEnableSIMDFrustumCulling=false\nEnableGlobalVisualLodProbe=true\nGlobalVisualLodProbeScale=0.75\n";
+            << "[Performance]\nEnableSIMDFrustumCulling=false\n";
     }
     G3O::LoadConfig();
     const G3O::Config legacy = G3O::GetConfig();
     ok &= Expect(!legacy.enableSharedBaseOptimizations,
                  "legacy bundled option should map to the SharedBase option");
-    ok &= Expect(legacy.enableGlobalVisualLodProbe && legacy.globalVisualLodProbeScale == 0.75f,
-                 "valid LOD probe settings should load from the INI");
 
     DeleteFileA(path.c_str());
     G3O::LoadConfig();
@@ -102,11 +96,8 @@ int main() {
         "CPUAffinityMask=", "PakCacheBudgetMB=768", "PakPrefetchWorkers=",
         "EnableFastPakDecompressor=true", "EnableLayerRingArena=false", "EnablePropertyCache=true", "EnableVFSCache=true",
         "EnableSessionStartOptimizer=true", "SessionStartSleepMs=1",
-        "EnablePVSPrefetchOptimizer=false", "EnableAdaptiveROI=true", "ROIBootRadius=3600", "PVSBootRadius=3800",
-        "EnableDynamicROI=false", "BaseROI=0", "AimingROI=7500",
         "EnableSelectiveCulling=true", "ClutterCullThreshold=0.008", "ImportantCullThreshold=0.002",
         "EnableAtmosphericFogControl=true", "FogDistanceMultiplier=2.5", "FogEndMinDistance=250000", "PreserveUnderwaterFog=true",
-        "EnableGlobalVisualLodProbe=false", "GlobalVisualLodProbeScale=1.25",
         "EnableVegetationOptimizer=true", "EnableAdaptiveTreeShadows=true",
         "EnableD3D9StateFilter=true", "EnableDiagnosticLog=false", "InterceptOutputDebugString=false",
         "EnableProfiler=false", "EnableSavegameAudit=false", "EnableLayerAudit=false"
@@ -116,13 +107,14 @@ int main() {
     }
     const char* removedHotkeys[] = {
         "ToggleBorderlessKey=", "EnableFOVHotkeys=", "DecreaseFOVKey=", "IncreaseFOVKey=", "FOVStep=",
-        "EnableDynamicFOV=", "DefaultFOV=", "[Camera]"
+        "EnableDynamicFOV=", "DefaultFOV=", "[Camera]",
+        "EnablePVSPrefetchOptimizer=", "EnableAdaptiveROI=", "ROIBootRadius=", "PVSBootRadius=",
+        "PVSRedundantDistance=", "PVSRampUpCalls=", "EnableDynamicROI=", "BaseROI=", "AimingROI=",
+        "EnableGlobalVisualLodProbe=", "GlobalVisualLodProbeScale="
     };
     for (const char* item : removedHotkeys) {
         ok &= Expect(text.find(item) == std::string::npos, item);
     }
-    ok &= Expect(text.find("меняет LOD всех визуальных мешей") != std::string::npos,
-                 "generated INI should warn that the experimental LOD probe is global");
     ok &= Expect(text.find("статистики кучи") == std::string::npos,
                  "generated INI should not claim heap-statistics bypasses");
     ok &= Expect(text.find("ShowWatermark=") == std::string::npos,
@@ -142,10 +134,6 @@ int main() {
     ok &= Expect(text.find("заполнен и содержит не менее 64 элементов") != std::string::npos &&
                  text.find("до 1024, 8192 или 32768") != std::string::npos,
                  "generated INI should explain when the scene-node array grows and its capacity steps");
-    ok &= Expect(text.find("если известна исходная цель и EnableDynamicROI=false") != std::string::npos,
-                 "generated INI should explain the adaptive ROI activation condition");
-    ok &= Expect(text.find("изменения центра и радиуса") != std::string::npos,
-                 "generated INI should explain both parts of the PVS duplicate check");
     ok &= Expect(text.find("EnableFlatEntityIndex=") == std::string::npos,
                  "generated INI should not expose the removed flat entity index");
     ok &= Expect(text.find("EnableLayerRingArena=false") != std::string::npos &&

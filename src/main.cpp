@@ -21,16 +21,13 @@
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
-#include "pvs_prefetch_optimizer.h"
 #include "info_manager_optimizer.h"
 #include "session_start_optimizer.h"
-#include "dynamic_roi_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
 #include "pak_prefetch.h"
 #include "selective_culling_optimizer.h"
 #include "fog_optimizer.h"
-#include "global_visual_lod_probe.h"
 #include "focus_name_guard.h"
 #pragma comment(lib, "winmm.lib")
 
@@ -154,10 +151,6 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeClassFactoryOptimizer();
     }
 
-    // Initialize its shared state even when the PVS hook is off; ROI and savegame paths still use it.
-    G3O::InitializePVSPrefetchOptimizer();
-
-
     // Info Manager Optimizer: O(1) Shadow Table for gCInfoManager_PS::GetInfo
     if (cfg.enableInfoManagerOptimizer) {
         G3O::InitializeInfoManagerOptimizer();
@@ -166,11 +159,6 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // Session Start Optimizer: Eliminates 12x Sleep(100) idle warm-up in gCSession::Start
     if (cfg.enableSessionStartOptimizer) {
         G3O::InitializeSessionStartOptimizer();
-    }
-
-    // Dynamic ROI: changes Entity.ROI while the crosshair is visible.
-    if (cfg.enableDynamicROI) {
-        G3O::InitializeDynamicROIOptimizer();
     }
 
     // Savegame Profiler: High-resolution telemetry for savegame loading phases
@@ -199,10 +187,6 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // Atmospheric Fog Expander (G3O-TASK-08: expands D3D9 fog distance for scenic vistas)
     if (cfg.enableAtmosphericFogControl) {
         G3O::InitializeFogOptimizer();
-    }
-
-    if (cfg.enableGlobalVisualLodProbe) {
-        G3O::InitializeGlobalVisualLodProbe();
     }
 
     if (cfg.enableProfiler) {
@@ -254,10 +238,7 @@ static void ShutdownOptima() {
     G3O::ShutdownClassFactoryOptimizer();
     G3O::ShutdownInfoManagerOptimizer();
     G3O::ShutdownSessionStartOptimizer();
-    G3O::ShutdownDynamicROIOptimizer();
-    G3O::ShutdownPVSPrefetchOptimizer();
     G3O::ShutdownSelectiveCullingOptimizer();
-    G3O::ShutdownGlobalVisualLodProbe();
     G3O::ShutdownFogOptimizer();
     G3O::ShutdownNavigationOptimizer();
     G3O::ShutdownVFSCacheOptimizer();

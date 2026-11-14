@@ -35,19 +35,10 @@ struct Config {
     bool enableSceneNodeOptimizer = true;
     bool enableShadowOptimizer = true;
     bool enableClassFactoryOptimizer = true;
-    bool enablePVSPrefetchOptimizer = false;
-    bool enableAdaptiveROI = true;
-    float roiBootRadius = 3600.0f;
-    float pvsBootRadius = 3800.0f;
-    float pvsRedundantDistance = 200.0f;
-    uint32_t pvsRampUpCalls = 24;
 
     bool enableInfoManagerOptimizer = true;
     bool enableSessionStartOptimizer = true;
     uint32_t sessionStartSleepMs = 1;
-    bool enableDynamicROI = false;
-    float baseROI = 0.0f;
-    float aimingROI = 7500.0f;
 
     // Fail-open if device threading or state-block hooks cannot be verified.
     bool enableD3D9StateFilter = true;
@@ -63,8 +54,6 @@ struct Config {
     float fogDistanceMultiplier = 2.5f;
     float fogEndMinDistance = 250000.0f;
     bool preserveUnderwaterFog = true;
-    bool enableGlobalVisualLodProbe = false;
-    float globalVisualLodProbeScale = 1.25f;
     bool enableHighPrecisionTimer = true;
     bool enableHighProcessPriority = true;
     bool enableCPUTopologyAffinity = true;

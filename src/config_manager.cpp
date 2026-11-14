@@ -153,27 +153,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Запоминает соответствие имен классов внутренним типам движка, ускоряя распознавание объектов при загрузке.\n"
         << "EnableClassFactoryOptimizer=true\n"
         << "\n"
-        << "; Предварительный расчет зон видимости мира (PVS).\n"
-        << "; Включайте только для тестов. По умолчанию выключено для максимальной стабильности (false).\n"
-        << "EnablePVSPrefetchOptimizer=false\n"
-        << "\n"
-        << "; Адаптивный радиус загрузки сущностей при входе в игру.\n"
-        << "; Временно снижает дистанцию активности далеких объектов в первую секунду появления в мире, если известна исходная цель и EnableDynamicROI=false, ускоряя загрузку.\n"
-        << "EnableAdaptiveROI=true\n"
-        << "\n"
-        << "; Начальный радиус активности объектов при входе в мир (в единицах движка, аналогично ge3.ini).\n"
-        << "ROIBootRadius=3600\n"
-        << "\n"
-        << "; Начальный радиус зоны видимости мира при загрузке.\n"
-        << "PVSBootRadius=3800\n"
-        << "\n"
-        << "; Порог отсечения повторных расчетов видимости.\n"
-        << "; Запрос пропускается, только если изменения центра и радиуса не превышают это значение.\n"
-        << "PVSRedundantDistance=200\n"
-        << "\n"
-        << "; Количество шагов для плавного возврата радиуса видимости к обычному значению (0 = мгновенно).\n"
-        << "PVSRampUpCalls=24\n"
-        << "\n"
         << "; Оптимизация поиска диалогов NPC.\n"
         << "; Мгновенно находит нужные реплики и условия через хэш-таблицу. Устраняет заикания при приближении к NPC и открытии диалогов.\n"
         << "EnableInfoManagerOptimizer=true\n"
@@ -184,15 +163,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "\n"
         << "; Длина паузы при старте сессии в миллисекундах (1 мс вместо 100 мс).\n"
         << "SessionStartSleepMs=1\n"
-        << "\n"
-        << "; Динамическое изменение радиуса симуляции мира при прицеливании из лука/арбалета.\n"
-        << "EnableDynamicROI=false\n"
-        << "\n"
-        << "; Радиус активности объектов, когда прицел скрыт (0 = использовать значение из ge3.ini).\n"
-        << "BaseROI=0\n"
-        << "\n"
-        << "; Радиус активности объектов при прицеливании (0 = использовать BaseROI).\n"
-        << "AimingROI=7500\n"
         << "\n"
         << "; Быстрая загрузка текстур.\n"
         << "; Пропускает повторную фильтрацию для DDS-текстур с уже готовыми mip-уровнями, ускоряя подгрузку мира на лету.\n"
@@ -234,11 +204,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "\n"
         << "; Сохранять оригинальный близкий туман под водой, в пещерах и ядовитом газе, чтобы не нарушать атмосферу.\n"
         << "PreserveUnderwaterFog=true\n"
-        << "\n"
-        << "; Экспериментальный тест дальности LOD геометрии.\n"
-        << "; Внимание: меняет LOD всех визуальных мешей в игре. Рекомендуется держать выключенным (false).\n"
-        << "EnableGlobalVisualLodProbe=false\n"
-        << "GlobalVisualLodProbeScale=1.25\n"
         << "\n"
         << "; Запрос высокоточного системного таймера Windows (1 мс) для более плавного отсчета времени кадров.\n"
         << "EnableHighPrecisionTimer=true\n"
@@ -382,19 +347,10 @@ void LoadConfig() {
     s_config.enableSceneNodeOptimizer = ReadIniBool("Performance", "EnableSceneNodeOptimizer", true, path);
     s_config.enableShadowOptimizer = ReadIniBool("Performance", "EnableShadowOptimizer", true, path);
     s_config.enableClassFactoryOptimizer = ReadIniBool("Performance", "EnableClassFactoryOptimizer", true, path);
-    s_config.enablePVSPrefetchOptimizer = ReadIniBool("Performance", "EnablePVSPrefetchOptimizer", false, path);
-    s_config.enableAdaptiveROI = ReadIniBool("Performance", "EnableAdaptiveROI", true, path);
-    s_config.roiBootRadius = ReadIniFloat("Performance", "ROIBootRadius", 3600.0f, 100.0f, 50000.0f, path);
-    s_config.pvsBootRadius = ReadIniFloat("Performance", "PVSBootRadius", 3800.0f, 500.0f, 50000.0f, path);
-    s_config.pvsRedundantDistance = ReadIniFloat("Performance", "PVSRedundantDistance", 200.0f, 10.0f, 5000.0f, path);
-    s_config.pvsRampUpCalls = static_cast<uint32_t>(ReadIniInt("Performance", "PVSRampUpCalls", 24, 0, 1000, path));
 
     s_config.enableInfoManagerOptimizer = ReadIniBool("Performance", "EnableInfoManagerOptimizer", true, path);
     s_config.enableSessionStartOptimizer = ReadIniBool("Performance", "EnableSessionStartOptimizer", true, path);
     s_config.sessionStartSleepMs = static_cast<uint32_t>(ReadIniInt("Performance", "SessionStartSleepMs", 1, 0, 100, path));
-    s_config.enableDynamicROI = ReadIniBool("Performance", "EnableDynamicROI", false, path);
-    s_config.baseROI = ReadIniFloat("Performance", "BaseROI", 0.0f, 0.0f, 50000.0f, path);
-    s_config.aimingROI = ReadIniFloat("Performance", "AimingROI", 7500.0f, 0.0f, 50000.0f, path);
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);
     s_config.enableVegetationOptimizer = ReadIniBool("Performance", "EnableVegetationOptimizer", true, path);
@@ -408,8 +364,6 @@ void LoadConfig() {
     s_config.fogDistanceMultiplier = ReadIniFloat("Performance", "FogDistanceMultiplier", 2.5f, 0.1f, 10.0f, path);
     s_config.fogEndMinDistance = ReadIniFloat("Performance", "FogEndMinDistance", 250000.0f, 0.0f, 1000000.0f, path);
     s_config.preserveUnderwaterFog = ReadIniBool("Performance", "PreserveUnderwaterFog", true, path);
-    s_config.enableGlobalVisualLodProbe = ReadIniBool("Performance", "EnableGlobalVisualLodProbe", false, path);
-    s_config.globalVisualLodProbeScale = ReadIniFloat("Performance", "GlobalVisualLodProbeScale", 1.25f, 0.25f, 4.0f, path);
     s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
     s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
     s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);

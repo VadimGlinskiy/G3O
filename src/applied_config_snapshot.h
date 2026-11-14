@@ -29,14 +29,12 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
     output.AppendFormat(
         "EnableSharedBaseOptimizations=%s\nEnableEntitySearchOptimizer=%s\nEnableFastPakDecompressor=%s\nEnableLayerRingArena=%s\nEnablePropertyCache=%s\nEnablePakPrefetch=%s\n"
         "EnableFrustumDatabaseOptimizer=%s\nEnableHashProxyOptimizer=%s\nEnableNavigationOptimizer=%s\n"
-        "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\nEnablePVSPrefetchOptimizer=%s\nEnableAdaptiveROI=%s\nROIBootRadius=%.9g\nPVSBootRadius=%.9g\nEnableInfoManagerOptimizer=%s\n"
+        "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\nEnableInfoManagerOptimizer=%s\n"
         "EnableSessionStartOptimizer=%s\nSessionStartSleepMs=%u\n"
-        "EnableDynamicROI=%s\nBaseROI=%.9g\nAimingROI=%.9g\n"
         "EnableD3D9StateFilter=%s\nEnableFastTextureLoader=%s\nEnableVegetationOptimizer=%s\nEnableAdaptiveTreeShadows=%s\n"
         "TreeShadowDistance=%.9g\nVegetationGridRangeClamp=%.9g\n"
         "EnableSelectiveCulling=%s\nClutterCullThreshold=%.9g\nImportantCullThreshold=%.9g\n"
         "EnableAtmosphericFogControl=%s\nFogDistanceMultiplier=%.9g\nFogEndMinDistance=%.9g\nPreserveUnderwaterFog=%s\n"
-        "EnableGlobalVisualLodProbe=%s\nGlobalVisualLodProbeScale=%.9g\n"
         "EnableHighPrecisionTimer=%s\nEnableHighProcessPriority=%s\n"
         "EnableCPUTopologyAffinity=%s\nEnableVFSCache=%s\nCPUCores=%d\nCPUThreads=%d\nCPUAffinityMask=0x%llX\n"
         "PakCacheBudgetMB=%d\nPakPrefetchWorkers=%d\n",
@@ -51,16 +49,9 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.enableSceneNodeOptimizer ? "true" : "false",
         config.enableShadowOptimizer ? "true" : "false",
         config.enableClassFactoryOptimizer ? "true" : "false",
-        config.enablePVSPrefetchOptimizer ? "true" : "false",
-        config.enableAdaptiveROI ? "true" : "false",
-        config.roiBootRadius,
-        config.pvsBootRadius,
-
         config.enableInfoManagerOptimizer ? "true" : "false",
         config.enableSessionStartOptimizer ? "true" : "false",
         config.sessionStartSleepMs,
-        config.enableDynamicROI ? "true" : "false",
-        config.baseROI, config.aimingROI,
         config.enableD3D9StateFilter ? "true" : "false",
         config.enableFastTextureLoader ? "true" : "false",
         config.enableVegetationOptimizer ? "true" : "false",
@@ -71,7 +62,6 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.enableAtmosphericFogControl ? "true" : "false",
         config.fogDistanceMultiplier, config.fogEndMinDistance,
         config.preserveUnderwaterFog ? "true" : "false",
-        config.enableGlobalVisualLodProbe ? "true" : "false", config.globalVisualLodProbeScale,
         config.enableHighPrecisionTimer ? "true" : "false",
         config.enableHighProcessPriority ? "true" : "false",
         config.enableCPUTopologyAffinity ? "true" : "false",

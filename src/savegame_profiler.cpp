@@ -14,7 +14,6 @@
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
-#include "pvs_prefetch_optimizer.h"
 
 #include "info_manager_optimizer.h"
 #include "pak_tracer.h"
@@ -1064,8 +1063,6 @@ static void LogLoadReport(double totalSec) {
         ShadowOptimizer_GetFastAdds(), ShadowOptimizer_GetDuplicatesAvoided(), ShadowOptimizer_GetFastRemoves());
     Log("G3O", "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)",
         ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
-    Log("G3O", "  - PVS Prefetch Streaming:         %u sync clamped (to %.0f), %u redundant skipped, %u ramped",
-        PVSOptimizer_GetClampedCalls(), static_cast<double>(config.pvsBootRadius), PVSOptimizer_GetSkippedCalls(), PVSOptimizer_GetRampedCalls());
 
     Log("G3O", "  - Info Manager Dialog Cache:      %llu hits, %llu misses, %u rebuilds (cached %u dialogs, %u expansions)",
         InfoManagerOptimizer_GetHits(), InfoManagerOptimizer_GetMisses(),
@@ -1186,8 +1183,6 @@ static void LogLoadReport(double totalSec) {
             ShadowOptimizer_GetFastAdds(), ShadowOptimizer_GetDuplicatesAvoided(), ShadowOptimizer_GetFastRemoves());
         fprintf(fp, "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)\n",
             ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
-        fprintf(fp, "  - PVS Prefetch Streaming:         %u sync clamped (to %.0f), %u redundant skipped, %u ramped\n",
-            PVSOptimizer_GetClampedCalls(), static_cast<double>(config.pvsBootRadius), PVSOptimizer_GetSkippedCalls(), PVSOptimizer_GetRampedCalls());
 
         fprintf(fp, "  - Info Manager Dialog Cache:      %llu hits, %llu misses, %u rebuilds (cached %u dialogs, %u expansions)\n",
             InfoManagerOptimizer_GetHits(), InfoManagerOptimizer_GetMisses(),
@@ -1358,7 +1353,6 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     ResetPropertyCacheTelemetry();
     ResetShadowCasterOptimizerSession();
     ResetClassFactoryOptimizerSession();
-    ResetPVSPrefetchOptimizerSession();
 
     ResetVFSCacheTelemetry();
     InterlockedExchange(&s_readCalls, 0);

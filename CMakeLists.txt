@@ -93,18 +93,12 @@ add_library(dinput8 SHARED
     src/class_factory_policy.h
     src/class_factory_optimizer.cpp
     src/class_factory_optimizer.h
-    src/pvs_prefetch_policy.h
-    src/pvs_prefetch_optimizer.cpp
-    src/pvs_prefetch_optimizer.h
 
     src/info_manager_optimizer.cpp
     src/info_manager_optimizer.h
     src/session_start_policy.h
     src/session_start_optimizer.cpp
     src/session_start_optimizer.h
-    src/dynamic_roi_policy.h
-    src/dynamic_roi_optimizer.cpp
-    src/dynamic_roi_optimizer.h
     src/property_cache_optimizer.cpp
     src/property_cache_optimizer.h
     src/entity_search_optimizer.cpp
@@ -128,9 +122,6 @@ add_library(dinput8 SHARED
     src/fog_policy.h
     src/fog_optimizer.cpp
     src/fog_optimizer.h
-    src/global_visual_lod_probe.cpp
-    src/global_visual_lod_probe.h
-    src/global_visual_lod_probe_policy.h
     src/focus_name_guard.cpp
     src/focus_name_guard.h
     src/focus_name_guard_policy.h
