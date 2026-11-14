@@ -59,7 +59,7 @@ int main() {
     G3O::AppendAppliedConfigSnapshot(configText, config);
 
     const char* const expectedKeys[] = {
-        "EnableG3O=", "LoadG3SEPlugins=", "FixVulkanLayerConflicts=",
+        "EnableG3O=", "LoadG3SEPlugins=", "LoadReShade=", "FixVulkanLayerConflicts=",
         "EnableBorderless=", "AutoBorderless=", "PreventMinimizeOnFocusLoss=",
         "EnableCrashInvestigator=", "ShowCrashDialog=", "WriteCrashDump=", "WriteCrashLog=",
         "EnableSharedBaseOptimizations=", "EnableFastPakDecompressor=", "EnablePropertyCache=", "EnablePakPrefetch=",

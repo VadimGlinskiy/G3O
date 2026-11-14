@@ -9,6 +9,7 @@ struct Config {
     // [General]
     bool enableG3O = true;
     bool loadG3SEPlugins = true;
+    bool loadReShade = true;
     bool fixVulkanLayerConflicts = true;
 
     // [Display]

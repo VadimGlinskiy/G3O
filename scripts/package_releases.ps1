@@ -24,7 +24,11 @@ if (-not (Test-Path $packagesDir)) {
 }
 $oldPackages = Get-ChildItem -Path $packagesDir -File |
     Where-Object { $_.Name -match '^(Gothic3Optima-.*-Core|DXVK-.*|ReShade-RTGI-Gothic3)\.zip$' }
-if ($oldPackages) { Remove-Item -LiteralPath $oldPackages.FullName -Force }
+if ($oldPackages) { 
+    foreach ($pkg in $oldPackages) {
+        Remove-Item -LiteralPath $pkg.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
 
 # ------------------------------------------------------------------------------
 # 1. Package Gothic3Optima-Core.zip
@@ -158,34 +162,40 @@ if (Test-Path $reshadeDir) {
 
     $readmeReShade = @"
 ================================================================================
-Gothic 3 - ReShade 6.8 + RTGI (Ray Traced Global Illumination) Addon
+Gothic 3 - ReShade 6.8 Enhanced Visuals Addon
 ================================================================================
 
 DESCRIPTION:
-Optional visual enhancement pack providing ray tracing effects, indirect
-lighting, ambient occlusion (qUINT MXAO), and screen-space reflections.
+Optional visual enhancement pack providing ambient occlusion (MXAO),
+anti-aliasing (SMAA), color debanding (qUINT Deband), screen-space reflections (SSR),
+and atmospheric light diffusion (Solaris Bloom).
 
 INCLUDED FILES:
-- ReShade32.dll    (ReShade 6.8.0 32-bit runtime)
+- ReShade32.dll    (ReShade 6.8.0 32-bit runtime - automatically loaded by G3O)
 - ReShade.ini      (Pre-configured with Home key overlay and depth buffer settings)
-- reshade-shaders/ (Curated RTGI, MXAO, SSR, bloom and color grading shaders)
+- reshade-shaders/ (Curated Marty's Mods and qUINT shaders)
 
 INSTALLATION:
 1. Extract all contents of this archive directly into your Gothic 3 game folder
    (where 'Gothic3.exe' is located).
-2. Launch Gothic 3.
+2. Launch Gothic 3. Gothic 3 Optima (G3O) will automatically load ReShade32.dll.
 3. Press 'Home' on your keyboard to open the ReShade configuration overlay.
+   (On compact/laptop keyboards, press 'Fn + Home' or 'Fn + Left Arrow').
 
 NOTE:
-ReShade is completely optional and separate from Gothic 3 Optima (G3O) and DXVK.
+ReShade is completely optional and separate from the core G3O performance optimizations.
 ================================================================================
 "@
     Set-Content -Path (Join-Path $stageReShade "README_RESHADE.txt") -Value $readmeReShade -Encoding UTF8
 
     $reshadeZip = Join-Path $packagesDir "ReShade-RTGI-Gothic3.zip"
-    Compress-Archive -Path "$stageReShade\*" -DestinationPath $reshadeZip -Force
+    try {
+        Compress-Archive -Path "$stageReShade\*" -DestinationPath $reshadeZip -Force -ErrorAction Stop
+        Write-Host "[OK] Created: ReShade-RTGI-Gothic3.zip"
+    } catch {
+        Write-Warning "Could not update ReShade-RTGI-Gothic3.zip because it is currently open in another program (e.g. 7-Zip). Existing package preserved."
+    }
     Remove-Item $stageReShade -Recurse -Force
-    Write-Host "[OK] Created: ReShade-RTGI-Gothic3.zip"
 }
 
 Write-Host "All release packages successfully created in: $packagesDir"

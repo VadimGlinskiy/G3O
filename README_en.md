@@ -28,6 +28,10 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
   Automatically loads Script Extender plugins from the `Data\G3SE\Plugins` folder.<br>
   *Usage:* Allows G3SE/G3SDK mods to run without requiring a third-party DLL injector.
 
+* **`LoadReShade`** (default `true`)<br>
+  Automatically loads the ReShade post-processing pipeline (`ReShade32.dll`) when present in the game directory.<br>
+  *Usage:* Enables visual enhancement shaders without needing DLL renaming or external injectors.
+
 * **`FixVulkanLayerConflicts`** (default `true`)<br>
   Disables conflicting third-party Vulkan overlay layers (such as Bandicam) that hook into the graphics pipeline and cause game crashes on startup when running with DXVK.
 
@@ -238,6 +242,37 @@ DXVK translates Direct3D 9 calls to Vulkan, reducing GPU driver overhead and eli
 * **DXVK 3.0.1** — Vulkan 1.4; requires modern GPU drivers.
 
 Place `dxvk.conf` next to `Gothic3.exe`. A complete breakdown of configuration options is available in the [DXVK Options Guide](docs/DXVK_OPTIONS.md) (Russian).
+
+---
+
+## Optional ReShade Visual Enhancement Pack
+
+The release page includes an optional standalone addon archive **`ReShade-RTGI-Gothic3.zip`** featuring ReShade 6.8 and a curated shader suite (*Marty's Mods / iMMERSE* and *qUINT* by Pascal Gilcher).
+
+### Why It Helps Gothic 3:
+Vanilla Gothic 3 suffers from notable distant rendering artifacts, which become particularly visible when extended fog reveals distant landscapes:
+* **Anti-Aliasing & Distant Pixel Stabilization (`MartysMods_SMAA`):**<br>
+  Vanilla Gothic 3 lacks modern edge anti-aliasing. Tree canopies, fences, and mountain ridges in the distance crawl with sub-pixel noise and flickering during camera movement. SMAA stabilizes high-frequency geometric edges, eliminating shimmering.
+* **Ambient Depth for Distant Terrain (`MartysMods_MXAO`):**<br>
+  Dynamic shadows in Gothic 3 stop past 65 meters, leaving distant Nordmar peaks and Varant cliffs looking flat. MXAO reads the game's depth buffer (Z-Buffer) and reconstructs soft contact shadows in rocky crevasses, valleys, and under distant tree canopies, restoring depth and scale.
+* **Elimination of Sky & Fog Banding (`qUINT_deband`):**<br>
+  The vintage D3D9 8-bit color pipeline frequently produces visible color banding and stepped rings in the sky and distant fog. The deband filter smooths gradients into clean color transitions.
+* **Soft Atmospheric Light Diffusion (`MartysMods_SOLARIS` / `qUINT_bloom`):**<br>
+  Atmospheric diffusion naturally softens low-polygon LOD transitions on the horizon.
+* **Real-Time Water Reflections (`qUINT_ssr`):**<br>
+  Adds screen-space reflections of shorelines and objects across lakes, rivers, and the sea.
+* **Adaptive Texture Sharpening (`MartysMods_SHARPEN`):**<br>
+  Enhances surface textures without ringing or edge artifacts.
+
+### Installation:
+1. Download **`ReShade-RTGI-Gothic3.zip`** from the GitHub Releases page.
+2. Extract all contents (`ReShade32.dll`, `ReShade.ini`, and the `reshade-shaders\` folder) directly into your Gothic 3 game directory (beside `Gothic3.exe`).
+3. Launch the game. G3O will automatically detect and load `ReShade32.dll` on startup via `LoadReShade=true`.
+4. Press the **`Home`** key on your keyboard to open the ReShade configuration overlay.
+   > On compact or laptop keyboards without a dedicated `Home` key, use **`Fn + Home`** or **`Fn + Left Arrow`**. The key binding can also be customized in `ReShade.ini` (`OverlayKey`).
+
+> [!NOTE]
+> The ReShade graphics package is entirely optional. If you remove `ReShade32.dll` or set `LoadReShade=false`, the game and G3O continue operating normally.
 
 ---
 

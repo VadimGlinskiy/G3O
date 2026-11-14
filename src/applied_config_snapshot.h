@@ -11,9 +11,11 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
     output.AppendFormat("INI=%s\n", config.iniFilePath.empty() ? "<не указан>" : config.iniFilePath.c_str());
 
     output.Append("[General]\n");
-    output.AppendFormat("EnableG3O=%s\nLoadG3SEPlugins=%s\nFixVulkanLayerConflicts=%s\n",
+    output.AppendFormat("EnableG3O=%s\nLoadG3SEPlugins=%s\nLoadReShade=%s\nFixVulkanLayerConflicts=%s\n",
         config.enableG3O ? "true" : "false",
-        config.loadG3SEPlugins ? "true" : "false", config.fixVulkanLayerConflicts ? "true" : "false");
+        config.loadG3SEPlugins ? "true" : "false",
+        config.loadReShade ? "true" : "false",
+        config.fixVulkanLayerConflicts ? "true" : "false");
 
     output.Append("[Display]\n");
     output.AppendFormat("EnableBorderless=%s\nAutoBorderless=%s\nPreventMinimizeOnFocusLoss=%s\nWindowCursorLock=%s\nInputSystemKeyPassthrough=%s\n",

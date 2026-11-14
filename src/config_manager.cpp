@@ -58,6 +58,10 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Если вы используете моды с кастомными скриптами — оставьте true.\n"
         << "LoadG3SEPlugins=true\n"
         << "\n"
+        << "; Автоматическая загрузка графического пакета ReShade (ReShade32.dll), если файл находится в папке с игрой.\n"
+        << "; Позволяет использовать шейдеры постобработки без переименования системных библиотек.\n"
+        << "LoadReShade=true\n"
+        << "\n"
         << "; Исправление конфликтов с оверлеями (например, Bandicam).\n"
         << "; Отключает проблемный Vulkan-слой, из-за которого игра может падать при запуске с DXVK.\n"
         << "FixVulkanLayerConflicts=true\n"
@@ -334,6 +338,7 @@ void LoadConfig() {
     // [General]
     s_config.enableG3O = ReadIniBool("General", "EnableG3O", true, path);
     s_config.loadG3SEPlugins = ReadIniBool("General", "LoadG3SEPlugins", true, path);
+    s_config.loadReShade = ReadIniBool("General", "LoadReShade", true, path);
     s_config.fixVulkanLayerConflicts = ReadIniBool("General", "FixVulkanLayerConflicts", true, path);
 
     // [Display]

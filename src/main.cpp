@@ -63,6 +63,15 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     if (cfg.fixVulkanLayerConflicts) {
         SetEnvironmentVariableA("DISABLE_VK_LAYER_bandicam_helper_1", "1");
     }
+    // Optional ReShade integration: load ReShade32.dll early if present
+    if (cfg.loadReShade && GetFileAttributesA("ReShade32.dll") != INVALID_FILE_ATTRIBUTES) {
+        HMODULE hReShade = LoadLibraryA("ReShade32.dll");
+        if (hReShade) {
+            G3O::Log("G3O", "Optional ReShade runtime loaded successfully from ReShade32.dll.");
+        } else {
+            G3O::Log("G3O", "Failed to load ReShade32.dll (error %lu).", GetLastError());
+        }
+    }
     if (cfg.enableDiagnosticLog) {
         G3O::InitializeDiagnosticLogger();
     }

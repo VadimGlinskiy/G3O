@@ -99,7 +99,7 @@ int main() {
         "EnableSelectiveCulling=true", "ClutterCullThreshold=0.008", "ImportantCullThreshold=0.002",
         "EnableAtmosphericFogControl=true", "FogDistanceMultiplier=2.5", "FogEndMinDistance=250000", "PreserveUnderwaterFog=true",
         "EnableVegetationOptimizer=true", "EnableAdaptiveTreeShadows=true",
-        "WindowCursorLock=true", "InputSystemKeyPassthrough=true", "EnableCrashGuards=true",
+        "WindowCursorLock=true", "InputSystemKeyPassthrough=true", "EnableCrashGuards=true", "LoadReShade=true",
         "EnableD3D9StateFilter=true", "EnableDiagnosticLog=false", "InterceptOutputDebugString=false",
         "EnableProfiler=false", "EnableSavegameAudit=false", "EnableLayerAudit=false"
     };
