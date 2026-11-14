@@ -2,97 +2,262 @@
 
 [Русский](README.md)
 
-G3O is a high-performance 32-bit `dinput8.dll` proxy library for **Gothic 3** (v1.75.14). It features engine-level optimizations for the Genome Engine (decompression, scene graph, frustum culling database, property and template caching), borderless windowed mode, crash investigation tools (Crash Investigator), and load-time profiling.
+**Gothic 3 Optima (G3O)** is an optimization mod and proxy library `dinput8.dll` for **Gothic 3** (v1.75.14). It resolves long-standing technical bottlenecks in the Genome Engine: significantly speeds up savegame loading, removes micro-stutters during world exploration, adds a true borderless fullscreen windowed mode, extends visual draw distance without the opaque wall of white fog, and protects the game from random "Where is the guru?" crashes.
 
-Fully compatible with Community Patch 1.75.14, Update Pack, Parallel Universe Patch (PUP v1.1.1), and large mod builds (Union, Questpaket, Content Mod, LTM, Conquest, and setups with 300+ mods).
-
----
-
-## Features and Architecture
-
-### Performance and Load-Time Optimizations
-- **Hardware-Accelerated PAK and Savegame Decompression (libdeflate SIMD):** Replaces scalar zlib in `FileSystem.dll` and `Game.dll` with an optimized libdeflate decompressor supporting AVX2 and BMI2. Accelerates mod archive and savegame unpacking by over 4x (from 9.2 s down to 2.2 s).
-- **Speculative PAK Prefetcher (PakPrefetch):** Background worker thread pool that decompresses `.pak` data blocks ahead of engine requests based on traces from previous loads, eliminating 4–8 seconds of disk I/O stall.
-- **O(1) Entity Property Cache:** Flat hash cache for `bCAccessorProperty::ResolveProperty` with zero dynamic allocations. Delivers 100% hit rate across 1,000,000+ lookups per load, eliminating redundant traversal of engine property tables.
-- **Register-Optimized String Hashing (Fast DJB2) & Template Cache:** Register-based DJB2 string hashing and `eCTemplateEntityProxy` caching, cutting millions of CRT hash calls and accelerating template resolution in mod layers.
-- **Batched Frustum Visibility Database (Frustum Database Optimizer):** Defers and deduplicates `eCFrustumDatabase::ExtractFromEntity` calls during entity spawning. Reduces intermediate visibility database rebuilds from 130,000+ down to ~9,000 per load.
-- **Stepped Scene Node Pre-allocation (Scene Node Optimizer):** Replaces the engine's 25% incremental growth of `eCNode::m_ppChildren` with power-of-two capacity pre-allocations (1024 -> 8192 -> 32768) via native `bCMemoryAdmin::Realloc`. Eliminates 25–30 cascading reallocations per major world sector (`RB_Mod`, `SysDyn`).
-- **Directional Shadow Caster Optimizer:** Replaces quadratic backwards linear scans and `memmove` shifts in `eCShadowMapDirectionalLightBase` with an O(1) hash index and Swap-and-Pop. Eliminates up to ~8 seconds of stall during camera teleportation (`GotoLoadedPosition`) and streaming stutters during active gameplay.
-- **SharedBase Class Factory Optimizer:** Fast L1 cache for engine reflection type descriptors and Zero-Alloc `bCString` buffer reuse for `bCPropertyObjectSingleton::ReadObject`. Eliminates linear linked-list traversal across 43 hash buckets and prevents over 60,000 engine memory allocations during dynamic entity deserialization (`SysDyn`).
-- **Info Manager and Navigation Optimizers:** These are separate hooks. Their exact actions and activation conditions are documented next to the corresponding settings in `G3O.ini`.
-- **Component Search Optimizer (Entity Search Optimizer):** Caches vptr table entries in `eCEntity::SearchForEntity` with an early-exit path.
-- **System Timer and Thread Scheduling:** Enables 1 ms OS timer resolution (`timeBeginPeriod(1)`), assigns high process priority, and automatically pins game threads to performance cores (P-cores) while avoiding efficiency cores (E-cores).
-
-### Display
-- **Borderless Windowed Mode:** Eliminates crashes, freezing, and resolution resets during Alt-Tab and window switching. Includes protection against accidental minimization when clicking secondary monitors (`PreventMinimizeOnFocusLoss`).
-- **D3D9 State Filtering:** Deduplicates redundant `SetRenderState` and `SetSamplerState` calls when running on native Direct3D 9.
-
-### Diagnostics and Crash Investigation
-- **Crash Investigator:** Intercepts unhandled Win32 exceptions (SEH), engine fatal errors (`FatalError`), and "Where is the guru?" crashes. Generates `G3O_CrashReport_*.log` containing CPU registers, module lists, and call stacks, alongside minidumps (`G3O_Crash_*.dmp`) for debugging in Visual Studio / WinDbg.
-- **Load Profiler (`EnableSavegameAudit`):** Detailed `G3O_LoadProfiler_*.log` providing millisecond-accurate breakdowns of disk reads, decompression, sector activations, and world initialization.
-- **Performance Profiler (`EnableProfiler`):** Tracks FPS, 1% Low, p99 frame times, and CPU load in `G3O_profile_*.log`.
+### Compatibility
+G3O is fully compatible with:
+* Community Patch 1.75.14 and Update Pack;
+* Parallel Universe Patch (PUP v1.1.1);
+* Major mod packages (Union, Questpaket, Content Mod, LTM, Conquest, and large builds with 300+ mods).
 
 ---
 
-## Directory Structure and Configuration
+## Configuration Guide (G3O.ini)
 
-All diagnostic and runtime cache files are kept cleanly inside the `G3O\` directory in the game folder:
+The configuration file `G3O.ini` is located in the game folder next to `Gothic3.exe`. All settings are grouped into logical sections. Below is an explanation of what each option does and why it is useful.
+
+---
+
+### [General] — Core Settings
+
+* **`EnableG3O`** (default `true`)<br>
+  Master switch. When set to `false`, the library acts as a transparent passthrough for DirectInput: all hooks, optimizations, and crash guards are disabled, and the game runs in its stock vanilla state.<br>
+  *Usage:* Useful for quick troubleshooting if you suspect a conflict with another mod.
+
+* **`LoadG3SEPlugins`** (default `true`)<br>
+  Automatically loads Script Extender plugins from the `Data\G3SE\Plugins` folder.<br>
+  *Usage:* Allows G3SE/G3SDK mods to run without requiring a third-party DLL injector.
+
+* **`FixVulkanLayerConflicts`** (default `true`)<br>
+  Disables conflicting third-party Vulkan overlay layers (such as Bandicam) that hook into the graphics pipeline and cause game crashes on startup when running with DXVK.
+
+---
+
+### [Display] — Window, Display & Input
+
+* **`EnableBorderless`** (default `true`)<br>
+  Borderless Fullscreen windowed mode.<br>
+  *Vanilla issue:* In exclusive fullscreen, pressing `Alt + Tab` frequently causes Gothic 3 to freeze permanently, reset desktop resolution, or crash the GPU driver.<br>
+  *G3O solution:* The game runs in a borderless window matching your desktop resolution. Switching between the game, browser, or Discord is instant and smooth.
+
+* **`AutoBorderless`** (default `true`)<br>
+  Automatically switches the game window into borderless fullscreen on startup if windowed mode is selected in the in-game video settings.
+
+* **`PreventMinimizeOnFocusLoss`** (default `true`)<br>
+  Prevents the game from minimizing when clicking outside or onto a secondary monitor.<br>
+  *Usage:* Ideal for multi-monitor setups: clicking a browser, interactive map, or chat on your second screen won't minimize Gothic 3 — the game continues rendering and audio keeps playing.
+
+* **`WindowCursorLock`** (default `true`)<br>
+  Locks the mouse cursor inside the game window during active gameplay.<br>
+  *Usage:* On multi-monitor setups, prevents the mouse pointer from straying onto another monitor during combat. The cursor is immediately and cleanly released upon `Alt + Tab` or switching focus.
+
+* **`InputSystemKeyPassthrough`** (default `true`)<br>
+  Passes multimedia and volume keys through to Windows.<br>
+  *Vanilla issue:* Gothic 3 captures keyboard input exclusively and blocks keyboard media controls.<br>
+  *G3O solution:* Lets you adjust Windows volume (`Volume Up/Down`, `Mute`) and control music players (`Play/Pause`, next/previous track) while playing.
+
+---
+
+### [CrashInvestigator] — Crash Protection & Diagnostics
+
+* **`EnableCrashInvestigator`** (default `true`)<br>
+  Global crash handler. Catches unhandled Win32 exceptions (SEH), engine `FatalError` crashes, and "Where is the guru?" dialogs, producing detailed diagnostic reports.
+
+* **`EnableCrashGuards`** (default `true`)<br>
+  Engine crash guards against common null-pointer and missing-object exceptions.<br>
+  *Vanilla issue:* When the game or a mod references missing bones or unloaded animations (such as during `DrawFocusName` when targeting newly spawned creatures), the engine crashes with "Where is the guru?".<br>
+  *G3O solution:* Intercepts invalid calls safely and skips them, allowing gameplay to continue uninterrupted.
+
+* **`ShowCrashDialog`** (default `true`)<br>
+  Shows an informative error dialog on crash displaying the offending module and crash address instead of closing silently.
+
+* **`WriteCrashDump`** (default `true`)<br>
+  Generates a process minidump in `G3O\G3O_Crash_*.dmp` for debugging in Visual Studio or WinDbg.
+
+* **`WriteCrashLog`** (default `true`)<br>
+  Saves a readable crash report in `G3O\G3O_CrashReport_*.log` containing CPU register states, loaded module addresses, and stack traces.
+
+---
+
+### [Performance] — Performance, Graphics & Loading
+
+#### 1. Savegame Loading and Asset Streaming
+
+* **`EnableFastPakDecompressor`** (default `true`)<br>
+  Hardware-accelerated decompression for `.pak` archives and `.g3savcpx` savegames using libdeflate with AVX2 vector instructions. Decompresses data up to 4x faster than vanilla zlib.
+
+* **`EnablePakPrefetch`** (default `true`), **`PakCacheBudgetMB`** (default `768`), **`PakPrefetchWorkers`** (default `0` — auto)<br>
+  Background asset prefetching. Preheats the Windows file cache and decompresses frequently needed archive blocks into memory based on previous session traces. Eliminates long load hitches and streaming stutters.<br>
+  *Memory limit:* 768 MB is a safe limit for a 32-bit process, preventing out-of-memory crashes. Setting `0` disables the cache.
+
+* **`EnablePropertyCache`** (default `true`)<br>
+  High-speed entity property cache. During save loading, the engine resolves properties hundreds of thousands of times. This cache stores resolved properties in a fast hash table, eliminating redundant lookups.
+
+* **`EnableVFSCache`** (default `true`)<br>
+  Virtual File System (VFS) path caching. Avoids repeated directory searches through long chains of archive files — especially valuable for large mod packages.
+
+* **`EnableSessionStartOptimizer`** (default `true`), **`SessionStartSleepMs`** (default `1`)<br>
+  Removes idle wait delays on world start.<br>
+  *Vanilla issue:* The original engine ran twelve consecutive `Sleep(100)` calls during session start, causing 1.2 seconds of dead waiting time on every save load.<br>
+  *G3O solution:* Reduces idle sleep calls from 100 ms to 1 ms, shaving over a second off every loading screen.
+
+* **`EnableLayerRingArena`** (default `false`)<br>
+  Circular arena buffer for massive world layers (`RB_Mod`). Recommended off (`false`) for standard gameplay.
+
+#### 2. Engine Memory, Scene Graph & Core Algorithms
+
+* **`EnableSharedBaseOptimizations`** (default `true`)<br>
+  Accelerates core math operations and string comparisons in `SharedBase.dll`. Uses fast CPU instructions for bounding box checks and name hashing, reducing CPU overhead in dense scenes.
+
+* **`EnableFrustumDatabaseOptimizer`** (default `true`)<br>
+  Optimizes visibility database updates during loading. Batches frequent intermediate frustum queries, significantly reducing save loading times.
+
+* **`EnableSceneNodeOptimizer`** (default `true`)<br>
+  Pre-allocates scene node child arrays in stepped blocks (1024 -> 8192 -> 32768) rather than the engine's incremental 25% growth, eliminating cascading reallocations in heavily populated cities.
+
+* **`EnableHashProxyOptimizer`** (default `true`)<br>
+  Fast entity template lookup by name. Caches templates in memory to avoid linear list traversals when spawning items, monsters, and NPCs.
+
+* **`EnableClassFactoryOptimizer`** (default `true`)<br>
+  Class factory caching. Caches reflection type descriptors and reuses string buffers, eliminating tens of thousands of memory allocations during sector deserialization.
+
+* **`EnableEntitySearchOptimizer`** (default `true`)<br>
+  Optimizes entity component lookups with fast-path early exit.
+
+* **`EnableInfoManagerOptimizer`** (default `true`)<br>
+  Accelerates dialogue resolution using a hash table, removing micro-stutters when approaching NPCs and opening dialogue screens.
+
+* **`EnableNavigationOptimizer`** (default `true`)<br>
+  Optimizes pathfinding lookups, cutting CPU overhead during navigation updates in gameplay and loading.
+
+#### 3. Graphics, Draw Distance & Atmosphere
+
+* **`EnableAtmosphericFogControl`** (default `true`), **`FogDistanceMultiplier`** (default `2.5`), **`FogEndMinDistance`** (default `250000.0`), **`PreserveUnderwaterFog`** (default `true`)<br>
+  Direct3D 9 atmospheric fog control.<br>
+  *Vanilla issue:* Stock weather triggers fog starting at 200–300 meters, completely burying the horizon in an opaque white wall at 600–800 meters. Even with maximum view distance in `ge3.ini`, distant islands and shorelines remain invisible.<br>
+  *G3O solution:* Extends fog range by 2.5x (at least 2.5 km in clear weather). Looking out from coastal cliffs reveals panoramic views of mountains, dunes, and islands, while keeping a gentle, artistic haze at the horizon.<br>
+  *Atmosphere preservation:* In heavy rain, sandstorms, caves, or underwater (`PreserveUnderwaterFog=true`), close fog is strictly preserved to maintain the game's intended mood.
+
+* **`EnableSelectiveCulling`** (default `true`), **`ClutterCullThreshold`** (default `0.008`), **`ImportantCullThreshold`** (default `0.002`)<br>
+  Selective screen-size culling.<br>
+  *Vanilla issue:* The engine culls all objects using one uniform threshold. Increasing view distance causes the GPU to render thousands of tiny plates, spoons, and wood chips inside distant huts, tanking FPS.<br>
+  *G3O solution:* Categorizes objects into important items (chests, herbs, enemies, NPCs, doors — rendered at long distances) and clutter (cutlery, debris — culled early). Yields **+15–25% FPS** in towns while keeping quest loot clearly visible.
+
+* **`EnableVegetationOptimizer`** (default `true`)<br>
+  Vegetation shadow culling. Skips shadow calculations for distant tree canopies that are not visually perceptible, providing a noticeable FPS boost outdoors.
+
+* **`EnableAdaptiveTreeShadows`** (default `true`), **`TreeShadowDistance`** (default `6500.0`)<br>
+  Height-adaptive tree shadows.<br>
+  *Vanilla issue:* Tree shadows are abruptly clipped at a fixed 65 meters, causing an annoying sharp line of popping shadows to follow the player.<br>
+  *G3O solution:* Dynamically scales shadow distance based on tree height: small bushes lose shadows earlier, while tall oaks and pines cast shadows farther out. The popping line disappears completely.
+
+* **`VegetationGridRangeClamp`** (default `7500.0`)<br>
+  Clamps the dense grass grid radius to 75 meters. Prevents grass vertex buffer overflows on ultra settings, avoiding sudden FPS drops in dense meadows.
+
+* **`EnableShadowOptimizer`** (default `true`)<br>
+  Directional sunlight shadow caster optimization. Replaces quadratic scans with an O(1) hash index, eliminating multi-second hitches during teleportation and streaming stutters in forests.
+
+* **`EnableFastTextureLoader`** (default `true`)<br>
+  Streamlined Direct3D 9 texture loading that avoids redundant intermediate buffer copies.
+
+* **`EnableD3D9StateFilter`** (default `true`)<br>
+  DirectX 9 state filtering. Discards duplicate render state calls before sending them to the GPU, saving CPU cycles.
+
+#### 4. CPU Scheduling, Priority & System Timer
+
+* **`EnableHighPrecisionTimer`** (default `true`)<br>
+  Requests a 1 ms Windows system timer (`timeBeginPeriod(1)`), smoothing out frame pacing and eliminating camera jitter.
+
+* **`EnableHighProcessPriority`** (default `true`)<br>
+  Assigns high priority to `Gothic3.exe`, preventing background Windows applications from stealing CPU time.
+
+* **`EnableCPUTopologyAffinity`** (default `true`), **`CPUCores`** (`0`), **`CPUThreads`** (`0`), **`CPUAffinityMask`** (`0x0`)<br>
+  Pins the game to performance cores (P-cores).<br>
+  *Vanilla issue:* On hybrid CPUs (Intel 12th gen and newer), Windows often incorrectly schedules the main Gothic 3 thread onto slow efficiency cores (E-cores), cutting performance in half.<br>
+  *G3O solution:* Detects CPU topology and ensures threads run exclusively on high-performance cores.
+
+---
+
+### [Logging] — Logs & Profiling
+
+*All logging options are disabled by default during normal gameplay to save disk I/O.*
+
+* **`EnableDiagnosticLog`** (default `false`)<br>
+  Writes detailed subsystem startup and hook logs to `G3O\G3O_diagnostic_*.log`.
+
+* **`InterceptOutputDebugString`** (default `false`)<br>
+  Captures internal debug messages from the engine and mod DLLs into the diagnostic log.
+
+* **`EnableProfiler`** (default `false`)<br>
+  Per-second telemetry in `G3O\G3O_profile_*.log`: tracks average FPS, 1% Low, 0.1% Low, frame times, and CPU utilization.
+
+* **`EnableSavegameAudit`** (default `false`)<br>
+  Detailed millisecond breakdown of savegame loading times in `G3O\G3O_LoadProfiler_*.log` (disk reads, decompression, entity spawns, world activation).
+
+* **`EnableLayerAudit`** (default `false`)<br>
+  Micro-profiling of world layers and property reads for mod authors.
+
+---
+
+## File and Folder Structure
+
+All diagnostic reports, logs, and dumps are cleanly stored in a dedicated `G3O\` directory:
+
 ```text
 Gothic 3\
 ├── Gothic3.exe
 ├── dinput8.dll          (G3O proxy DLL)
-├── G3O.ini              (main configuration file)
+├── G3O.ini              (configuration file)
 └── G3O\
     ├── G3O_CrashReport_*.log   (crash reports)
     ├── G3O_Crash_*.dmp         (memory minidumps)
     ├── G3O_LoadProfiler_*.log  (savegame load audit logs)
     ├── G3O_profile_*.log       (performance & frame time logs)
+    ├── G3O_diagnostic_*.log    (subsystem initialization logs)
     └── G3O_PakTrace_*.csv      (PAK trace cache for prefetcher)
 ```
 
-The configuration file `G3O.ini` resides next to `Gothic3.exe`. Every configuration key is documented in-place with its purpose, benefit, and valid options.
-
 ---
 
-## Installation
+## Installation & Updating
 
 1. Copy `dinput8.dll` and `G3O.ini` into your Gothic 3 game directory (beside `Gothic3.exe`).
-   > Back up any existing `dinput8.dll` first (it might belong to another mod).
-   > When updating G3O, back up your current `G3O.ini` before replacing it with the new default profile.
-2. Adjust `G3O.ini` if desired. The shipped profile matches the project's default `G3O.ini`; diagnostic logs and profilers are off by default and can be enabled individually.
-3. Optional: Install DXVK for Vulkan-based rendering.
+   > Back up any existing `dinput8.dll` first if it was installed by another mod.<br>
+   > When updating G3O, transfer your personal settings from the old `G3O.ini` to the new one.
+2. Adjust settings in `G3O.ini` if desired. The default shipped configuration provides maximum performance and stability out of the box.
+3. Launch the game normally through Steam, GOG, or `Gothic3.exe`.
 
 ---
 
-## DXVK
+## DXVK Integration
 
-DXVK translates Direct3D 9 calls to Vulkan, reducing CPU driver overhead. Select the version supported by your GPU driver:
+DXVK translates Direct3D 9 calls to Vulkan, reducing GPU driver overhead and eliminating shader compilation stutter.
 
-- **1.10.1-async / 1.10.3-async** — Vulkan 1.1; asynchronous background shader compilation without stutter.
-- **2.4.1** — Vulkan 1.3; stable upstream release with texture sharpness controls.
-- **3.0.1** — Vulkan 1.4; requires modern GPU drivers.
+* **DXVK 1.10.1-async / 1.10.3-async** — Vulkan 1.1; features asynchronous background shader compilation without stutter.
+* **DXVK 2.4.1** — Vulkan 1.3; stable upstream release with texture sharpness controls.
+* **DXVK 3.0.1** — Vulkan 1.4; requires modern GPU drivers.
 
-Place `dxvk.conf` next to `Gothic3.exe`. Full configuration options are detailed in the [DXVK Options Guide](docs/DXVK_OPTIONS.md) (Russian).
+Place `dxvk.conf` next to `Gothic3.exe`. A complete breakdown of configuration options is available in the [DXVK Options Guide](docs/DXVK_OPTIONS.md) (Russian).
 
 ---
 
 ## Building from Source
 
 Requirements:
-- Visual Studio 2022 (MSVC v143 x86 / 32-bit compiler)
-- CMake 3.20+
-- Git
+* Visual Studio 2022 (MSVC v143 x86 / 32-bit compiler)
+* CMake 3.20+
+* Git
 
-Build steps:
+Build commands:
 ```cmd
 git submodule update --init --recursive
 cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
 cmake --build build --config Release
 ```
 
-The output DLL is generated at `build/Release/dinput8.dll`.
+The compiled library will be output at: `build/Release/dinput8.dll`.
 
-Run test suite:
+Running unit tests:
 ```cmd
 python -c "import subprocess, glob; [subprocess.run([f], check=True) for f in glob.glob(r'build/tests/**/*_test.exe', recursive=True)]"
 ```
