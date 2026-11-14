@@ -134,6 +134,17 @@ static std::atomic<uint32_t> s_currentMainSeq{ 0 };
 static std::atomic<uint32_t> s_preGameWorldMaxSeq{ 0 };
 static std::atomic<uint32_t> s_gotoLoadedPosMinSeq{ 0 };
 static std::atomic<bool> s_inGotoLoadedPos{ false };
+static std::atomic<bool> s_allowGotoPosPrefetch{ false };
+static std::atomic<bool> s_stopAtPreGameWorld{ false };
+
+struct DeferredFreeBlock {
+    std::vector<BYTE> data;
+    size_t reservedBytes = 0;
+    bool isPriority = false;
+};
+static SRWLOCK s_deferredFreeLock = SRWLOCK_INIT;
+static std::vector<DeferredFreeBlock> s_deferredFreeQueue;
+static std::atomic<bool> s_hasDeferredFrees{ false };
 
 static SRWLOCK s_cacheLock = SRWLOCK_INIT;
 static std::unordered_map<uint64_t, std::shared_ptr<CachedBlock>> s_predecompCache;
@@ -163,6 +174,28 @@ static void ReleaseCacheMemory(size_t bytes, bool priority) {
         s_rollingMemoryBytes.fetch_sub(bytes, std::memory_order_relaxed);
     }
     s_cacheBudget.Release(bytes);
+    if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
+}
+
+static void DrainDeferredFreeQueue() {
+    if (!s_hasDeferredFrees.load(std::memory_order_acquire)) return;
+    std::vector<DeferredFreeBlock> local;
+    AcquireSRWLockExclusive(&s_deferredFreeLock);
+    local.swap(s_deferredFreeQueue);
+    s_hasDeferredFrees.store(false, std::memory_order_release);
+    ReleaseSRWLockExclusive(&s_deferredFreeLock);
+
+    for (auto& item : local) {
+        std::vector<BYTE>().swap(item.data);
+        ReleaseCacheMemory(item.reservedBytes, item.isPriority);
+    }
+}
+
+static void EnqueueDeferredFree(std::vector<BYTE>&& data, size_t reservedBytes, bool isPriority) {
+    AcquireSRWLockExclusive(&s_deferredFreeLock);
+    s_deferredFreeQueue.push_back({ std::move(data), reservedBytes, isPriority });
+    s_hasDeferredFrees.store(true, std::memory_order_release);
+    ReleaseSRWLockExclusive(&s_deferredFreeLock);
     if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
 }
 
@@ -324,6 +357,7 @@ static DWORD WINAPI BgPredecompWorker(LPVOID lpParam) {
     // All workers cooperate in parallel via atomic s_candidateIndex
     // =========================================================================
     while (s_isActive.load(std::memory_order_relaxed)) {
+        DrainDeferredFreeQueue();
         size_t i = s_candidateIndex.fetch_add(1, std::memory_order_relaxed);
         if (i >= s_candidates.size()) break;
 
@@ -334,21 +368,30 @@ static DWORD WINAPI BgPredecompWorker(LPVOID lpParam) {
         if (cand.seq <= s_currentMainSeq.load(std::memory_order_relaxed)) {
             continue;
         }
-        // Do not prefetch GotoLoadedPosition blocks until Pre-Load sector activation finishes
-        if (!s_inGotoLoadedPos.load(std::memory_order_acquire) &&
-            s_preGameWorldMaxSeq.load(std::memory_order_relaxed) > 0 &&
+        // On cold world loads, s_allowGotoPosPrefetch opens as soon as gCWorld::OnActivate starts
+        // so workers pre-fill the remaining 768 MB budget during SysDyn. On in-game reloads
+        // (where world sectors & textures are already in RAM), s_stopAtPreGameWorld stops workers
+        // after the dynamic-layer blocks so they don't decompress 2.75 GB of unused textures.
+        if (s_preGameWorldMaxSeq.load(std::memory_order_relaxed) > 0 &&
             cand.seq > s_preGameWorldMaxSeq.load(std::memory_order_relaxed)) {
-            while (!s_inGotoLoadedPos.load(std::memory_order_acquire) &&
+            while (!s_allowGotoPosPrefetch.load(std::memory_order_acquire) &&
+                   !s_stopAtPreGameWorld.load(std::memory_order_acquire) &&
+                   !s_inGotoLoadedPos.load(std::memory_order_acquire) &&
                    s_isActive.load(std::memory_order_relaxed)) {
+                DrainDeferredFreeQueue();
                 WaitForSingleObject(s_memAvailableEvent, 5);
             }
-            if (!s_isActive.load(std::memory_order_relaxed)) break;
+            if (!s_isActive.load(std::memory_order_relaxed) ||
+                s_stopAtPreGameWorld.load(std::memory_order_acquire)) {
+                break;
+            }
             if (cand.seq <= s_currentMainSeq.load(std::memory_order_relaxed)) continue;
         }
 
         if (cand.outBytes > s_cacheBudget.Limit()) continue;
         bool reserved = ReserveCacheMemory(cand.outBytes, isVip);
         while (!reserved && s_isActive.load(std::memory_order_relaxed)) {
+            DrainDeferredFreeQueue();
             const uint32_t curSeq = s_currentMainSeq.load(std::memory_order_relaxed);
             if (cand.seq <= curSeq) break;
 
@@ -436,6 +479,15 @@ static DWORD WINAPI BgPredecompWorker(LPVOID lpParam) {
         Log("G3O", "[PakCache] Worker #%zu completed %zu pre-decompressions (%zu VIP + %zu regular) in %.2f ms",
             workerId + 1, prioCount + normCount, prioCount, normCount, elapsedMs);
     }
+
+    // Worker #0 stays alive until load end to drain deferred vector frees off the main thread.
+    if (workerId == 0) {
+        while (s_isActive.load(std::memory_order_relaxed)) {
+            DrainDeferredFreeQueue();
+            WaitForSingleObject(s_memAvailableEvent, 2);
+        }
+    }
+    DrainDeferredFreeQueue();
     return 0;
 }
 
@@ -482,6 +534,8 @@ void PakTracer_OnLoadStart(const char* saveName) {
     s_preGameWorldMaxSeq.store(0, std::memory_order_relaxed);
     s_gotoLoadedPosMinSeq.store(0, std::memory_order_relaxed);
     s_inGotoLoadedPos.store(false, std::memory_order_relaxed);
+    s_allowGotoPosPrefetch.store(false, std::memory_order_relaxed);
+    s_stopAtPreGameWorld.store(false, std::memory_order_relaxed);
 
 
     s_vipCandidateCount = 0;
@@ -651,10 +705,20 @@ void PakTracer_RecordRead(
     s_tracerOverheadUs.fetch_add(oh, std::memory_order_relaxed);
 }
 
-void PakTracer_OnLoadGameWorldStart() {
+void PakTracer_OnWorldActivateStart() {
     if (!s_isActive.load(std::memory_order_relaxed)) return;
-    // Allow background workers to start prefetching GotoLoadedPosition blocks during LoadGameWorld's 2.3s CPU phase
-    s_inGotoLoadedPos.store(true, std::memory_order_release);
+    s_allowGotoPosPrefetch.store(true, std::memory_order_release);
+    if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
+}
+
+void PakTracer_OnLoadGameWorldStart(bool worldAlreadyActive) {
+    if (!s_isActive.load(std::memory_order_relaxed)) return;
+    if (worldAlreadyActive && !s_allowGotoPosPrefetch.load(std::memory_order_acquire)) {
+        // World sectors and textures are already in memory; only dynamic layers (<= s_preGameWorldMaxSeq) are needed.
+        s_stopAtPreGameWorld.store(true, std::memory_order_release);
+    } else {
+        s_inGotoLoadedPos.store(true, std::memory_order_release);
+    }
     if (s_memAvailableEvent) SetEvent(s_memAvailableEvent);
 }
 
@@ -709,16 +773,15 @@ bool PakTracer_TryGetPredecompressed(
         return false;
     }
     s_predecompCache.erase(it);
+    ReleaseSRWLockExclusive(&s_cacheLock);
 
     if (outCapacity < block->outBytes) {
         s_cacheMisses.fetch_add(1, std::memory_order_relaxed);
-        std::vector<BYTE>().swap(block->data);
-        ReleaseCacheMemory(block->reservedBytes, block->isPriority);
-        ReleaseSRWLockExclusive(&s_cacheLock);
+        EnqueueDeferredFree(std::move(block->data), block->reservedBytes, block->isPriority);
         return false;
     }
 
-    // Fast memcpy directly into engine buffer!
+    // Fast memcpy directly into engine buffer (lock-free, block is now uniquely owned by caller)
     memcpy(outBuffer, block->data.data(), block->outBytes);
     if (pActualOut) {
         *pActualOut = block->outBytes;
@@ -732,10 +795,8 @@ bool PakTracer_TryGetPredecompressed(
     s_cacheHitBytes.fetch_add(block->outBytes, std::memory_order_relaxed);
     s_cacheSavedTimeUs.fetch_add(block->savedUs, std::memory_order_relaxed);
 
-    // Free block memory immediately
-    std::vector<BYTE>().swap(block->data);
-    ReleaseCacheMemory(block->reservedBytes, block->isPriority);
-    ReleaseSRWLockExclusive(&s_cacheLock);
+    // Offload vector deallocation (NtFreeVirtualMemory) to background worker thread
+    EnqueueDeferredFree(std::move(block->data), block->reservedBytes, block->isPriority);
 
     // Record trace record for profiler reporting
     TraceRecord rec;
@@ -862,6 +923,7 @@ void PakTracer_OnLoadEnd() {
     }
 
     // Free all remaining cached blocks
+    DrainDeferredFreeQueue();
     AcquireSRWLockExclusive(&s_cacheLock);
     s_predecompCache.clear();
     ReleaseSRWLockExclusive(&s_cacheLock);
@@ -908,8 +970,18 @@ void PakTracer_OnLoadEnd() {
             peakMb, s_maxRollingMemoryBytes / (1024 * 1024));
     }
 
-    // Write trace to CSV if there was no valid trace, or if we matched significantly more records than the old baseline
-    if (totalMatched > 0 && s_tracePath[0] && (!s_hasValidTrace || totalMatched > s_candidates.size() + 100)) {
+    // Count candidate-sized records (>= 2048 bytes) so we compare apples to apples with s_candidates.size()
+    size_t matchedCandidates = 0;
+    for (const auto& r : s_traceRecords) {
+        if (r.outBytes >= 2048 && r.outBytes <= 128 * 1024 * 1024) {
+            matchedCandidates++;
+        }
+    }
+
+    // Write trace to CSV if there was no valid trace, or if we matched significantly more candidate blocks than the baseline
+    if (!s_stopAtPreGameWorld.load(std::memory_order_relaxed) &&
+        totalMatched > 0 && s_tracePath[0] &&
+        (!s_hasValidTrace || matchedCandidates > s_candidates.size() + 100)) {
         std::ofstream ofs(s_tracePath);
         if (ofs.is_open()) {
             ofs << "seq,pak,offset,in_bytes,out_bytes,decomp_us,load_time_ms\n";

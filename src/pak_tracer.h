@@ -5,7 +5,8 @@
 namespace G3O {
 
 void PakTracer_OnLoadStart(const char* saveName);
-void PakTracer_OnLoadGameWorldStart();
+void PakTracer_OnWorldActivateStart();
+void PakTracer_OnLoadGameWorldStart(bool worldAlreadyActive = false);
 void PakTracer_OnGotoLoadedPositionStart();
 void PakTracer_OnLoadEnd();
 

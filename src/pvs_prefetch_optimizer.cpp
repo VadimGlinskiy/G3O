@@ -49,16 +49,19 @@ static void EnsureEnginePointers() {
         if (pApp) {
             const void* pSetup = s_pfnGetSetupEngineDesc(pApp);
             if (pSetup) {
-                // eSSetupEngine::Entity_ROI is a 32-bit integer at offset 0x8C.
+                // eSSetupEngine::Entity_ROI is a 32-bit float/integer at offset 0x8C.
                 s_pEntityROI = reinterpret_cast<volatile LONG*>(
                     reinterpret_cast<uintptr_t>(pSetup) + 0x8C);
             }
-            const LONG currentRoi = s_pEntityROI ? InterlockedCompareExchange(
-                const_cast<LONG*>(s_pEntityROI), 0, 0) : 0;
-            if (!s_hasCachedOriginalROI && currentRoi > 0) {
-                s_originalTargetROI = static_cast<float>(currentRoi);
-                s_hasCachedOriginalROI = true;
-            }
+        }
+    }
+
+    if (s_pEntityROI && !s_hasCachedOriginalROI) {
+        const LONG currentRoi = InterlockedCompareExchange(
+            const_cast<LONG*>(s_pEntityROI), 0, 0);
+        if (currentRoi > 0) {
+            s_originalTargetROI = static_cast<float>(currentRoi);
+            s_hasCachedOriginalROI = true;
         }
     }
 }

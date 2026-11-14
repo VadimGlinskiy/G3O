@@ -1752,6 +1752,9 @@ static int __fastcall Hooked_WorldDoLoadData(void* pWorld, void* /*edx*/, void* 
 }
 
 static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
+    if (s_isLoadActive) {
+        PakTracer_OnWorldActivateStart();
+    }
     int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
     Log("G3O", "[WorldAudit] WorldOnActivate entered: pWorld=0x%p, isLoadActive=%d, totalSectors=%d",
         pWorld, (int)s_isLoadActive, numSectors);
@@ -1815,7 +1818,7 @@ static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const vo
         Real_EnableSectorActivation(true);
     }
     s_samplePhase = 1;
-    PakTracer_OnLoadGameWorldStart();
+    PakTracer_OnLoadGameWorldStart(s_sectorActivateCount == 0);
     QueryPerformanceCounter(&s_tWorldStart);
     if (s_tHUDStart.QuadPart > 0) {
         s_preWorldTotalSec = (double)(s_tWorldStart.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
@@ -2108,6 +2111,11 @@ bool InitializeSavegameProfiler() {
                 InstallSavegameHook(pGoto, (LPVOID)Hooked_GotoLoadedPosition, (LPVOID*)&Real_GotoLoadedPosition,
                     &s_targetGotoPos, "gCSession::GotoLoadedPosition");
             }
+            void* pOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCWorld@@MAEXXZ");
+            if (pOnAct && !s_targetWorldOnActivate) {
+                InstallSavegameHook(pOnAct, (LPVOID)Hooked_WorldOnActivate, (LPVOID*)&Real_WorldOnActivate,
+                    &s_targetWorldOnActivate, "gCWorld::OnActivate");
+            }
         }
     }
 
@@ -2195,7 +2203,7 @@ bool InitializeSavegameProfiler() {
         }
 
         void* pOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCWorld@@MAEXXZ");
-        if (pOnAct) {
+        if (pOnAct && !s_targetWorldOnActivate) {
             InstallSavegameHook(pOnAct, (LPVOID)Hooked_WorldOnActivate, (LPVOID*)&Real_WorldOnActivate,
                 &s_targetWorldOnActivate, "gCWorld::OnActivate");
         }
