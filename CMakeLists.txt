@@ -123,6 +123,7 @@ add_library(dinput8 SHARED
     src/config_value_parser.h
     src/pak_tracer.cpp
     src/pak_tracer.h
+    src/pak_content_key.h
     src/selective_culling_policy.h
     src/selective_culling_optimizer.cpp
     src/selective_culling_optimizer.h
@@ -165,6 +166,7 @@ target_link_libraries(dinput8 PRIVATE
     psapi
     version
     winmm
+    Synchronization
 )
 
 # Output name must be dinput8.dll

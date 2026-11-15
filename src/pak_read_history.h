@@ -47,6 +47,37 @@ public:
         return nullptr;
     }
 
+    // Matches if the requested range [buffer, buffer + bytesNeeded) is contained within
+    // the read buffer [entry.buffer, entry.buffer + entry.bytesRead).
+    // Calculates the exact file offset in the archive for offset/sub-buffer reads.
+    Entry* FindMostRecentContaining(
+        const void* buffer,
+        std::uint32_t bytesNeeded,
+        std::uint64_t loadGeneration,
+        std::uint64_t* outOffsetInArchive = nullptr) noexcept {
+        if (!buffer || bytesNeeded == 0) return nullptr;
+
+        const uintptr_t targetStart = reinterpret_cast<uintptr_t>(buffer);
+        const uintptr_t targetEnd = targetStart + bytesNeeded;
+
+        for (std::size_t step = 0; step < count_; ++step) {
+            const std::size_t index = (head_ + Capacity - 1 - step) % Capacity;
+            Entry& entry = entries_[index];
+            if (entry.valid && entry.loadGeneration == loadGeneration && entry.buffer) {
+                const uintptr_t entryStart = reinterpret_cast<uintptr_t>(entry.buffer);
+                const uintptr_t entryEnd = entryStart + entry.bytesRead;
+
+                if (targetStart >= entryStart && targetEnd <= entryEnd) {
+                    if (outOffsetInArchive) {
+                        *outOffsetInArchive = entry.offset + static_cast<std::uint64_t>(targetStart - entryStart);
+                    }
+                    return &entry;
+                }
+            }
+        }
+        return nullptr;
+    }
+
     bool Consume(Entry* entry) noexcept {
         if (!entry) return false;
         for (Entry& slot : entries_) {
