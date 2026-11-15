@@ -3,11 +3,11 @@
 #include <windows.h>
 
 int main() {
-    mi_option_set(mi_option_arena_reserve, 8 * 1024);
+    mi_option_set(mi_option_arena_reserve, 2 * 1024);
     mi_option_set(mi_option_arena_max_object_size, 64);
     mi_option_set(mi_option_arena_eager_commit, 0);
-    mi_option_set(mi_option_purge_decommits, 0);
-    mi_option_set(mi_option_purge_delay, 1000);
+    mi_option_set(mi_option_purge_decommits, 1);
+    mi_option_set(mi_option_purge_delay, 100);
     mi_option_set(mi_option_retry_on_oom, 0);
 
     mi_arena_id_t arena_id = 0;

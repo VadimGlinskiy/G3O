@@ -105,19 +105,19 @@ static void TestFree(void* ptr) {
 int main() {
     bool ok = true;
 
-    // 1. Verify mimalloc option tuning (Psycho 32-bit VAS preservation profile)
-    mi_option_set(mi_option_arena_reserve, 8 * 1024);
+    // 1. Verify mimalloc option tuning (32-bit VAS preservation profile)
+    mi_option_set(mi_option_arena_reserve, 2 * 1024);
     mi_option_set(mi_option_arena_max_object_size, 64);
     mi_option_set(mi_option_arena_eager_commit, 0);
-    mi_option_set(mi_option_purge_decommits, 0);
-    mi_option_set(mi_option_purge_delay, 1000);
+    mi_option_set(mi_option_purge_decommits, 1);
+    mi_option_set(mi_option_purge_delay, 100);
     mi_option_set(mi_option_retry_on_oom, 0);
 
-    ok &= Expect(mi_option_get(mi_option_arena_reserve) == 8 * 1024, "arena_reserve must be 8MB (8192 KiB)");
+    ok &= Expect(mi_option_get(mi_option_arena_reserve) == 2 * 1024, "arena_reserve must be 2MB (2048 KiB)");
     ok &= Expect(mi_option_get(mi_option_arena_max_object_size) == 64, "arena_max_object_size must be 64KB");
     ok &= Expect(mi_option_get(mi_option_arena_eager_commit) == 0, "arena_eager_commit must be 0 (demand-page)");
-    ok &= Expect(mi_option_get(mi_option_purge_decommits) == 0, "purge_decommits must be 0 (reset on purge)");
-    ok &= Expect(mi_option_get(mi_option_purge_delay) == 1000, "purge_delay must be 1000 ms");
+    ok &= Expect(mi_option_get(mi_option_purge_decommits) == 1, "purge_decommits must be 1 (decommit on purge)");
+    ok &= Expect(mi_option_get(mi_option_purge_delay) == 100, "purge_delay must be 100 ms");
     ok &= Expect(mi_option_get(mi_option_retry_on_oom) == 0, "retry_on_oom must be 0");
 
     // 2. Test bounded OS memory reservation

@@ -155,7 +155,12 @@ __forceinline void* InternalAlloc(unsigned int size) noexcept {
 
     G3BlockHeader* hdr = static_cast<G3BlockHeader*>(mi_malloc(totalBytes));
     if (!hdr) {
-        return nullptr;
+        // Emergency recovery on VAS pressure: force collect & purge decommitted memory, then retry
+        mi_collect(true);
+        hdr = static_cast<G3BlockHeader*>(mi_malloc(totalBytes));
+        if (!hdr) {
+            return nullptr;
+        }
     }
 
     hdr->mi_freelist_slot = 0u;
@@ -230,7 +235,11 @@ __forceinline void* InternalReAlloc(
     PFN_MemHeap_Free origFallbackFree) noexcept
 {
     if (!ptr) {
-        return InternalAlloc(size);
+        void* p = InternalAlloc(size);
+        if (p) return p;
+        if (g_origAlloc) return g_origAlloc(size);
+        if (origFallbackReAlloc) return origFallbackReAlloc(nullptr, size);
+        return nullptr;
     }
     if (size == 0u) {
         InternalFree(ptr, origFallbackFree);
@@ -241,11 +250,19 @@ __forceinline void* InternalReAlloc(
         __try {
             G3BlockHeader* hdr = ResolveBlockHeader(ptr);
             if (!hdr) {
+                // If it resides in mimalloc heap range but lacks G3BlockHeader (e.g. edge-case pointer
+                // or legacy block), route through vanilla realloc fallback rather than failing
+                if (origFallbackReAlloc) {
+                    return origFallbackReAlloc(ptr, size);
+                }
                 return nullptr;
             }
 
             const long currentState = hdr->state;
             if (currentState != G3_STATE_ALIVE && currentState != G3_STATE_QUARANTINED) {
+                if (origFallbackReAlloc) {
+                    return origFallbackReAlloc(ptr, size);
+                }
                 return nullptr;
             }
 
@@ -270,6 +287,13 @@ __forceinline void* InternalReAlloc(
             // through InternalFree (Quarantine) rather than mi_realloc so concurrent readers
             // or self-referential array appends never read invalidated memory.
             void* newPtr = InternalAlloc(size);
+            if (!newPtr && g_origAlloc) {
+                // Emergency fallback to vanilla allocator under VAS pressure
+                newPtr = g_origAlloc(size);
+            }
+            if (!newPtr && origFallbackReAlloc) {
+                newPtr = origFallbackReAlloc(nullptr, size);
+            }
             if (!newPtr) {
                 return nullptr;
             }
@@ -285,6 +309,9 @@ __forceinline void* InternalReAlloc(
             s_miReallocCount.fetch_add(1, std::memory_order_relaxed);
             return newPtr;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            if (origFallbackReAlloc) {
+                return origFallbackReAlloc(ptr, size);
+            }
             return nullptr;
         }
     }
@@ -387,15 +414,15 @@ static void __stdcall Hook_MemHeap_FreeShortUsageUnsynced(void* ptr) {
 // Configuration & Mimalloc tuning
 // =============================================================================
 static void ConfigureMimallocTuning() {
-    // 32-bit Large Address Aware VAS options (Psycho Engine Fixes architecture):
-    mi_option_set(mi_option_arena_reserve, 8 * 1024);         // 8 MB reservation per arena (instead of 128 MB default)
+    // 32-bit Large Address Aware VAS preservation profile:
+    mi_option_set(mi_option_arena_reserve, 2 * 1024);         // 2 MB reservation per arena chunk (avoids large contiguous block fragmentation)
     mi_option_set(mi_option_arena_max_object_size, 64);       // 64 KB ceiling for arena; larger requests use OS path
     mi_option_set(mi_option_arena_eager_commit, 0);          // Demand-page commit (commit on first touch)
-    mi_option_set(mi_option_purge_decommits, 0);             // Reset memory on purge, do not decommit (avoids VAS fragmentation)
-    mi_option_set(mi_option_purge_delay, 1000);              // 1000 ms delayed purge
+    mi_option_set(mi_option_purge_decommits, 1);             // Decommit on purge: actively return committed virtual pages to Windows
+    mi_option_set(mi_option_purge_delay, 100);               // 100 ms prompt purge (reclaims unused VAS before 4GB ceiling)
     mi_option_set(mi_option_retry_on_oom, 0);                // Disable retry spin on OOM
     mi_option_set(mi_option_page_reclaim_on_free, 1);        // Reclaim on free
-    mi_option_set(mi_option_page_full_retain, 1);            // Retain full page per size class
+    mi_option_set(mi_option_page_full_retain, 0);            // Do not retain empty pages indefinitely
     mi_option_set(mi_option_show_errors, 0);                 // Silence popups
     mi_option_set(mi_option_verbose, 0);
 
