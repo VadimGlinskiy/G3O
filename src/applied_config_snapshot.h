@@ -75,8 +75,7 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.pakCacheBudgetMB, config.pakPrefetchWorkers);
 
     output.Append("[Memory]\n");
-    output.AppendFormat("AllocatorMode=%d\nEnableMemHeapFastLock=%s\n", config.allocatorMode,
-        config.enableMemHeapFastLock ? "true" : "false");
+    output.AppendFormat("AllocatorMode=%d\n", config.allocatorMode);
 
     output.Append("[Logging]\n");
     output.AppendFormat("EnableDiagnosticLog=%s\nInterceptOutputDebugString=%s\nEnableProfiler=%s\nEnableSavegameAudit=%s\n",

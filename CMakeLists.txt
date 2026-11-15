@@ -137,8 +137,6 @@ add_library(dinput8 SHARED
     src/crash_guards_policy.h
     src/memory_allocator.cpp
     src/memory_allocator.h
-    src/memheap_fast_lock.cpp
-    src/memheap_fast_lock.h
     src/sampling_profiler.cpp
     src/sampling_profiler.h
 )

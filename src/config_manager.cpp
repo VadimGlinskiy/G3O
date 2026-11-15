@@ -259,11 +259,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; 2 = Полная замена MemHeap и bCMemoryAdmin с Safe Dispatch Free (максимальная скорость и снижение фрагментации VAS).\n"
         << "AllocatorMode=1\n"
         << "\n"
-        << "; Быстрая блокировка кучи движка (MemHeap).\n"
-        << "; Заменяет критическую секцию Windows на лёгкую пользовательскую блокировку в SharedBase.dll.\n"
-        << "; Снижает накладные расходы на каждое выделение и освобождение памяти при загрузке (при проблемах поставьте false).\n"
-        << "EnableMemHeapFastLock=true\n"
-        << "\n"
         << "\n"
         << "[Logging]\n"
         << "; Запись подробного журнала работы G3O в файл G3O\\G3O_diagnostic_*.log (для обычной игры держите false).\n"
@@ -411,7 +406,6 @@ void LoadConfig() {
 
     // [Memory]
     s_config.allocatorMode = ReadIniInt("Memory", "AllocatorMode", 1, 0, 2, path);
-    s_config.enableMemHeapFastLock = ReadIniBool("Memory", "EnableMemHeapFastLock", true, path);
 
     // [Logging]
     s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", false, path);
