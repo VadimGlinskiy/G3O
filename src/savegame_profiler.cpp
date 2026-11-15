@@ -20,6 +20,7 @@
 #include "pak_read_at.h"
 #include "profiler.h"
 #include "layer_ring_arena.h"
+#include "sampling_profiler.h"
 #include <minhook.h>
 #include <windows.h>
 #include <stdio.h>
@@ -228,9 +229,17 @@ static std::int32_t __fastcall Hooked_LayerCreateData(void* self, void* /*edx*/)
 static std::int32_t __fastcall Hooked_DynamicLayerDoLoadData(
     void* self, void* /*edx*/, void* streamReferenceSlot) {
     if (!s_isLoadActive) return Real_DynamicLayerDoLoadData(self, streamReferenceSlot);
+#ifdef G3O_ENABLE_TELEMETRY
+    // Sample only the heaviest layer (SysDyn) to avoid inflating the other 344 layers.
+    const bool sampleThis = s_isSysDynSectorActive;
+    if (sampleThis) SamplingProfiler_Start("SysDyn DoLoadData");
+#endif
     const std::uint64_t start = BeginLayerMetric();
     const std::int32_t result = Real_DynamicLayerDoLoadData(self, streamReferenceSlot);
     EndLayerMetric(s_layerAuditMetrics.doLoadData, start);
+#ifdef G3O_ENABLE_TELEMETRY
+    if (sampleThis) SamplingProfiler_Stop();
+#endif
     return result;
 }
 

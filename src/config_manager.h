@@ -70,6 +70,7 @@ struct Config {
 
     // [Memory]
     int allocatorMode = 1;             // 0 = Vanilla, 1 = ShortUsage / ScrapHeap, 2 = Full MemHeap
+    bool enableMemHeapFastLock = true; // Cheap user-mode lock instead of MemHeap's CRITICAL_SECTION
 
     // [Logging]
     bool enableDiagnosticLog = false;

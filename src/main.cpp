@@ -30,6 +30,7 @@
 #include "fog_optimizer.h"
 #include "crash_guards.h"
 #include "memory_allocator.h"
+#include "memheap_fast_lock.h"
 #pragma comment(lib, "winmm.lib")
 
 static volatile LONG s_runtimeActive = 0;
@@ -112,6 +113,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
     // BEFORE game subsystems (FileSystem, Engine, Game) start mounting pak files and allocating buffers.
     if (cfg.allocatorMode > 0) {
         G3O::InitializeMemoryAllocator(cfg.allocatorMode);
+    }
+    if (cfg.enableMemHeapFastLock) {
+        G3O::InitializeMemHeapFastLock();
     }
 
     if (cfg.enableCrashGuards) {
