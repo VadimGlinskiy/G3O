@@ -291,7 +291,7 @@ static std::string GetSavegamePath(const std::string& saveName) {
     return "";
 }
 
-static bool IsTraceValid(const std::string& csvPath, const std::string& saveName) {
+[[maybe_unused]] static bool IsTraceValid(const std::string& csvPath, const std::string& saveName) {
     HANDLE hCsv = CreateFileA(csvPath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (hCsv == INVALID_HANDLE_VALUE) return false;
     FILETIME ftCsvWrite = { 0 };
@@ -556,10 +556,11 @@ void PakTracer_OnLoadStart(const char* saveName) {
     if (EnsureG3OOutputDirectory(outputDirectory, sizeof(outputDirectory))) {
         BuildG3OOutputFilePath(s_tracePath, sizeof(s_tracePath), outputDirectory, traceFileName.c_str());
     }
-    s_hasValidTrace = s_tracePath[0] && IsTraceValid(s_tracePath, s_currentSaveName);
-    if (!s_tracePath[0]) {
-        Log("G3O", "[PakTracer] Trace path could not be created under G3O.");
-    }
+    // Persistent trace files and speculative pre-decompression are intentionally disabled:
+    // stale on-disk traces could desynchronise the cache from the real load sequence.
+    // The tracer now only records an in-memory report for the current load.
+    s_tracePath[0] = '\0';
+    s_hasValidTrace = false;
 
     size_t requestedWorkerCount = 0;
     if (s_hasValidTrace) {
