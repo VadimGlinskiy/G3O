@@ -208,10 +208,7 @@ uniform float  TIMER < source = "timer"; >;
 #include ".\MartysMods\mmx_bxdf.fxh"
 #include ".\MartysMods\mmx_sfc.fxh"
 
-#if !_COMPUTE_SUPPORTED
- #error "DirectX 9 not supported, please use a wrapper."
- #error "See https://guides.martysmods.com/additionalguides/apiwrappers/dxvk for more information."
-#endif
+#if _COMPUTE_SUPPORTED
 
 struct VSOUT
 {
@@ -557,3 +554,5 @@ technique MartyMods_FilmGrain
     pass AnalogGrain    { ComputeShader = ApplyGrainCS<16, 16>;DispatchSizeX = CEIL_DIV(BUFFER_WIDTH, 16); DispatchSizeY = CEIL_DIV(BUFFER_HEIGHT, 16);}
     pass Resolve        { VertexShader = MainVS; PixelShader  = ResolvePS; }
 }
+
+#endif // _COMPUTE_SUPPORTED

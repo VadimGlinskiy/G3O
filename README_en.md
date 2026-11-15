@@ -283,6 +283,14 @@ Vanilla Gothic 3 suffers from notable distant rendering artifacts, which become 
 4. Press the **`Home`** key on your keyboard to open the ReShade configuration overlay.
    > On compact or laptop keyboards without a dedicated `Home` key, use **`Fn + Home`** or **`Fn + Left Arrow`**. The key binding can also be customized in `ReShade.ini` (`OverlayKey`).
 
+### Renderer Compatibility: Native DirectX 9 vs. DXVK
+
+> [!IMPORTANT]
+> **Compute Shaders and Native DirectX 9:**
+> * Advanced effects from **Marty's Mods** (RTGI ray-traced global illumination, physical film grain, Solaris) require **Compute Shaders** (`cs_5_0`), which are **not supported by the native Direct3D 9 API**. Attempting to compile them on raw DirectX 9 can cause `D3DCompiler_47.dll` compiler faults.
+> * **DXVK is required for full Marty's Mods / RTGI effects** (`DXVK-2.4.1-Stable.zip` or `DXVK-1.10.3-Async.zip`). DXVK translates Direct3D 9 calls to Vulkan with full Compute Shader support.
+> * **Running on Native DirectX 9 (Without DXVK):** If you prefer playing without DXVK, use the **qUINT** suite (`qUINT_mxao`, `qUINT_bloom`, `qUINT_ssr`, `qUINT_dof`, `qUINT_lightroom`, `qUINT_sharp`, `qUINT_deband`) along with `MartysMods_SMAA`. They are 100% Direct3D 9 compliant, do not require compute shaders, and compile instantly on any GPU.
+
 > [!NOTE]
 > The ReShade graphics package is entirely optional. If you remove `ReShade32.dll` or set `LoadReShade=false`, the game and G3O continue operating normally.
 

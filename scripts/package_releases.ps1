@@ -143,10 +143,14 @@ INSTALLATION:
     Set-Content -Path (Join-Path $stage "README_DXVK.txt") -Value $readme -Encoding UTF8
 
     $zipPath = Join-Path $packagesDir $v.ZipName
-    Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force
+    try {
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
+        Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force -ErrorAction Stop
+        Write-Host "[OK] Created: $($v.ZipName)"
+    } catch {
+        Write-Warning "Could not update $($v.ZipName) (file locked). Existing package preserved."
+    }
     Remove-Item $stage -Recurse -Force
-
-    Write-Host "[OK] Created: $($v.ZipName)"
 }
 
 Write-Host ""
@@ -181,6 +185,18 @@ INSTALLATION:
 2. Launch Gothic 3. Gothic 3 Optima (G3O) will automatically load ReShade32.dll.
 3. Press 'Home' on your keyboard to open the ReShade configuration overlay.
    (On compact/laptop keyboards, press 'Fn + Home' or 'Fn + Left Arrow').
+
+IMPORTANT RENDERER COMPATIBILITY:
+- Compute Shaders vs Native DirectX 9:
+  Advanced effects from Marty's Mods (RTGI ray tracing, physical film grain, Solaris)
+  require Compute Shaders (cs_5_0), which are NOT supported by native Direct3D 9.
+  To use the full Marty's Mods / RTGI suite, DXVK (DXVK-2.4.1-Stable or 1.10.3-Async)
+  is REQUIRED. DXVK translates D3D9 to Vulkan with full Compute Shader support.
+- Native DirectX 9 (Without DXVK):
+  If you play on native DirectX 9 without DXVK, use the qUINT shader suite
+  (qUINT_mxao, qUINT_bloom, qUINT_ssr, qUINT_dof, qUINT_lightroom, qUINT_sharp,
+  qUINT_deband) and MartysMods_SMAA. They are 100% Direct3D 9 compliant and
+  compile instantly on any graphics card without crashes.
 
 NOTE:
 ReShade is completely optional and separate from the core G3O performance optimizations.
