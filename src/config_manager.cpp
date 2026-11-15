@@ -139,8 +139,8 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "EnablePakPrefetch=true\n"
         << "\n"
         << "; Максимальный объем оперативной памяти под кэш распакованных архивов (в мегабайтах).\n"
-        << "; 768 МБ — оптимальный безопасный лимит для 32-битного движка Готики 3 (предотвращает вылеты Out of Memory). 0 выключает кэш.\n"
-        << "PakCacheBudgetMB=768\n"
+        << "; 384 МБ — оптимальный безопасный лимит для 32-битного движка Готики 3 (предотвращает вылеты Out of Memory). 0 выключает кэш.\n"
+        << "PakCacheBudgetMB=384\n"
         << "\n"
         << "; Количество фоновых потоков для распаковки ресурсов по трассе сохранения.\n"
         << "; 0 — определить автоматически по числу физических ядер процессора.\n"
@@ -257,7 +257,7 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; 0 = Стандартный аллокатор движка (максимальная совместимость).\n"
         << "; 1 = Замена ShortUsage / ScrapHeap (ускоряет покадровые временные буферы без риска межмодульных конфликтов).\n"
         << "; 2 = Полная замена MemHeap и bCMemoryAdmin с Safe Dispatch Free (максимальная скорость и снижение фрагментации VAS).\n"
-        << "AllocatorMode=0\n"
+        << "AllocatorMode=1\n"
         << "\n"
         << "\n"
         << "[Logging]\n"
@@ -401,11 +401,11 @@ void LoadConfig() {
     s_config.cpuCores = ReadIniInt("Performance", "CPUCores", 0, 0, 32, path);
     s_config.cpuThreads = ReadIniInt("Performance", "CPUThreads", 0, 0, 32, path);
     s_config.cpuAffinityMask = ReadIniHex("Performance", "CPUAffinityMask", 0, path);
-    s_config.pakCacheBudgetMB = ReadIniInt("Performance", "PakCacheBudgetMB", 768, 0, 1024, path);
+    s_config.pakCacheBudgetMB = ReadIniInt("Performance", "PakCacheBudgetMB", 384, 0, 1024, path);
     s_config.pakPrefetchWorkers = ReadIniInt("Performance", "PakPrefetchWorkers", 0, 0, 8, path);
 
     // [Memory]
-    s_config.allocatorMode = ReadIniInt("Memory", "AllocatorMode", 0, 0, 2, path);
+    s_config.allocatorMode = ReadIniInt("Memory", "AllocatorMode", 1, 0, 2, path);
 
     // [Logging]
     s_config.enableDiagnosticLog = ReadIniBool("Logging", "EnableDiagnosticLog", false, path);

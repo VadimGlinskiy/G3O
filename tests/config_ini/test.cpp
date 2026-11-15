@@ -35,7 +35,8 @@ int main() {
     ok &= Expect(!defaults.enableLayerRingArena,
                  "LayerRingArena should match the shipped default profile");
     ok &= Expect(defaults.enablePropertyCache &&
-                 defaults.enableVFSCache && defaults.pakCacheBudgetMB == 768 &&
+                 defaults.enableVFSCache && defaults.pakCacheBudgetMB == 384 &&
+                 defaults.allocatorMode == 1 &&
                  !defaults.enableDiagnosticLog && !defaults.interceptOutputDebugString &&
                  !defaults.enableProfiler && !defaults.enableSavegameAudit && !defaults.enableLayerAudit,
                  "Config defaults should match the active release profile");
@@ -63,12 +64,14 @@ int main() {
     ok &= Expect(invalid.vegetationGridRangeClamp == 7500.0f, "partial float should use default");
     ok &= Expect(invalid.cpuCores == 0 && invalid.cpuThreads == 0, "invalid CPU counts should use defaults");
     ok &= Expect(invalid.cpuAffinityMask == 0, "mask wider than the x86 pointer should use default");
-    ok &= Expect(invalid.pakCacheBudgetMB == 768, "negative cache budget should use default");
+    ok &= Expect(invalid.pakCacheBudgetMB == 384, "negative cache budget should use default");
     ok &= Expect(invalid.pakPrefetchWorkers == 0, "worker count above maximum should use default");
     ok &= Expect(invalid.fogDistanceMultiplier == 2.5f, "negative fog distance multiplier should use default");
     ok &= Expect(invalid.fogEndMinDistance == 250000.0f, "negative fog end min distance should use default");
     ok &= Expect(invalid.enablePropertyCache && invalid.enableVFSCache,
                  "missing performance keys should use the active release profile");
+    ok &= Expect(invalid.allocatorMode == 1,
+                 "missing memory keys should use the active release profile");
     ok &= Expect(!invalid.enableDiagnosticLog && !invalid.interceptOutputDebugString && !invalid.enableProfiler &&
                  !invalid.enableSavegameAudit && !invalid.enableLayerAudit,
                  "missing logging keys should use the active release profile");
@@ -93,14 +96,14 @@ int main() {
     const char* required[] = {
         "EnableSharedBaseOptimizations=",
         "VegetationGridRangeClamp=", "EnableVFSCache=", "CPUCores=", "CPUThreads=",
-        "CPUAffinityMask=", "PakCacheBudgetMB=768", "PakPrefetchWorkers=",
+        "CPUAffinityMask=", "PakCacheBudgetMB=384", "PakPrefetchWorkers=",
         "EnableFastPakDecompressor=true", "EnableLayerRingArena=false", "EnablePropertyCache=true", "EnableVFSCache=true",
         "EnableSessionStartOptimizer=true", "SessionStartSleepMs=1",
         "EnableSelectiveCulling=true", "ClutterCullThreshold=0.008", "ImportantCullThreshold=0.002",
         "EnableAtmosphericFogControl=true", "FogDistanceMultiplier=2.5", "FogEndMinDistance=250000", "PreserveUnderwaterFog=true",
         "EnableVegetationOptimizer=true", "EnableAdaptiveTreeShadows=true",
         "WindowCursorLock=true", "InputSystemKeyPassthrough=true", "EnableCrashGuards=true", "LoadReShade=true",
-        "AllocatorMode=0",
+        "AllocatorMode=1",
         "EnableD3D9StateFilter=true", "EnableDiagnosticLog=false", "InterceptOutputDebugString=false",
         "EnableProfiler=false", "EnableSavegameAudit=false", "EnableLayerAudit=false"
     };
