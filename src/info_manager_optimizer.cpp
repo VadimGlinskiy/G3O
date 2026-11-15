@@ -8,6 +8,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <cstring>
+#include <vector>
 
 namespace G3O {
 
@@ -200,6 +201,55 @@ static uintptr_t s_gameBase = 0;
 static FnMemAdminGetInstance s_memAdminGetInstance = nullptr;
 static FnMemAdminRealloc     s_memAdminRealloc     = nullptr;
 static FnGetHashValueCString s_getHashValueCString = nullptr;
+
+// Function pointers for In-Memory Binary Serialization of gCInfo_PS via bCMemoryStream
+using FnMemStreamCtor        = void (__thiscall*)(void* pStream);
+using FnMemStreamDtor        = void (__thiscall*)(void* pStream);
+using FnMemStreamWrite       = uint32_t (__thiscall*)(void* pOStream, const void* pData, uint32_t bytes);
+using FnMemStreamGetBuffer   = const uint8_t* (__thiscall*)(const void* pStream, uint32_t flag);
+using FnMemStreamGetSize     = int64_t (__thiscall*)(const void* pStream);
+
+using FnAccessorCtorWithObj  = void (__thiscall*)(void* pAccessor, void* pObj);
+using FnAccessorCtorEmpty    = void (__thiscall*)(void* pAccessor);
+using FnAccessorDtor         = void (__thiscall*)(void* pAccessor);
+using FnAccessorGetNativeObj = void* (__thiscall*)(void* pAccessor);
+
+using FnStreamWriteAccessor  = void* (__stdcall*)(void* pOStream, void* pAccessor);
+using FnStreamReadAccessor   = void* (__stdcall*)(void* pIStream, void* pAccessor);
+
+using FnOStreamWriteU16      = void* (__thiscall*)(void* pOStream, uint16_t val);
+using FnOStreamWriteU32      = void* (__thiscall*)(void* pOStream, uint32_t val);
+using FnIStreamReadU16       = void* (__thiscall*)(void* pIStream, uint16_t* pVal);
+using FnIStreamReadU32       = void* (__thiscall*)(void* pIStream, uint32_t* pVal);
+
+using FnCStringAssign        = void* (__thiscall*)(bCString* pDest, const bCString* pSrc);
+using FnCStringDtor          = void (__thiscall*)(bCString* pStr);
+
+static FnMemStreamCtor        s_fnMemStreamCtor        = nullptr;
+static FnMemStreamDtor        s_fnMemStreamDtor        = nullptr;
+static FnMemStreamWrite       s_fnMemStreamWrite       = nullptr;
+static FnMemStreamGetBuffer   s_fnMemStreamGetBuffer   = nullptr;
+static FnMemStreamGetSize     s_fnMemStreamGetSize     = nullptr;
+
+static FnAccessorCtorWithObj  s_fnAccessorCtorWithObj  = nullptr;
+static FnAccessorCtorEmpty    s_fnAccessorCtorEmpty    = nullptr;
+static FnAccessorDtor         s_fnAccessorDtor         = nullptr;
+static FnAccessorGetNativeObj s_fnAccessorGetNativeObj = nullptr;
+
+static FnStreamWriteAccessor  s_fnStreamWriteAccessor  = nullptr;
+static FnStreamReadAccessor   s_fnStreamReadAccessor   = nullptr;
+
+static FnOStreamWriteU16      s_fnOStreamWriteU16      = nullptr;
+static FnOStreamWriteU32      s_fnOStreamWriteU32      = nullptr;
+static FnIStreamReadU16       s_fnIStreamReadU16       = nullptr;
+static FnIStreamReadU32       s_fnIStreamReadU32       = nullptr;
+
+static FnCStringAssign        s_fnCStringAssign        = nullptr;
+static FnCStringDtor          s_fnCStringDtor          = nullptr;
+
+static SRWLOCK                s_snapshotLock           = SRWLOCK_INIT;
+static std::vector<uint8_t>   s_snapshotBytes;
+static uint32_t               s_snapshotCount          = 0;
 
 // Prime number bucket count to ensure optimal hash distribution across 24,555 dialogs
 static constexpr uint32_t kInfoMapBucketCount = 32771;
@@ -484,20 +534,247 @@ static void* __stdcall Hooked_StreamReadObjectBase(void* pStream, void* pObject)
     return Real_StreamReadObjectBase(pStream, pObject);
 }
 
-static bool __fastcall Hooked_LoadInfosFromInis(void* pThis, void* /*edx*/) {
-    if (pThis) {
-        s_loadInfosStats.calls.fetch_add(1, std::memory_order_relaxed);
-        s_loadInfosStats.matches.fetch_add(1, std::memory_order_relaxed);
-        auto* pMap = reinterpret_cast<bTInfoValMap*>(
-            reinterpret_cast<uint8_t*>(pThis) + 0x4C);
-        ExpandAndRehashInfoMap(pMap, kInfoMapBucketCount, "LoadInfosFromInis (this+0x4C)", &s_loadInfosStats);
+// ============================================================================
+// 6. In-Memory Snapshot & Fast Replay for gCInfoManager_PS
+// ============================================================================
+static bool DoRecordSnapshotInternal(void* pInfoManager) {
+    if (!pInfoManager || !s_fnMemStreamCtor || !s_fnMemStreamDtor ||
+        !s_fnAccessorCtorWithObj || !s_fnAccessorDtor || !s_fnStreamWriteAccessor ||
+        !s_fnOStreamWriteU16 || !s_fnOStreamWriteU32 || !s_fnMemStreamGetBuffer ||
+        !s_fnMemStreamGetSize) {
+        return false;
     }
-    LARGE_INTEGER t0, t1;
+
+    auto* pCount = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pInfoManager) + 0x30);
+    auto* ppData = *reinterpret_cast<void* const* const*>(reinterpret_cast<const uint8_t*>(pInfoManager) + 0x2C);
+    if (!pCount || !ppData || *pCount == 0) {
+        return false;
+    }
+
+    const uint32_t count = *pCount;
+
+    alignas(8) uint8_t memStreamBuf[64];
+    std::memset(memStreamBuf, 0, sizeof(memStreamBuf));
+    s_fnMemStreamCtor(memStreamBuf);
+
+    // bCOStream is at offset +4 of bCMemoryStream
+    void* pOStream = memStreamBuf + 4;
+
+    const uint16_t version = 1;
+    s_fnOStreamWriteU16(pOStream, version);
+    s_fnOStreamWriteU32(pOStream, count);
+
+    for (uint32_t i = 0; i < count; ++i) {
+        void* pInfo = ppData[i];
+        if (!pInfo) continue;
+
+        alignas(8) uint8_t accessorBuf[32];
+        std::memset(accessorBuf, 0, sizeof(accessorBuf));
+        s_fnAccessorCtorWithObj(accessorBuf, pInfo);
+        s_fnStreamWriteAccessor(pOStream, accessorBuf);
+        s_fnAccessorDtor(accessorBuf);
+    }
+
+    const uint8_t* pBuf = s_fnMemStreamGetBuffer(memStreamBuf, 0);
+    const int64_t streamSize = s_fnMemStreamGetSize(memStreamBuf);
+
+    bool success = false;
+    if (pBuf && streamSize > 6) {
+        AcquireSRWLockExclusive(&s_snapshotLock);
+        s_snapshotBytes.assign(pBuf, pBuf + static_cast<size_t>(streamSize));
+        s_snapshotCount = count;
+        success = true;
+        ReleaseSRWLockExclusive(&s_snapshotLock);
+
+        Log("G3O", "[InfoManager] Captured %zu bytes baseline in RAM (%u dialogs).",
+            s_snapshotBytes.size(), count);
+    }
+
+    s_fnMemStreamDtor(memStreamBuf);
+    return success;
+}
+
+static bool SafeRecordSnapshot(void* pInfoManager) {
+    __try {
+        return DoRecordSnapshotInternal(pInfoManager);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("G3O", "[InfoManager] Exception during RecordSnapshot (code=0x%08X).", GetExceptionCode());
+        return false;
+    }
+}
+
+static bool DoReplaySnapshotInternal(void* pInfoManager) {
+    if (!pInfoManager || !s_memAdminGetInstance || !s_memAdminRealloc ||
+        !s_fnMemStreamCtor || !s_fnMemStreamDtor || !s_fnMemStreamWrite ||
+        !s_fnAccessorCtorEmpty || !s_fnAccessorDtor || !s_fnStreamReadAccessor ||
+        !s_fnAccessorGetNativeObj || !s_fnIStreamReadU16 || !s_fnIStreamReadU32 ||
+        !s_fnCStringAssign) {
+        return false;
+    }
+
+    AcquireSRWLockShared(&s_snapshotLock);
+    if (s_snapshotBytes.empty()) {
+        ReleaseSRWLockShared(&s_snapshotLock);
+        return false;
+    }
+    const std::vector<uint8_t> localSnapshot = s_snapshotBytes;
+    const uint32_t expectedCount = s_snapshotCount;
+    ReleaseSRWLockShared(&s_snapshotLock);
+
+    void* admin = s_memAdminGetInstance();
+    if (!admin) return false;
+
+    alignas(8) uint8_t memStreamBuf[64];
+    std::memset(memStreamBuf, 0, sizeof(memStreamBuf));
+    s_fnMemStreamCtor(memStreamBuf);
+
+    void* pOStream = memStreamBuf + 4; // bCOStream
+    void* pIStream = memStreamBuf + 0; // bCIStream
+
+    s_fnMemStreamWrite(pOStream, localSnapshot.data(), static_cast<uint32_t>(localSnapshot.size()));
+
+    // Reset stream position to 0 (at offset +0x0C)
+    *reinterpret_cast<uint32_t*>(memStreamBuf + 0x0C) = 0;
+
+    uint16_t version = 0;
+    s_fnIStreamReadU16(pIStream, &version);
+    uint32_t count = 0;
+    s_fnIStreamReadU32(pIStream, &count);
+
+    if (count == 0 || count != expectedCount) {
+        s_fnMemStreamDtor(memStreamBuf);
+        Log("G3O", "[InfoManager] Snapshot count mismatch: %u (expected %u)", count, expectedCount);
+        return false;
+    }
+
+    auto** ppArrayInfos = reinterpret_cast<void***>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x2C);
+    auto* pCount = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x30);
+    auto* pCapacity = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x34);
+
+    if (*ppArrayInfos) {
+        s_memAdminRealloc(admin, *ppArrayInfos, 0);
+        *ppArrayInfos = nullptr;
+    }
+
+    void** newArray = static_cast<void**>(s_memAdminRealloc(admin, nullptr, count * sizeof(void*)));
+    if (!newArray) {
+        s_fnMemStreamDtor(memStreamBuf);
+        return false;
+    }
+    std::memset(newArray, 0, count * sizeof(void*));
+    *ppArrayInfos = newArray;
+    *pCount = 0;
+    *pCapacity = count;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        alignas(8) uint8_t accessorBuf[32];
+        std::memset(accessorBuf, 0, sizeof(accessorBuf));
+        s_fnAccessorCtorEmpty(accessorBuf);
+        s_fnStreamReadAccessor(pIStream, accessorBuf);
+
+        void* pNativeObj = s_fnAccessorGetNativeObj(accessorBuf);
+        if (pNativeObj) {
+            void** vtable = *reinterpret_cast<void***>(pNativeObj);
+            if (vtable && vtable[8]) {
+                using FnInit20 = void (__thiscall*)(void*);
+                reinterpret_cast<FnInit20>(vtable[8])(pNativeObj);
+            }
+            newArray[i] = pNativeObj;
+            *pCount = i + 1;
+        }
+        s_fnAccessorDtor(accessorBuf);
+    }
+
+    s_fnMemStreamDtor(memStreamBuf);
+
+    auto* pMap = reinterpret_cast<bTInfoValMap*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x4C);
+    ExpandAndRehashInfoMap(pMap, kInfoMapBucketCount, "ReplaySnapshot", &s_loadInfosStats);
+
+    // Clear bucket pointers to prevent any stale chains
+    if (pMap->m_ppBuckets && pMap->m_u32BucketCount > 0) {
+        std::memset(pMap->m_ppBuckets, 0, pMap->m_u32BucketCount * sizeof(SInfoMapNode*));
+        pMap->m_u32NodeCount = 0;
+    }
+
+    for (uint32_t i = 0; i < count; ++i) {
+        void* pInfo = newArray[i];
+        if (!pInfo) continue;
+
+        auto* pStrName = reinterpret_cast<const bCString*>(reinterpret_cast<const uint8_t*>(pInfo) + 0x0C);
+        if (!pStrName || !pStrName->m_pcText) continue;
+
+        const uint32_t hash = s_getHashValueCString
+            ? s_getHashValueCString(*pStrName)
+            : FallbackHashCString(*pStrName);
+        const uint32_t bucketIdx = hash % pMap->m_u32BucketCount;
+
+        auto* pNode = static_cast<SInfoMapNode*>(s_memAdminRealloc(admin, nullptr, sizeof(SInfoMapNode)));
+        if (!pNode) continue;
+
+        pNode->m_key.m_pcText = nullptr;
+        s_fnCStringAssign(&pNode->m_key, pStrName);
+        pNode->m_pValue = reinterpret_cast<gCInfo_PS*>(pInfo);
+        pNode->m_pNext = pMap->m_ppBuckets[bucketIdx];
+        pMap->m_ppBuckets[bucketIdx] = pNode;
+        pMap->m_u32NodeCount++;
+    }
+
+    CInfoShadowCache::Invalidate();
+    return true;
+}
+
+static bool SafeReplaySnapshot(void* pInfoManager) {
+    __try {
+        return DoReplaySnapshotInternal(pInfoManager);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("G3O", "[InfoManager] Exception during ReplaySnapshot (code=0x%08X).", GetExceptionCode());
+        return false;
+    }
+}
+
+static bool __fastcall Hooked_LoadInfosFromInis(void* pThis, void* /*edx*/) {
+    if (!pThis) return false;
+
+    AcquireSRWLockShared(&s_snapshotLock);
+    const bool hasSnapshot = !s_snapshotBytes.empty();
+    ReleaseSRWLockShared(&s_snapshotLock);
+
+    LARGE_INTEGER t0, t1, freq;
+    QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&t0);
+
+    if (hasSnapshot) {
+        const bool replayed = SafeReplaySnapshot(pThis);
+        if (replayed) {
+            QueryPerformanceCounter(&t1);
+            const double ms = static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+            Log("G3O", "[InfoManager] INSTANT REPLAY SUCCESS: restored %u dialogs from RAM in %.2f ms! (Saved ~3.1 s)",
+                s_snapshotCount, ms);
+            s_infoAudit.loadInfosFromInisTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+            s_infoAudit.loadInfosFromInisCalls++;
+            return true;
+        }
+        Log("G3O", "[InfoManager] Replay failed; falling back to original LoadInfosFromInis.");
+    }
+
+    s_loadInfosStats.calls.fetch_add(1, std::memory_order_relaxed);
+    s_loadInfosStats.matches.fetch_add(1, std::memory_order_relaxed);
+    auto* pMap = reinterpret_cast<bTInfoValMap*>(
+        reinterpret_cast<uint8_t*>(pThis) + 0x4C);
+    ExpandAndRehashInfoMap(pMap, kInfoMapBucketCount, "LoadInfosFromInis (this+0x4C)", &s_loadInfosStats);
+
     const bool result = Real_LoadInfosFromInis(pThis);
     QueryPerformanceCounter(&t1);
+    const double loadMs = static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
     s_infoAudit.loadInfosFromInisTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
     s_infoAudit.loadInfosFromInisCalls++;
+
+    Log("G3O", "[InfoManager] LoadInfosFromInis completed in %.2f ms. Capturing baseline RAM snapshot...", loadMs);
+
+    if (result) {
+        SafeRecordSnapshot(pThis);
+    }
+
     return result;
 }
 
@@ -602,6 +879,45 @@ void InitializeInfoManagerOptimizer() {
             GetProcAddress(hSharedBase, "?Realloc@bCMemoryAdmin@@QAEPAXPAXK@Z"));
         s_getHashValueCString = reinterpret_cast<FnGetHashValueCString>(
             GetProcAddress(hSharedBase, "??$g_GetHashValue@VbCString@@@@YGKABVbCString@@@Z"));
+
+        s_fnMemStreamCtor = reinterpret_cast<FnMemStreamCtor>(
+            GetProcAddress(hSharedBase, "??0bCMemoryStream@@QAE@XZ"));
+        s_fnMemStreamDtor = reinterpret_cast<FnMemStreamDtor>(
+            GetProcAddress(hSharedBase, "??1bCMemoryStream@@UAE@XZ"));
+        s_fnMemStreamWrite = reinterpret_cast<FnMemStreamWrite>(
+            GetProcAddress(hSharedBase, "?Write@bCMemoryStream@@UAEKPBXK@Z"));
+        s_fnMemStreamGetBuffer = reinterpret_cast<FnMemStreamGetBuffer>(
+            GetProcAddress(hSharedBase, "?GetBuffer@bCMemoryStream@@QBEPBEK@Z"));
+        s_fnMemStreamGetSize = reinterpret_cast<FnMemStreamGetSize>(
+            GetProcAddress(hSharedBase, "?GetSize@bCMemoryStream@@UBE_JXZ"));
+
+        s_fnAccessorCtorWithObj = reinterpret_cast<FnAccessorCtorWithObj>(
+            GetProcAddress(hSharedBase, "??0bCAccessorPropertyObject@@QAE@PAVbCObjectRefBase@@@Z"));
+        s_fnAccessorCtorEmpty = reinterpret_cast<FnAccessorCtorEmpty>(
+            GetProcAddress(hSharedBase, "??0bCAccessorPropertyObject@@QAE@XZ"));
+        s_fnAccessorDtor = reinterpret_cast<FnAccessorDtor>(
+            GetProcAddress(hSharedBase, "??1bCAccessorPropertyObject@@QAE@XZ"));
+        s_fnAccessorGetNativeObj = reinterpret_cast<FnAccessorGetNativeObj>(
+            GetProcAddress(hSharedBase, "?GetNativeObject@bCAccessorPropertyObject@@QAEPAVbCObjectRefBase@@XZ"));
+
+        s_fnStreamWriteAccessor = reinterpret_cast<FnStreamWriteAccessor>(
+            GetProcAddress(hSharedBase, "??6@YGAAVbCOStream@@AAV0@AAVbCAccessorPropertyObject@@@Z"));
+        s_fnStreamReadAccessor = reinterpret_cast<FnStreamReadAccessor>(
+            GetProcAddress(hSharedBase, "??5@YGAAVbCIStream@@AAV0@AAVbCAccessorPropertyObject@@@Z"));
+
+        s_fnOStreamWriteU16 = reinterpret_cast<FnOStreamWriteU16>(
+            GetProcAddress(hSharedBase, "??6bCOStream@@QAEAAV0@G@Z"));
+        s_fnOStreamWriteU32 = reinterpret_cast<FnOStreamWriteU32>(
+            GetProcAddress(hSharedBase, "??6bCOStream@@QAEAAV0@K@Z"));
+        s_fnIStreamReadU16 = reinterpret_cast<FnIStreamReadU16>(
+            GetProcAddress(hSharedBase, "??5bCIStream@@QAEAAV0@AAG@Z"));
+        s_fnIStreamReadU32 = reinterpret_cast<FnIStreamReadU32>(
+            GetProcAddress(hSharedBase, "??5bCIStream@@QAEAAV0@AAK@Z"));
+
+        s_fnCStringAssign = reinterpret_cast<FnCStringAssign>(
+            GetProcAddress(hSharedBase, "??4bCString@@QAEAAV0@ABV0@@Z"));
+        s_fnCStringDtor = reinterpret_cast<FnCStringDtor>(
+            GetProcAddress(hSharedBase, "??1bCString@@QAE@XZ"));
     }
 
     const auto baseAddr = reinterpret_cast<uintptr_t>(hGame);
@@ -756,6 +1072,13 @@ void ShutdownInfoManagerOptimizer() {
     InfoManagerOptimizer_LogStats();
 
     CInfoShadowCache::Invalidate();
+
+    AcquireSRWLockExclusive(&s_snapshotLock);
+    s_snapshotBytes.clear();
+    s_snapshotBytes.shrink_to_fit();
+    s_snapshotCount = 0;
+    ReleaseSRWLockExclusive(&s_snapshotLock);
+
     s_bInitialized = false;
 }
 
