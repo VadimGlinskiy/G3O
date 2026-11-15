@@ -208,6 +208,7 @@ using FnMemStreamDtor        = void (__thiscall*)(void* pStream);
 using FnMemStreamWrite       = uint32_t (__thiscall*)(void* pOStream, const void* pData, uint32_t bytes);
 using FnMemStreamGetBuffer   = const uint8_t* (__thiscall*)(const void* pStream, uint32_t flag);
 using FnMemStreamGetSize     = int64_t (__thiscall*)(const void* pStream);
+using FnMemStreamSetCount    = void (__thiscall*)(void* pStream, uint32_t count);
 
 using FnAccessorCtorWithObj  = void (__thiscall*)(void* pAccessor, void* pObj);
 using FnAccessorCtorEmpty    = void (__thiscall*)(void* pAccessor);
@@ -230,6 +231,7 @@ static FnMemStreamDtor        s_fnMemStreamDtor        = nullptr;
 static FnMemStreamWrite       s_fnMemStreamWrite       = nullptr;
 static FnMemStreamGetBuffer   s_fnMemStreamGetBuffer   = nullptr;
 static FnMemStreamGetSize     s_fnMemStreamGetSize     = nullptr;
+static FnMemStreamSetCount    s_fnMemStreamSetCount    = nullptr;
 
 static FnAccessorCtorWithObj  s_fnAccessorCtorWithObj  = nullptr;
 static FnAccessorCtorEmpty    s_fnAccessorCtorEmpty    = nullptr;
@@ -540,8 +542,7 @@ static void* __stdcall Hooked_StreamReadObjectBase(void* pStream, void* pObject)
 static bool DoRecordSnapshotInternal(void* pInfoManager) {
     if (!pInfoManager || !s_fnMemStreamCtor || !s_fnMemStreamDtor ||
         !s_fnAccessorCtorWithObj || !s_fnAccessorDtor || !s_fnStreamWriteAccessor ||
-        !s_fnOStreamWriteU16 || !s_fnOStreamWriteU32 || !s_fnMemStreamGetBuffer ||
-        !s_fnMemStreamGetSize) {
+        !s_fnOStreamWriteU16 || !s_fnOStreamWriteU32) {
         return false;
     }
 
@@ -556,6 +557,11 @@ static bool DoRecordSnapshotInternal(void* pInfoManager) {
     alignas(8) uint8_t memStreamBuf[64];
     std::memset(memStreamBuf, 0, sizeof(memStreamBuf));
     s_fnMemStreamCtor(memStreamBuf);
+
+    // Pre-allocate 16 MB capacity up front to eliminate 600,000 quadratic heap reallocations!
+    if (s_fnMemStreamSetCount) {
+        s_fnMemStreamSetCount(memStreamBuf, 16 * 1024 * 1024);
+    }
 
     // bCOStream is at offset +4 of bCMemoryStream
     void* pOStream = memStreamBuf + 4;
@@ -575,13 +581,16 @@ static bool DoRecordSnapshotInternal(void* pInfoManager) {
         s_fnAccessorDtor(accessorBuf);
     }
 
-    const uint8_t* pBuf = s_fnMemStreamGetBuffer(memStreamBuf, 0);
-    const int64_t streamSize = s_fnMemStreamGetSize(memStreamBuf);
+    // Direct buffer layout of bCMemoryStream:
+    // offset 0x08: m_pBuffer (pointer to start of allocated RAM buffer)
+    // offset 0x0C: m_u32Position (exact bytes written so far)
+    const auto* pBufferBase = *reinterpret_cast<const uint8_t* const*>(memStreamBuf + 0x08);
+    const uint32_t writtenBytes = *reinterpret_cast<const uint32_t*>(memStreamBuf + 0x0C);
 
     bool success = false;
-    if (pBuf && streamSize > 6) {
+    if (pBufferBase && writtenBytes > 6) {
         AcquireSRWLockExclusive(&s_snapshotLock);
-        s_snapshotBytes.assign(pBuf, pBuf + static_cast<size_t>(streamSize));
+        s_snapshotBytes.assign(pBufferBase, pBufferBase + writtenBytes);
         s_snapshotCount = count;
         success = true;
         ReleaseSRWLockExclusive(&s_snapshotLock);
@@ -631,6 +640,9 @@ static bool DoReplaySnapshotInternal(void* pInfoManager) {
     void* pOStream = memStreamBuf + 4; // bCOStream
     void* pIStream = memStreamBuf + 0; // bCIStream
 
+    if (s_fnMemStreamSetCount) {
+        s_fnMemStreamSetCount(memStreamBuf, static_cast<uint32_t>(localSnapshot.size() + 1024));
+    }
     s_fnMemStreamWrite(pOStream, localSnapshot.data(), static_cast<uint32_t>(localSnapshot.size()));
 
     // Reset stream position to 0 (at offset +0x0C)
@@ -890,6 +902,8 @@ void InitializeInfoManagerOptimizer() {
             GetProcAddress(hSharedBase, "?GetBuffer@bCMemoryStream@@QBEPBEK@Z"));
         s_fnMemStreamGetSize = reinterpret_cast<FnMemStreamGetSize>(
             GetProcAddress(hSharedBase, "?GetSize@bCMemoryStream@@UBE_JXZ"));
+        s_fnMemStreamSetCount = reinterpret_cast<FnMemStreamSetCount>(
+            GetProcAddress(hSharedBase, "?SetCount@bCMemoryStream@@QAEXK@Z"));
 
         s_fnAccessorCtorWithObj = reinterpret_cast<FnAccessorCtorWithObj>(
             GetProcAddress(hSharedBase, "??0bCAccessorPropertyObject@@QAE@PAVbCObjectRefBase@@@Z"));

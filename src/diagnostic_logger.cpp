@@ -170,13 +170,9 @@ void LogRaw(const char* message) {
 
     s_recentEvents.Append(fullLine.c_str(), fullLine.size());
 
-    static int s_flushCounter = 0;
     if (s_logFile) {
         fputs(fullLine.c_str(), s_logFile);
-        if (++s_flushCounter >= 128) {
-            fflush(s_logFile);
-            s_flushCounter = 0;
-        }
+        fflush(s_logFile);
     }
 
     LeaveCriticalSection(&s_logCs);
