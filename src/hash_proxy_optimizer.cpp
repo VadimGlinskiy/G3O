@@ -49,19 +49,19 @@ static void* __fastcall Hooked_TemplateProxyGetEntity(void* pThis, void* /*edx*/
         return nullptr;
     }
 
-    // 2. Direct-Mapped L1 Cache lookup
+    // 2. Fast L1 Cache lookup (open-addressing positive cache)
+    void* pPositive = FastTemplateCache::LookupPositive(pPropId);
+    if (pPositive) {
+        *ppCachedEntity = pPositive;
+        s_proxyHits.fetch_add(1, std::memory_order_relaxed);
+        return pPositive;
+    }
+
     const uint32_t slotIdx = FastTemplateCache::ComputeSlotIndex(pPropId);
     auto& slot = FastTemplateCache::s_slots[slotIdx];
     const uintptr_t cachedVal = slot.entityOrState;
 
-    if (cachedVal != FastTemplateCache::kEmptySlot && FastTemplateCache::GuidEquals(pPropId, slot.guid)) {
-        if (cachedVal != FastTemplateCache::kNotFound) {
-            void* pResolved = reinterpret_cast<void*>(cachedVal);
-            *ppCachedEntity = pResolved;
-            s_proxyHits.fetch_add(1, std::memory_order_relaxed);
-            return pResolved;
-        }
-
+    if (cachedVal == FastTemplateCache::kNotFound && FastTemplateCache::GuidEquals(pPropId, slot.guid)) {
         // Negative Cache Hit (kNotFound): valid during savegame loading within current epoch
         const uint32_t curEpoch = FastTemplateCache::s_currentNegEpoch.load(std::memory_order_relaxed);
         if (IsSavegameLoadActive() && slot.negEpoch == curEpoch) {
@@ -75,14 +75,13 @@ static void* __fastcall Hooked_TemplateProxyGetEntity(void* pThis, void* /*edx*/
     void* pResolvedEntity = Real_TemplateProxyGetEntity(pThis);
 
     // 4. Update slot
-    slot.guid[0] = pPropId[0];
-    slot.guid[1] = pPropId[1];
-    slot.guid[2] = pPropId[2];
-    slot.guid[3] = pPropId[3];
-
     if (pResolvedEntity != nullptr) {
-        slot.entityOrState = reinterpret_cast<uintptr_t>(pResolvedEntity);
+        FastTemplateCache::InsertPositive(pPropId, pResolvedEntity);
     } else {
+        slot.guid[0] = pPropId[0];
+        slot.guid[1] = pPropId[1];
+        slot.guid[2] = pPropId[2];
+        slot.guid[3] = pPropId[3];
         slot.entityOrState = FastTemplateCache::kNotFound;
         slot.negEpoch      = FastTemplateCache::s_currentNegEpoch.load(std::memory_order_relaxed);
     }

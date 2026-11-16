@@ -57,17 +57,24 @@ static void __fastcall Hooked_EntityDestroy(void* pThis, void* /*edx*/) {
 
 void FrustumOptimizer_BeginDefer() {
     if (!GetConfig().enableFrustumDatabaseOptimizer) return;
+    if (s_deferActive.load(std::memory_order_relaxed)) return;
     s_mainThreadId = GetCurrentThreadId();
     EnterCriticalSection(&s_batcherLock);
     s_batcher.ResetStats();
     s_batcher.Clear();
     LeaveCriticalSection(&s_batcherLock);
     s_deferActive.store(true, std::memory_order_release);
+    if (s_targetExtract) MH_EnableHook(s_targetExtract);
+    if (s_targetDestructor) MH_EnableHook(s_targetDestructor);
+    if (s_targetDestroy) MH_EnableHook(s_targetDestroy);
 }
 
 void FrustumOptimizer_EndDeferAndFlush() {
     if (!s_deferActive.load(std::memory_order_relaxed)) return;
     s_deferActive.store(false, std::memory_order_release);
+    if (s_targetExtract) MH_DisableHook(s_targetExtract);
+    if (s_targetDestructor) MH_DisableHook(s_targetDestructor);
+    if (s_targetDestroy) MH_DisableHook(s_targetDestroy);
 
     std::unordered_map<void*, std::vector<FrustumBatcher::DatabaseEntry>> snapshot;
     uint32_t totalCalls = 0;
@@ -140,7 +147,8 @@ void InitializeFrustumDatabaseOptimizer() {
             [&] { Real_ExtractFromEntity = nullptr; });
         if (result == HookInstallResult::Installed) {
             s_targetExtract = pExtract;
-            Log("G3O", "Frustum Database Optimizer: Hooked eCFrustumDatabase::ExtractFromEntity (0x%p)", pExtract);
+            MH_DisableHook(pExtract); // Kept disabled until FrustumOptimizer_BeginDefer()
+            Log("G3O", "Frustum Database Optimizer: Hooked eCFrustumDatabase::ExtractFromEntity (0x%p) [dormant until loading]", pExtract);
         } else {
             Log("G3O", "Frustum Database Optimizer: ExtractFromEntity install failed (create=%d, enable=%d, remove=%d).",
                 createStatus, enableStatus, removeStatus);
@@ -161,7 +169,8 @@ void InitializeFrustumDatabaseOptimizer() {
             [&] { Real_EntityDestructor = nullptr; });
         if (result == HookInstallResult::Installed) {
             s_targetDestructor = pDestructor;
-            Log("G3O", "Frustum Database Optimizer: Hooked eCEntity::~eCEntity (0x%p)", pDestructor);
+            MH_DisableHook(pDestructor); // Kept disabled until FrustumOptimizer_BeginDefer()
+            Log("G3O", "Frustum Database Optimizer: Hooked eCEntity::~eCEntity (0x%p) [dormant until loading]", pDestructor);
         } else {
             Log("G3O", "Frustum Database Optimizer: entity destructor install failed (create=%d, enable=%d, remove=%d).",
                 createStatus, enableStatus, removeStatus);
@@ -180,7 +189,8 @@ void InitializeFrustumDatabaseOptimizer() {
             [&] { Real_EntityDestroy = nullptr; });
         if (result == HookInstallResult::Installed) {
             s_targetDestroy = pDestroy;
-            Log("G3O", "Frustum Database Optimizer: Hooked eCEntity::Destroy (0x%p)", pDestroy);
+            MH_DisableHook(pDestroy); // Kept disabled until FrustumOptimizer_BeginDefer()
+            Log("G3O", "Frustum Database Optimizer: Hooked eCEntity::Destroy (0x%p) [dormant until loading]", pDestroy);
         } else {
             Log("G3O", "Frustum Database Optimizer: entity Destroy install failed (create=%d, enable=%d, remove=%d).",
                 createStatus, enableStatus, removeStatus);

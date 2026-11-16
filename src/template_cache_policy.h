@@ -104,6 +104,39 @@ public:
         return _mm_movemask_epi8(cmp) == 0xFFFF;
     }
 
+    __forceinline static void* LookupPositive(const uint32_t* pGuid) noexcept {
+        if (!pGuid) return nullptr;
+        const uint32_t idx = ComputeSlotIndex(pGuid);
+        for (uint32_t i = 0; i < 8; ++i) {
+            const auto& slot = s_slots[(idx + i) & kSlotMask];
+            const uintptr_t val = slot.entityOrState;
+            if (val == kEmptySlot) {
+                return nullptr;
+            }
+            if (val != kNotFound && GuidEquals(pGuid, slot.guid)) {
+                return reinterpret_cast<void*>(val);
+            }
+        }
+        return nullptr;
+    }
+
+    __forceinline static void InsertPositive(const uint32_t* pGuid, void* pEntity) noexcept {
+        if (!pGuid || !pEntity) return;
+        const uint32_t idx = ComputeSlotIndex(pGuid);
+        for (uint32_t i = 0; i < 16; ++i) {
+            auto& slot = s_slots[(idx + i) & kSlotMask];
+            const uintptr_t val = slot.entityOrState;
+            if (val == kEmptySlot || GuidEquals(pGuid, slot.guid)) {
+                slot.guid[0] = pGuid[0];
+                slot.guid[1] = pGuid[1];
+                slot.guid[2] = pGuid[2];
+                slot.guid[3] = pGuid[3];
+                slot.entityOrState = reinterpret_cast<uintptr_t>(pEntity);
+                return;
+            }
+        }
+    }
+
     static inline CacheSlot             s_slots[kSlotCount]{};
     static inline std::atomic<uint32_t> s_currentNegEpoch{1};
 };

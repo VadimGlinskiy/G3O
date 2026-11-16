@@ -11,11 +11,13 @@
 #include "vfs_cache_optimizer.h"
 #include "frustum_database_optimizer.h"
 #include "hash_proxy_optimizer.h"
+#include "template_cache_policy.h"
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
 
 #include "info_manager_optimizer.h"
+#include "dynamic_layer_optimizer.h"
 #include "pak_tracer.h"
 #include "pak_read_at.h"
 #include "profiler.h"
@@ -383,7 +385,8 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
             propertyFactoryReadNewObjectMs, propertyFactoryReadNewObjectCalls,
             cloneObjectInstanceMs, cloneObjectInstanceCalls,
             readDependencyMs, readDependencyCalls,
-            patchWithTemplateMs, patchWithTemplateCalls, childrenAvailableMs, childrenAvailableCalls,
+            patchWithTemplateMs, patchWithTemplateCalls,
+            childrenAvailableMs, childrenAvailableCalls,
             createSpecificEntityMs, createSpecificEntityCalls);
     }
 
@@ -551,9 +554,9 @@ static void* __fastcall Hooked_PropertyFactoryCloneObjectInstance(void* self, vo
 }
 
 static bool __fastcall Hooked_PatchWithTemplate(void* self, void* /*edx*/, const void* pGuid, bool flag) {
-    if (!s_isLoadActive) return Real_PatchWithTemplate(self, pGuid, flag);
+    if (!s_isLoadActive) return Real_PatchWithTemplate ? Real_PatchWithTemplate(self, pGuid, flag) : false;
     const std::uint64_t start = BeginLayerMetric();
-    const bool result = Real_PatchWithTemplate(self, pGuid, flag);
+    const bool result = Real_PatchWithTemplate ? Real_PatchWithTemplate(self, pGuid, flag) : false;
     EndLayerMetric(s_contextAuditMetrics.patchWithTemplate, start);
     return result;
 }
@@ -1347,6 +1350,7 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     SetEnginePhase(Phase_PreLoad_SysDyn);
     s_isLoadActive = true;
     HashProxy_InvalidateNegativeCache();
+    FastTemplateCache::ClearAll();
     s_layerAuditMetrics = {};
     s_pvsPrefetchMetrics = {};
     s_capturePvsPrefetchMetrics = false;
@@ -1357,6 +1361,8 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
         Log("G3O", "================================================================================");
         Log("G3O", "[LoadProfile] >>> SAVEGAME LOAD INITIATED (gCHUDFileManager::LoadGame) >>>");
     }
+
+    DynamicLayerOptimizer_OnLoadStart();
 
     ResetDecompTelemetry();
     ResetPropertyCacheTelemetry();
@@ -1758,10 +1764,16 @@ static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
     if (s_isLoadActive) {
         PakTracer_OnWorldActivateStart();
     }
-    int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
-    Log("G3O", "[WorldAudit] WorldOnActivate entered: pWorld=0x%p, isLoadActive=%d, totalSectors=%d",
-        pWorld, (int)s_isLoadActive, numSectors);
-    Real_WorldOnActivate(pWorld);
+    const Config& cfg = GetConfig();
+    if (cfg.enableParallelDynamicLayers) {
+        DynamicLayerOptimizer_ProcessWorldActivate(pWorld, Real_WorldOnActivate);
+        DynamicLayerOptimizer_OnLoadEnd();
+    } else {
+        int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
+        Log("G3O", "[WorldAudit] WorldOnActivate entered: pWorld=0x%p, isLoadActive=%d, totalSectors=%d",
+            pWorld, (int)s_isLoadActive, numSectors);
+        Real_WorldOnActivate(pWorld);
+    }
 }
 
 // 5.5. DoAfterWorldActivate hook (Game.dll: ?DoAfterWorldActivate@gCWorld@@IAEXXZ)
@@ -1817,6 +1829,7 @@ static LoadGameWorld_t Real_LoadGameWorld = nullptr;
 static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const void* pSaveName, bool isNewGame) {
     SetEnginePhase(Phase_LoadGameWorld);
     s_inPreLoad = false;
+    DynamicLayerOptimizer_OnLoadStart();
     if (Real_EnableSectorActivation) {
         Real_EnableSectorActivation(true);
     }
@@ -2088,13 +2101,15 @@ bool InitializeSavegameProfiler() {
         return false;
     }
 
-    if (cfg.enableSavegameAudit || ShouldTracePakPrefetch(cfg)) {
-        HMODULE hK32 = GetModuleHandleA("kernel32.dll");
-        if (hK32) {
-            void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
-            if (pRead) {
-                InstallSavegameHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile,
-                    &s_targetReadFile, "kernel32!ReadFile");
+    if (cfg.enableSavegameAudit || ShouldTracePakPrefetch(cfg) || cfg.enableParallelDynamicLayers) {
+        if (cfg.enableSavegameAudit || ShouldTracePakPrefetch(cfg)) {
+            HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+            if (hK32) {
+                void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
+                if (pRead) {
+                    InstallSavegameHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile,
+                        &s_targetReadFile, "kernel32!ReadFile");
+                }
             }
         }
         HMODULE hGame = GetModuleHandleA("Game.dll");
@@ -2222,6 +2237,7 @@ bool InitializeSavegameProfiler() {
             InstallSavegameHook(pDoAfter, (LPVOID)Hooked_DoAfterWorldActivate, (LPVOID*)&Real_DoAfterWorldActivate,
                 &s_targetDoAfterWorldActivate, "gCWorld::DoAfterWorldActivate");
         }
+        }
 
         void* pCount = (void*)GetProcAddress(hGame, "?GetSectorCount@gCWorld@@QBEHXZ");
         if (pCount) {
@@ -2233,7 +2249,6 @@ bool InitializeSavegameProfiler() {
         if (pDynCount) {
             Real_GetDynamicLayerCount = (GetDynamicLayerCount_t)pDynCount;
             Log("G3O", "Savegame Profiler: Found gCSector::GetDynamicLayerCount (0x%p)", pDynCount);
-        }
         }
     }
 

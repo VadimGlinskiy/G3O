@@ -6,6 +6,7 @@
 #include "blackbox_recorder.h"
 #include "hook_install_policy.h"
 #include "layer_ring_arena.h"
+#include "dynamic_layer_optimizer.h"
 #include <minhook.h>
 #include <windows.h>
 #include <libdeflate.h>
@@ -100,6 +101,26 @@ static int __stdcall Hooked_ZlibDecompress(
 ) {
     BlackboxScope bbScope(BB_OP_DECOMPRESSING_PAK, "PAK_Stream", (uint64_t)(uintptr_t)inBuffer, inSize);
     if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0) {
+        // Step 2.0: Serve pre-decompressed dynamic layer / mod node block from DynamicLayerOptimizer
+        if (GetConfig().enableParallelDynamicLayers) {
+            DWORD layerOut = 0;
+            LARGE_INTEGER t0_layer, t1_layer;
+            QueryPerformanceCounter(&t0_layer);
+            if (DynamicLayerOptimizer_TryGet(inBuffer, inSize, outBuffer, outCapacity, &layerOut)) {
+                QueryPerformanceCounter(&t1_layer);
+                const LONG64 us = (s_timerFreq.QuadPart > 0)
+                    ? ((t1_layer.QuadPart - t0_layer.QuadPart) * 1000000LL / s_timerFreq.QuadPart)
+                    : 0;
+                if (pOutWritten) *pOutWritten = layerOut;
+                InterlockedExchangeAdd64(&s_decompTimeUs, us);
+                InterlockedIncrement(&s_decompCount);
+                InterlockedExchangeAdd64(&s_decompInBytes, static_cast<LONG64>(inSize));
+                InterlockedExchangeAdd64(&s_decompOutBytes, static_cast<LONG64>(layerOut));
+                PakTracer_RecordDecompress(inBuffer, inSize, outCapacity, layerOut, static_cast<uint64_t>(us), outBuffer);
+                return 0;
+            }
+        }
+
         // Serve an exact RB_Mod .node block prepared by LayerRingArena when its slot is ready.
         if (GetConfig().enableLayerRingArena && LayerRingArena_IsActive()) {
             DWORD arenaOut = 0;

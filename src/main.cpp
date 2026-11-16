@@ -22,6 +22,7 @@
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
 #include "info_manager_optimizer.h"
+#include "dynamic_layer_optimizer.h"
 #include "session_start_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
@@ -179,6 +180,11 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeInfoManagerOptimizer();
     }
 
+    // Dynamic Layer Optimizer: Parallel activation of independent dynamic mod layers
+    if (cfg.enableParallelDynamicLayers) {
+        G3O::InitializeDynamicLayerOptimizer();
+    }
+
     // Session Start Optimizer: Eliminates 12x Sleep(100) idle warm-up in gCSession::Start
     if (cfg.enableSessionStartOptimizer) {
         G3O::InitializeSessionStartOptimizer();
@@ -260,6 +266,7 @@ static void ShutdownOptima() {
     G3O::ShutdownShadowCasterOptimizer();
     G3O::ShutdownClassFactoryOptimizer();
     G3O::ShutdownInfoManagerOptimizer();
+    G3O::ShutdownDynamicLayerOptimizer();
     G3O::ShutdownSessionStartOptimizer();
     G3O::ShutdownSelectiveCullingOptimizer();
     G3O::ShutdownFogOptimizer();

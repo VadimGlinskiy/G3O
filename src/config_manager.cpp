@@ -129,6 +129,10 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Для обычной игры держите выключенным (EnableLayerRingArena=false).\n"
         << "EnableLayerRingArena=false\n"
         << "\n"
+        << "; Безопасная фоновая предзагрузка и декомпрессия динамических слоев мира в RAM.\n"
+        << "; Заранее распаковывает независимые слои модов (CNQ, LTM, AD_World, RB_Mod) в ОЗУ в фоновых потоках без риска вылетов.\n"
+        << "EnableParallelDynamicLayers=true\n"
+        << "\n"
         << "; Кэширование свойств объектов при загрузке.\n"
         << "; Запоминает однажды найденные свойства в быстрой хэш-таблице, избавляя от повторных поисков и ускоряя загрузку сохранений.\n"
         << "EnablePropertyCache=true\n"
@@ -174,6 +178,10 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Оптимизация поиска диалогов NPC.\n"
         << "; Мгновенно находит нужные реплики и условия через хэш-таблицу. Устраняет заикания при приближении к NPC и открытии диалогов.\n"
         << "EnableInfoManagerOptimizer=true\n"
+        << "\n"
+        << "; Многопоточный парсер для первой (холодной) загрузки диалогов InfoManager.\n"
+        << "; Ускоряет чтение 24,555 файлов диалогов параллельно на всех ядрах процессора.\n"
+        << "EnableInfoManagerParallelColdLoad=false\n"
         << "\n"
         << "; Устранение холостых пауз при старте сессии.\n"
         << "; В оригинале движок делает 12 пауз Sleep по 100 мс (1.2 сек). Опция сокращает их до минимума.\n"
@@ -379,6 +387,8 @@ void LoadConfig() {
     s_config.enableClassFactoryOptimizer = ReadIniBool("Performance", "EnableClassFactoryOptimizer", true, path);
 
     s_config.enableInfoManagerOptimizer = ReadIniBool("Performance", "EnableInfoManagerOptimizer", true, path);
+    s_config.enableInfoManagerParallelColdLoad = ReadIniBool("Performance", "EnableInfoManagerParallelColdLoad", false, path);
+    s_config.enableParallelDynamicLayers = ReadIniBool("Performance", "EnableParallelDynamicLayers", true, path);
     s_config.enableSessionStartOptimizer = ReadIniBool("Performance", "EnableSessionStartOptimizer", true, path);
     s_config.sessionStartSleepMs = static_cast<uint32_t>(ReadIniInt("Performance", "SessionStartSleepMs", 1, 0, 100, path));
     s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);

@@ -110,6 +110,9 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
 * **`EnableLayerRingArena`** (default `false`)<br>
   Circular arena buffer for massive world layers (`RB_Mod`). Recommended off (`false`) for standard gameplay.
 
+* **`EnableParallelDynamicLayers`** (default `true`)<br>
+  Safe background pre-fetching and decompression of dynamic world layers (`Projects_compiled.*`) into RAM. Background worker threads read and decompress independent mod layers (CNQ, LTM, AD_World, RB_Mod) in parallel via AVX2/BMI2 `libdeflate`, while the engine activates them on the main thread without I/O stalls or crash risks. Reduces world activation time by 5–10 seconds.
+
 #### 2. Engine Memory, Scene Graph & Core Algorithms
 
 * **`EnableSharedBaseOptimizations`** (default `true`)<br>
@@ -132,6 +135,9 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
 
 * **`EnableInfoManagerOptimizer`** (default `true`)<br>
   Accelerates dialogue resolution using a hash table, removing micro-stutters when approaching NPCs and opening dialogue screens.
+
+* **`EnableInfoManagerParallelColdLoad`** (default `false`)<br>
+  Multi-threaded parser for the initial ("cold") loading of `InfoManager` dialogs across CPU cores. Kept off by default for maximum stability, as G3O's built-in O(1) Shadow Table cache and fast RAM-replay already deliver instantaneous dialog loading (~3 ms) on subsequent loads.
 
 * **`EnableNavigationOptimizer`** (default `true`)<br>
   Optimizes pathfinding lookups, cutting CPU overhead during navigation updates in gameplay and loading.

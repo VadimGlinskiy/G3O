@@ -13,6 +13,7 @@ int main() {
     config.enableSavegameAudit = false;
     config.enableProfiler = false;
     config.enablePakPrefetch = false;
+    config.enableParallelDynamicLayers = false;
     bool ok = true;
     ok &= Expect(!G3O::ShouldInstallSavegameProfilerHooks(config), "all savegame hooks should be off when all related features are off");
 

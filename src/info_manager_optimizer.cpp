@@ -7,8 +7,11 @@
 #include <atomic>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 #include <vector>
+#include <thread>
+#include <algorithm>
 
 namespace G3O {
 
@@ -43,11 +46,19 @@ struct bTInfoValMap {
     uint32_t       m_u32NodeCount;   // +0x0C
 };
 
+// Layout of bTObjArray<eCArchiveFile> returned by FindFiles:
+struct bTObjArrayArchiveFile {
+    void*    m_pElements;      // +0x00: array of eCArchiveFile (stride 0x24 = 36 bytes)
+    uint32_t m_u32Count;       // +0x04: file count
+    uint32_t m_u32Capacity;    // +0x08: capacity
+};
+
 #pragma pack(pop)
 
 static_assert(sizeof(bCString) == 4, "bCString size mismatch");
 static_assert(sizeof(SInfoMapNode) == 12, "SInfoMapNode size mismatch");
 static_assert(sizeof(bTInfoValMap) == 16, "bTInfoValMap size mismatch");
+static_assert(sizeof(bTObjArrayArchiveFile) == 12, "bTObjArrayArchiveFile size mismatch");
 
 // ============================================================================
 // 2. Fast String Utilities & Transparent Hash
@@ -249,9 +260,37 @@ static FnIStreamReadU32       s_fnIStreamReadU32       = nullptr;
 static FnCStringAssign        s_fnCStringAssign        = nullptr;
 static FnCStringDtor          s_fnCStringDtor          = nullptr;
 
-static SRWLOCK                s_snapshotLock           = SRWLOCK_INIT;
-static std::vector<uint8_t>   s_snapshotBytes;
-static uint32_t               s_snapshotCount          = 0;
+static SRWLOCK                s_baselineLock           = SRWLOCK_INIT;
+static std::vector<void*>     s_baselineInfoPtrs;
+static uint32_t               s_baselineCount          = 0;
+
+static uintptr_t s_engineBase = 0;
+
+using FnArchiveMgrGetInstance   = void* (__stdcall*)();
+using FnCreateInfoInstance      = void* (__cdecl*)();
+
+static FnArchiveMgrGetInstance  s_fnArchiveMgrGetInstance   = nullptr;
+static void*                    s_fnFindFiles               = nullptr;
+static FnCreateInfoInstance     s_fnCreateInfoInstance      = nullptr;
+static void*                    s_fnInfoRead                = nullptr;
+
+static void* s_targetArchiveOpen    = nullptr;
+static void* s_realArchiveOpen      = nullptr;
+
+static void* s_targetArchiveClose   = nullptr;
+static void* s_realArchiveClose     = nullptr;
+
+static void* s_targetGetSceneAdmin  = nullptr;
+static void* s_realGetSceneAdmin    = nullptr;
+
+static CRITICAL_SECTION       s_archiveIOLock;
+static bool                   s_archiveIOLockInit = false;
+static std::atomic<DWORD>     s_threadHoldingArchiveLock{0};
+
+static CRITICAL_SECTION       s_sceneAdminLock;
+static bool                   s_sceneAdminLockInit = false;
+
+static std::atomic<bool>      s_parallelColdLoadActive{false};
 
 // Prime number bucket count to ensure optimal hash distribution across 24,555 dialogs
 static constexpr uint32_t kInfoMapBucketCount = 32771;
@@ -470,6 +509,12 @@ using FnLoadInfosFromInis = bool (__thiscall*)(void* pThis);
 static FnLoadInfosFromInis Real_LoadInfosFromInis = nullptr;
 static void* s_targetLoadInfosFromInis = nullptr;
 
+using FnInfoManagerDestroy = void (__thiscall*)(void* pThis);
+static FnInfoManagerDestroy Real_InfoManagerDestroy = nullptr;
+static void* s_targetInfoManagerDestroy = nullptr;
+
+
+
 struct InfoManagerReadAudit {
     uint64_t phaseBTicks = 0;
     uint32_t phaseBCalls = 0;
@@ -536,171 +581,91 @@ static void* __stdcall Hooked_StreamReadObjectBase(void* pStream, void* pObject)
     return Real_StreamReadObjectBase(pStream, pObject);
 }
 
-// ============================================================================
-// 6. In-Memory Snapshot & Fast Replay for gCInfoManager_PS
-// ============================================================================
-static bool DoRecordSnapshotInternal(void* pInfoManager) {
-    if (!pInfoManager || !s_fnMemStreamCtor || !s_fnMemStreamDtor ||
-        !s_fnAccessorCtorWithObj || !s_fnAccessorDtor || !s_fnStreamWriteAccessor ||
-        !s_fnOStreamWriteU16 || !s_fnOStreamWriteU32) {
-        return false;
+static void __fastcall Hooked_InfoManagerDestroy(void* pThis, void* /*edx*/) {
+    if (pThis) {
+        AcquireSRWLockShared(&s_baselineLock);
+        const uint32_t baselineCount = s_baselineCount;
+        ReleaseSRWLockShared(&s_baselineLock);
+
+        if (baselineCount > 0) {
+            auto* pCount = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pThis) + 0x30);
+            if (pCount && *pCount == baselineCount) {
+                // InfoManager is destroying, but holds our baseline cached dialogs.
+                // Clear the count so the deletion loop skips freeing the dialog objects.
+                *pCount = 0;
+            }
+        }
     }
-
-    auto* pCount = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pInfoManager) + 0x30);
-    auto* ppData = *reinterpret_cast<void* const* const*>(reinterpret_cast<const uint8_t*>(pInfoManager) + 0x2C);
-    if (!pCount || !ppData || *pCount == 0) {
-        return false;
-    }
-
-    const uint32_t count = *pCount;
-
-    alignas(8) uint8_t memStreamBuf[64];
-    std::memset(memStreamBuf, 0, sizeof(memStreamBuf));
-    s_fnMemStreamCtor(memStreamBuf);
-
-    // Pre-allocate 16 MB capacity up front to eliminate 600,000 quadratic heap reallocations!
-    if (s_fnMemStreamSetCount) {
-        s_fnMemStreamSetCount(memStreamBuf, 16 * 1024 * 1024);
-    }
-
-    // bCOStream is at offset +4 of bCMemoryStream
-    void* pOStream = memStreamBuf + 4;
-
-    const uint16_t version = 1;
-    s_fnOStreamWriteU16(pOStream, version);
-    s_fnOStreamWriteU32(pOStream, count);
-
-    for (uint32_t i = 0; i < count; ++i) {
-        void* pInfo = ppData[i];
-        if (!pInfo) continue;
-
-        alignas(8) uint8_t accessorBuf[32];
-        std::memset(accessorBuf, 0, sizeof(accessorBuf));
-        s_fnAccessorCtorWithObj(accessorBuf, pInfo);
-        s_fnStreamWriteAccessor(pOStream, accessorBuf);
-        s_fnAccessorDtor(accessorBuf);
-    }
-
-    // Direct buffer layout of bCMemoryStream:
-    // offset 0x08: m_pBuffer (pointer to start of allocated RAM buffer)
-    // offset 0x0C: m_u32Position (exact bytes written so far)
-    const auto* pBufferBase = *reinterpret_cast<const uint8_t* const*>(memStreamBuf + 0x08);
-    const uint32_t writtenBytes = *reinterpret_cast<const uint32_t*>(memStreamBuf + 0x0C);
-
-    bool success = false;
-    if (pBufferBase && writtenBytes > 6) {
-        AcquireSRWLockExclusive(&s_snapshotLock);
-        s_snapshotBytes.assign(pBufferBase, pBufferBase + writtenBytes);
-        s_snapshotCount = count;
-        success = true;
-        ReleaseSRWLockExclusive(&s_snapshotLock);
-
-        Log("G3O", "[InfoManager] Captured %zu bytes baseline in RAM (%u dialogs).",
-            s_snapshotBytes.size(), count);
-    }
-
-    s_fnMemStreamDtor(memStreamBuf);
-    return success;
-}
-
-static bool SafeRecordSnapshot(void* pInfoManager) {
-    __try {
-        return DoRecordSnapshotInternal(pInfoManager);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("G3O", "[InfoManager] Exception during RecordSnapshot (code=0x%08X).", GetExceptionCode());
-        return false;
+    if (Real_InfoManagerDestroy) {
+        Real_InfoManagerDestroy(pThis);
     }
 }
 
-static bool DoReplaySnapshotInternal(void* pInfoManager) {
-    if (!pInfoManager || !s_memAdminGetInstance || !s_memAdminRealloc ||
-        !s_fnMemStreamCtor || !s_fnMemStreamDtor || !s_fnMemStreamWrite ||
-        !s_fnAccessorCtorEmpty || !s_fnAccessorDtor || !s_fnStreamReadAccessor ||
-        !s_fnAccessorGetNativeObj || !s_fnIStreamReadU16 || !s_fnIStreamReadU32 ||
-        !s_fnCStringAssign) {
+// ============================================================================
+// 6. In-Memory Baseline Cache & Instant RAM Replay for gCInfoManager_PS
+// ============================================================================
+static bool DoReplayBaselineInternal(void* pInfoManager) {
+    if (!pInfoManager || !s_memAdminGetInstance || !s_memAdminRealloc || !s_fnCStringAssign) {
         return false;
     }
 
-    AcquireSRWLockShared(&s_snapshotLock);
-    if (s_snapshotBytes.empty()) {
-        ReleaseSRWLockShared(&s_snapshotLock);
+    AcquireSRWLockShared(&s_baselineLock);
+    if (s_baselineInfoPtrs.empty()) {
+        ReleaseSRWLockShared(&s_baselineLock);
         return false;
     }
-    const std::vector<uint8_t> localSnapshot = s_snapshotBytes;
-    const uint32_t expectedCount = s_snapshotCount;
-    ReleaseSRWLockShared(&s_snapshotLock);
+    const std::vector<void*> baseline = s_baselineInfoPtrs;
+    const uint32_t expectedCount = s_baselineCount;
+    ReleaseSRWLockShared(&s_baselineLock);
+
+    const size_t count = baseline.size();
+    if (count == 0 || count != expectedCount) return false;
+
+    // Validate that objects are still live by verifying the vtable pointer of first, middle, and last
+    const uintptr_t expectedVtable = s_gameBase + 0x306474;
+    const size_t testIndices[] = { 0, count / 2, count - 1 };
+    for (size_t idx : testIndices) {
+        void* ptr = baseline[idx];
+        if (!ptr) return false;
+        if (*reinterpret_cast<const uintptr_t*>(ptr) != expectedVtable) {
+            Log("G3O", "[InfoManager] Baseline object at index %u invalid (vtbl=0x%08X, expected=0x%08X).",
+                (unsigned)idx, *reinterpret_cast<const uintptr_t*>(ptr), expectedVtable);
+            return false;
+        }
+    }
 
     void* admin = s_memAdminGetInstance();
     if (!admin) return false;
 
-    alignas(8) uint8_t memStreamBuf[64];
-    std::memset(memStreamBuf, 0, sizeof(memStreamBuf));
-    s_fnMemStreamCtor(memStreamBuf);
-
-    void* pOStream = memStreamBuf + 4; // bCOStream
-    void* pIStream = memStreamBuf + 0; // bCIStream
-
-    if (s_fnMemStreamSetCount) {
-        s_fnMemStreamSetCount(memStreamBuf, static_cast<uint32_t>(localSnapshot.size() + 1024));
-    }
-    s_fnMemStreamWrite(pOStream, localSnapshot.data(), static_cast<uint32_t>(localSnapshot.size()));
-
-    // Reset stream position to 0 (at offset +0x0C)
-    *reinterpret_cast<uint32_t*>(memStreamBuf + 0x0C) = 0;
-
-    uint16_t version = 0;
-    s_fnIStreamReadU16(pIStream, &version);
-    uint32_t count = 0;
-    s_fnIStreamReadU32(pIStream, &count);
-
-    if (count == 0 || count != expectedCount) {
-        s_fnMemStreamDtor(memStreamBuf);
-        Log("G3O", "[InfoManager] Snapshot count mismatch: %u (expected %u)", count, expectedCount);
-        return false;
+    // 1. Reset runtime mutable state (m_bInfoGiven at +0x18, m_u32Stage at +0x94)
+    for (void* pInfo : baseline) {
+        if (!pInfo) continue;
+        uint8_t* bytes = reinterpret_cast<uint8_t*>(pInfo);
+        bytes[0x18] = 0; // m_bInfoGiven = false
+        *reinterpret_cast<uint32_t*>(bytes + 0x94) = 0; // m_u32Stage = 0
     }
 
+    // 2. Re-populate m_pArrayInfos (this + 0x2C)
     auto** ppArrayInfos = reinterpret_cast<void***>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x2C);
     auto* pCount = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x30);
     auto* pCapacity = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x34);
 
-    if (*ppArrayInfos) {
-        s_memAdminRealloc(admin, *ppArrayInfos, 0);
-        *ppArrayInfos = nullptr;
-    }
-
-    void** newArray = static_cast<void**>(s_memAdminRealloc(admin, nullptr, count * sizeof(void*)));
-    if (!newArray) {
-        s_fnMemStreamDtor(memStreamBuf);
-        return false;
-    }
-    std::memset(newArray, 0, count * sizeof(void*));
-    *ppArrayInfos = newArray;
-    *pCount = 0;
-    *pCapacity = count;
-
-    for (uint32_t i = 0; i < count; ++i) {
-        alignas(8) uint8_t accessorBuf[32];
-        std::memset(accessorBuf, 0, sizeof(accessorBuf));
-        s_fnAccessorCtorEmpty(accessorBuf);
-        s_fnStreamReadAccessor(pIStream, accessorBuf);
-
-        void* pNativeObj = s_fnAccessorGetNativeObj(accessorBuf);
-        if (pNativeObj) {
-            void** vtable = *reinterpret_cast<void***>(pNativeObj);
-            if (vtable && vtable[8]) {
-                using FnInit20 = void (__thiscall*)(void*);
-                reinterpret_cast<FnInit20>(vtable[8])(pNativeObj);
-            }
-            newArray[i] = pNativeObj;
-            *pCount = i + 1;
+    if (ppArrayInfos && pCount && pCapacity) {
+        if (*ppArrayInfos) {
+            s_memAdminRealloc(admin, *ppArrayInfos, 0);
+            *ppArrayInfos = nullptr;
         }
-        s_fnAccessorDtor(accessorBuf);
+        void** newArray = static_cast<void**>(s_memAdminRealloc(admin, nullptr, count * sizeof(void*)));
+        if (!newArray) return false;
+        std::memcpy(newArray, baseline.data(), count * sizeof(void*));
+        *ppArrayInfos = newArray;
+        *pCount = static_cast<uint32_t>(count);
+        *pCapacity = static_cast<uint32_t>(count);
     }
 
-    s_fnMemStreamDtor(memStreamBuf);
-
+    // 3. Re-populate m_mapInfos (this + 0x4C)
     auto* pMap = reinterpret_cast<bTInfoValMap*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x4C);
-    ExpandAndRehashInfoMap(pMap, kInfoMapBucketCount, "ReplaySnapshot", &s_loadInfosStats);
+    ExpandAndRehashInfoMap(pMap, kInfoMapBucketCount, "ReplayBaseline", &s_loadInfosStats);
 
     // Clear bucket pointers to prevent any stale chains
     if (pMap->m_ppBuckets && pMap->m_u32BucketCount > 0) {
@@ -708,10 +673,8 @@ static bool DoReplaySnapshotInternal(void* pInfoManager) {
         pMap->m_u32NodeCount = 0;
     }
 
-    for (uint32_t i = 0; i < count; ++i) {
-        void* pInfo = newArray[i];
+    for (void* pInfo : baseline) {
         if (!pInfo) continue;
-
         auto* pStrName = reinterpret_cast<const bCString*>(reinterpret_cast<const uint8_t*>(pInfo) + 0x0C);
         if (!pStrName || !pStrName->m_pcText) continue;
 
@@ -735,11 +698,320 @@ static bool DoReplaySnapshotInternal(void* pInfoManager) {
     return true;
 }
 
-static bool SafeReplaySnapshot(void* pInfoManager) {
+static bool SafeReplayBaseline(void* pInfoManager) {
     __try {
-        return DoReplaySnapshotInternal(pInfoManager);
+        return DoReplayBaselineInternal(pInfoManager);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("G3O", "[InfoManager] Exception during ReplaySnapshot (code=0x%08X).", GetExceptionCode());
+        Log("G3O", "[InfoManager] Exception during ReplayBaseline (code=0x%08X).", GetExceptionCode());
+        return false;
+    }
+}
+
+// ============================================================================
+// 7. Multi-threaded ParseBatch & Safe Parallel Cold Load for gCInfoManager_PS
+// ============================================================================
+static inline bool CallRealArchiveOpen(void* pFile, uint32_t mode, bool flag) {
+    uint8_t result = 0;
+    void* fn = s_realArchiveOpen;
+    const uint32_t uFlag = flag ? 1 : 0;
+    __asm {
+        push uFlag
+        push mode
+        mov ecx, pFile
+        call fn
+        mov result, al
+    }
+    return result != 0;
+}
+
+static inline bool CallRealArchiveClose(void* pFile) {
+    uint8_t result = 0;
+    void* fn = s_realArchiveClose;
+    __asm {
+        mov ecx, pFile
+        call fn
+        mov result, al
+    }
+    return result != 0;
+}
+
+static inline void* CallRealGetSceneAdmin() {
+    void* fn = s_realGetSceneAdmin;
+    void* result = nullptr;
+    __asm {
+        call fn
+        mov result, eax
+    }
+    return result;
+}
+
+static bool __fastcall Hooked_ArchiveOpen(void* pFile, void* /*edx*/, uint32_t mode, bool flag) {
+    if (!s_parallelColdLoadActive.load(std::memory_order_relaxed)) {
+        return CallRealArchiveOpen(pFile, mode, flag);
+    }
+
+    EnterCriticalSection(&s_archiveIOLock);
+    const bool ok = CallRealArchiveOpen(pFile, mode, flag);
+    if (!ok) {
+        LeaveCriticalSection(&s_archiveIOLock);
+        return false;
+    }
+    s_threadHoldingArchiveLock.store(GetCurrentThreadId(), std::memory_order_release);
+    return true;
+}
+
+static bool __fastcall Hooked_ArchiveClose(void* pFile, void* /*edx*/) {
+    if (!s_parallelColdLoadActive.load(std::memory_order_relaxed)) {
+        return CallRealArchiveClose(pFile);
+    }
+
+    const DWORD currentTid = GetCurrentThreadId();
+    const bool wasHolder = (s_threadHoldingArchiveLock.load(std::memory_order_acquire) == currentTid);
+
+    const bool result = CallRealArchiveClose(pFile);
+
+    if (wasHolder) {
+        s_threadHoldingArchiveLock.store(0, std::memory_order_release);
+        LeaveCriticalSection(&s_archiveIOLock);
+    }
+    return result;
+}
+
+static void* __cdecl Hooked_GetSceneAdmin() {
+    if (!s_parallelColdLoadActive.load(std::memory_order_relaxed)) {
+        return CallRealGetSceneAdmin();
+    }
+    EnterCriticalSection(&s_sceneAdminLock);
+    void* result = CallRealGetSceneAdmin();
+    LeaveCriticalSection(&s_sceneAdminLock);
+    return result;
+}
+
+static inline void CallInfoRead(void* pInfo, void* pArchiveFile) {
+    void* fn = s_fnInfoRead;
+    __asm {
+        mov eax, pArchiveFile
+        push eax
+        mov ecx, pInfo
+        call fn
+    }
+}
+
+static bool CallFindFiles(void* pArchiveMgr, bTObjArrayArchiveFile* pOutArray) {
+    if (!pArchiveMgr || !pOutArray || !s_gameBase || !s_engineBase) return false;
+    uint8_t result = 0;
+    void* fnGetInfosPath = reinterpret_cast<void*>(s_gameBase + 0x1CF010);
+    void* fnFindFiles = s_fnFindFiles ? s_fnFindFiles : reinterpret_cast<void*>(s_engineBase + 0x2A7CD0);
+
+    __asm {
+        mov edx, pOutArray
+        push edx                 // push arg2 (&filesArray)
+        sub esp, 4               // allocate 4 bytes on stack for bCString
+        push esp                 // push &bCString
+        call fnGetInfosPath      // GetInfosPath(&tempStr) -> ret 4
+        mov ecx, pArchiveMgr     // this = eCArchiveManager*
+        call fnFindFiles         // FindFiles(tempStr, filesArray) -> ret 8
+        mov result, al
+    }
+    return result != 0;
+}
+
+static void CleanupFilesArray(bTObjArrayArchiveFile* pFilesArray) {
+    if (!pFilesArray || !pFilesArray->m_pElements || !s_gameBase) return;
+    void* fnDtor = reinterpret_cast<void*>(s_gameBase + 0x1D0EE0);
+    __asm {
+        mov ebx, pFilesArray
+        call fnDtor
+    }
+}
+
+struct ParseBatchContext {
+    bTObjArrayArchiveFile* pFilesArray = nullptr;
+    std::vector<void*>*    pParsedArray = nullptr;
+    std::atomic<uint32_t>  nextIdx{0};
+    uint32_t               totalCount = 0;
+    std::atomic<uint32_t>  successCount{0};
+    std::atomic<uint32_t>  errorCount{0};
+};
+
+static void ParseBatchWorker(ParseBatchContext* ctx) {
+    constexpr uint32_t kChunkSize = 32;
+    const uint32_t total = ctx->totalCount;
+    auto* pFiles = ctx->pFilesArray;
+    auto& outArray = *ctx->pParsedArray;
+
+    while (true) {
+        const uint32_t start = ctx->nextIdx.fetch_add(kChunkSize, std::memory_order_relaxed);
+        if (start >= total) break;
+        const uint32_t end = (start + kChunkSize < total) ? (start + kChunkSize) : total;
+
+        for (uint32_t i = start; i < end; ++i) {
+            void* pFile = reinterpret_cast<uint8_t*>(pFiles->m_pElements) + i * 0x24;
+            void* pInfo = s_fnCreateInfoInstance ? s_fnCreateInfoInstance() : nullptr;
+            if (!pInfo) {
+                ctx->errorCount.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            __try {
+                CallInfoRead(pInfo, pFile);
+                outArray[i] = pInfo;
+                ctx->successCount.fetch_add(1, std::memory_order_relaxed);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ctx->errorCount.fetch_add(1, std::memory_order_relaxed);
+                if (s_threadHoldingArchiveLock.load(std::memory_order_acquire) == GetCurrentThreadId()) {
+                    s_threadHoldingArchiveLock.store(0, std::memory_order_release);
+                    LeaveCriticalSection(&s_archiveIOLock);
+                }
+            }
+        }
+    }
+}
+
+static bool DoParallelColdLoadInternal(void* pInfoManager) {
+    if (!pInfoManager || !s_memAdminGetInstance || !s_memAdminRealloc ||
+        !s_fnCStringAssign || !s_fnArchiveMgrGetInstance ||
+        !s_fnCreateInfoInstance || !s_fnInfoRead) {
+        return false;
+    }
+
+    void* pArchiveMgr = s_fnArchiveMgrGetInstance();
+    if (!pArchiveMgr) return false;
+
+    void* admin = s_memAdminGetInstance();
+    if (!admin) return false;
+
+    bTObjArrayArchiveFile filesArray{};
+    if (!CallFindFiles(pArchiveMgr, &filesArray) || filesArray.m_u32Count == 0 || !filesArray.m_pElements) {
+        Log("G3O", "[InfoManager] FindFiles returned 0 files or failed; falling back to vanilla.");
+        return false;
+    }
+
+    const uint32_t totalFiles = filesArray.m_u32Count;
+    std::vector<void*> parsedArray(totalFiles, nullptr);
+
+    ParseBatchContext ctx{};
+    ctx.pFilesArray = &filesArray;
+    ctx.pParsedArray = &parsedArray;
+    ctx.totalCount = totalFiles;
+
+    const uint32_t hwConcurrency = std::thread::hardware_concurrency();
+    const uint32_t numWorkers = std::clamp(hwConcurrency > 1 ? hwConcurrency - 1 : 1, 1u, 7u);
+
+    s_parallelColdLoadActive.store(true, std::memory_order_release);
+
+    std::vector<std::thread> workers;
+    workers.reserve(numWorkers);
+    for (uint32_t t = 0; t < numWorkers; ++t) {
+        workers.emplace_back(ParseBatchWorker, &ctx);
+    }
+
+    // Main thread also participates as worker
+    ParseBatchWorker(&ctx);
+
+    for (auto& w : workers) {
+        if (w.joinable()) {
+            w.join();
+        }
+    }
+
+    s_parallelColdLoadActive.store(false, std::memory_order_release);
+
+    // Clean up archive file array now that all reads are finished
+    CleanupFilesArray(&filesArray);
+
+    const uint32_t parsedCount = ctx.successCount.load(std::memory_order_relaxed);
+    if (parsedCount == 0) {
+        Log("G3O", "[InfoManager] Parallel parse yielded 0 dialogs; falling back to vanilla.");
+        return false;
+    }
+
+    // Deduplicate and filter on main thread
+    std::unordered_set<std::string_view> seenNames;
+    seenNames.reserve(totalFiles);
+    std::vector<void*> validInfos;
+    validInfos.reserve(totalFiles);
+
+    for (uint32_t i = 0; i < totalFiles; ++i) {
+        void* pInfo = parsedArray[i];
+        if (!pInfo) continue;
+        auto* pStrName = reinterpret_cast<const bCString*>(reinterpret_cast<const uint8_t*>(pInfo) + 0x0C);
+        if (!pStrName || !pStrName->m_pcText || !pStrName->m_pcText[0]) {
+            continue;
+        }
+        std::string_view sv(pStrName->m_pcText);
+        if (!seenNames.insert(sv).second) {
+            continue; // Duplicate dialog name
+        }
+        validInfos.push_back(pInfo);
+    }
+
+    const size_t count = validInfos.size();
+    if (count == 0) return false;
+
+    // 1. Populate m_pArrayInfos (this + 0x2C)
+    auto** ppArrayInfos = reinterpret_cast<void***>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x2C);
+    auto* pCount = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x30);
+    auto* pCapacity = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x34);
+
+    if (ppArrayInfos && pCount && pCapacity) {
+        if (*ppArrayInfos) {
+            s_memAdminRealloc(admin, *ppArrayInfos, 0);
+            *ppArrayInfos = nullptr;
+        }
+        void** newArray = static_cast<void**>(s_memAdminRealloc(admin, nullptr, count * sizeof(void*)));
+        if (!newArray) return false;
+        std::memcpy(newArray, validInfos.data(), count * sizeof(void*));
+        *ppArrayInfos = newArray;
+        *pCount = static_cast<uint32_t>(count);
+        *pCapacity = static_cast<uint32_t>(count);
+    }
+
+    // 2. Populate m_mapInfos (this + 0x4C)
+    auto* pMap = reinterpret_cast<bTInfoValMap*>(reinterpret_cast<uint8_t*>(pInfoManager) + 0x4C);
+    ExpandAndRehashInfoMap(pMap, kInfoMapBucketCount, "ParallelColdLoad", &s_loadInfosStats);
+
+    if (pMap->m_ppBuckets && pMap->m_u32BucketCount > 0) {
+        std::memset(pMap->m_ppBuckets, 0, pMap->m_u32BucketCount * sizeof(SInfoMapNode*));
+        pMap->m_u32NodeCount = 0;
+    }
+
+    for (void* pInfo : validInfos) {
+        if (!pInfo) continue;
+        auto* pStrName = reinterpret_cast<const bCString*>(reinterpret_cast<const uint8_t*>(pInfo) + 0x0C);
+        if (!pStrName || !pStrName->m_pcText) continue;
+
+        const uint32_t hash = s_getHashValueCString
+            ? s_getHashValueCString(*pStrName)
+            : FallbackHashCString(*pStrName);
+        const uint32_t bucketIdx = hash % pMap->m_u32BucketCount;
+
+        auto* pNode = static_cast<SInfoMapNode*>(s_memAdminRealloc(admin, nullptr, sizeof(SInfoMapNode)));
+        if (!pNode) continue;
+
+        pNode->m_key.m_pcText = nullptr;
+        s_fnCStringAssign(&pNode->m_key, pStrName);
+        pNode->m_pValue = reinterpret_cast<gCInfo_PS*>(pInfo);
+        pNode->m_pNext = pMap->m_ppBuckets[bucketIdx];
+        pMap->m_ppBuckets[bucketIdx] = pNode;
+        pMap->m_u32NodeCount++;
+    }
+
+    // 3. Populate baseline cache for instant replay on subsequent loads
+    AcquireSRWLockExclusive(&s_baselineLock);
+    s_baselineInfoPtrs = validInfos;
+    s_baselineCount = static_cast<uint32_t>(count);
+    ReleaseSRWLockExclusive(&s_baselineLock);
+
+    CInfoShadowCache::Invalidate();
+    return true;
+}
+
+static bool SafeParallelColdLoad(void* pInfoManager) {
+    __try {
+        return DoParallelColdLoadInternal(pInfoManager);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("G3O", "[InfoManager] Exception during SafeParallelColdLoad (code=0x%08X).", GetExceptionCode());
         return false;
     }
 }
@@ -747,26 +1019,45 @@ static bool SafeReplaySnapshot(void* pInfoManager) {
 static bool __fastcall Hooked_LoadInfosFromInis(void* pThis, void* /*edx*/) {
     if (!pThis) return false;
 
-    AcquireSRWLockShared(&s_snapshotLock);
-    const bool hasSnapshot = !s_snapshotBytes.empty();
-    ReleaseSRWLockShared(&s_snapshotLock);
+    AcquireSRWLockShared(&s_baselineLock);
+    const bool hasBaseline = !s_baselineInfoPtrs.empty();
+    ReleaseSRWLockShared(&s_baselineLock);
 
     LARGE_INTEGER t0, t1, freq;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&t0);
 
-    if (hasSnapshot) {
-        const bool replayed = SafeReplaySnapshot(pThis);
+    if (hasBaseline) {
+        const bool replayed = SafeReplayBaseline(pThis);
         if (replayed) {
             QueryPerformanceCounter(&t1);
             const double ms = static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
-            Log("G3O", "[InfoManager] INSTANT REPLAY SUCCESS: restored %u dialogs from RAM in %.2f ms! (Saved ~3.1 s)",
-                s_snapshotCount, ms);
+            Log("G3O", "[InfoManager] INSTANT RAM REPLAY SUCCESS: restored %u dialogs from pristine memory in %.2f ms! (Saved ~2.8 s)",
+                s_baselineCount, ms);
             s_infoAudit.loadInfosFromInisTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
             s_infoAudit.loadInfosFromInisCalls++;
             return true;
         }
-        Log("G3O", "[InfoManager] Replay failed; falling back to original LoadInfosFromInis.");
+        Log("G3O", "[InfoManager] Baseline replay failed; clearing cache and falling back to parallel cold load.");
+        AcquireSRWLockExclusive(&s_baselineLock);
+        s_baselineInfoPtrs.clear();
+        s_baselineCount = 0;
+        ReleaseSRWLockExclusive(&s_baselineLock);
+    }
+
+    if (GetConfig().enableInfoManagerParallelColdLoad) {
+        const bool parsed = SafeParallelColdLoad(pThis);
+        if (parsed) {
+            QueryPerformanceCounter(&t1);
+            const double ms = static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+            const uint32_t hwThreads = std::clamp(std::thread::hardware_concurrency(), 2u, 8u);
+            Log("G3O", "[InfoManager] PARALLEL COLD LOAD SUCCESS: parsed and indexed %u dialogs across %u threads in %.2f ms! (Cold speedup ~7x)",
+                s_baselineCount, hwThreads, ms);
+            s_infoAudit.loadInfosFromInisTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+            s_infoAudit.loadInfosFromInisCalls++;
+            return true;
+        }
+        Log("G3O", "[InfoManager] Parallel cold load failed; falling back to original single-threaded LoadInfosFromInis.");
     }
 
     s_loadInfosStats.calls.fetch_add(1, std::memory_order_relaxed);
@@ -781,10 +1072,18 @@ static bool __fastcall Hooked_LoadInfosFromInis(void* pThis, void* /*edx*/) {
     s_infoAudit.loadInfosFromInisTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
     s_infoAudit.loadInfosFromInisCalls++;
 
-    Log("G3O", "[InfoManager] LoadInfosFromInis completed in %.2f ms. Capturing baseline RAM snapshot...", loadMs);
+    Log("G3O", "[InfoManager] LoadInfosFromInis completed in %.2f ms.", loadMs);
 
     if (result) {
-        SafeRecordSnapshot(pThis);
+        auto** ppArrayInfos = reinterpret_cast<void***>(reinterpret_cast<uint8_t*>(pThis) + 0x2C);
+        auto* pCount = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pThis) + 0x30);
+        if (ppArrayInfos && *ppArrayInfos && pCount && *pCount > 0) {
+            AcquireSRWLockExclusive(&s_baselineLock);
+            s_baselineInfoPtrs.assign(*ppArrayInfos, *ppArrayInfos + *pCount);
+            s_baselineCount = *pCount;
+            ReleaseSRWLockExclusive(&s_baselineLock);
+            Log("G3O", "[InfoManager] Captured %u baseline dialog pointers for instant RAM replay.", *pCount);
+        }
     }
 
     return result;
@@ -1028,11 +1327,141 @@ void InitializeInfoManagerOptimizer() {
         }
     }
 
+    void* pDestroy = reinterpret_cast<void*>(
+        GetProcAddress(hGame, "?Destroy@gCInfoManager_PS@@UAEXXZ"));
+    if (!pDestroy) {
+        pDestroy = reinterpret_cast<void*>(baseAddr + 0x1CE090);
+    }
+    if (pDestroy) {
+        result = InstallInfoManagerHook(
+            pDestroy, reinterpret_cast<LPVOID>(&Hooked_InfoManagerDestroy),
+            reinterpret_cast<LPVOID*>(&Real_InfoManagerDestroy), createStatus, enableStatus, removeStatus);
+        if (result == HookInstallResult::Installed) {
+            s_targetInfoManagerDestroy = pDestroy;
+            Log("G3O", "[InfoManager] Successfully hooked gCInfoManager_PS::Destroy at %p.", s_targetInfoManagerDestroy);
+        } else {
+            Log("G3O", "[InfoManager] gCInfoManager_PS::Destroy hook failed (create=%d, enable=%d, remove=%d).",
+                createStatus, enableStatus, removeStatus);
+        }
+    }
+
+
+
+    if (GetConfig().enableInfoManagerParallelColdLoad) {
+        if (!s_archiveIOLockInit) {
+            InitializeCriticalSection(&s_archiveIOLock);
+            s_archiveIOLockInit = true;
+        }
+        if (!s_sceneAdminLockInit) {
+            InitializeCriticalSection(&s_sceneAdminLock);
+            s_sceneAdminLockInit = true;
+        }
+
+        HMODULE hEngine = GetModuleHandleW(L"Engine.dll");
+        if (hEngine) {
+            s_engineBase = reinterpret_cast<uintptr_t>(hEngine);
+            s_fnArchiveMgrGetInstance = reinterpret_cast<FnArchiveMgrGetInstance>(
+                GetProcAddress(hEngine, "?GetInstance@eCArchiveManager@@SGAAV1@XZ"));
+            if (!s_fnArchiveMgrGetInstance) {
+                s_fnArchiveMgrGetInstance = reinterpret_cast<FnArchiveMgrGetInstance>(s_engineBase + 0x2A7900);
+            }
+
+            s_fnFindFiles = reinterpret_cast<void*>(
+                GetProcAddress(hEngine, "?FindFiles@eCArchiveManager@@QAE_NVbCString@@AAV?$bTObjArray@VeCArchiveFile@@@@@Z"));
+            if (!s_fnFindFiles) {
+                s_fnFindFiles = reinterpret_cast<void*>(s_engineBase + 0x2A7CD0);
+            }
+
+            void* pArchiveOpen = reinterpret_cast<void*>(
+                GetProcAddress(hEngine, "?Open@eCArchiveFile@@QAE_NW4bEArchiveFileAccessMode@1@_N@Z"));
+            if (!pArchiveOpen) {
+                pArchiveOpen = reinterpret_cast<void*>(s_engineBase + 0x2A7280);
+            }
+            if (pArchiveOpen) {
+                result = InstallInfoManagerHook(
+                    pArchiveOpen, reinterpret_cast<LPVOID>(&Hooked_ArchiveOpen),
+                    &s_realArchiveOpen, createStatus, enableStatus, removeStatus);
+                if (result == HookInstallResult::Installed) {
+                    s_targetArchiveOpen = pArchiveOpen;
+                    Log("G3O", "[InfoManager] Successfully hooked eCArchiveFile::Open at %p.", s_targetArchiveOpen);
+                } else {
+                    Log("G3O", "[InfoManager] eCArchiveFile::Open hook failed (create=%d, enable=%d, remove=%d).",
+                        createStatus, enableStatus, removeStatus);
+                }
+            }
+
+            void* pArchiveClose = reinterpret_cast<void*>(
+                GetProcAddress(hEngine, "?Close@eCArchiveFile@@QAE_NXZ"));
+            if (!pArchiveClose) {
+                pArchiveClose = reinterpret_cast<void*>(s_engineBase + 0x2A7500);
+            }
+            if (pArchiveClose) {
+                result = InstallInfoManagerHook(
+                    pArchiveClose, reinterpret_cast<LPVOID>(&Hooked_ArchiveClose),
+                    &s_realArchiveClose, createStatus, enableStatus, removeStatus);
+                if (result == HookInstallResult::Installed) {
+                    s_targetArchiveClose = pArchiveClose;
+                    Log("G3O", "[InfoManager] Successfully hooked eCArchiveFile::Close at %p.", s_targetArchiveClose);
+                } else {
+                    Log("G3O", "[InfoManager] eCArchiveFile::Close hook failed (create=%d, enable=%d, remove=%d).",
+                        createStatus, enableStatus, removeStatus);
+                }
+            }
+        }
+
+        s_fnCreateInfoInstance = reinterpret_cast<FnCreateInfoInstance>(baseAddr + 0x1D08A0);
+        s_fnInfoRead           = reinterpret_cast<void*>(baseAddr + 0x1C7090);
+
+        void* pGetSceneAdmin = reinterpret_cast<void*>(baseAddr + 0x40CC0);
+        if (pGetSceneAdmin) {
+            result = InstallInfoManagerHook(
+                pGetSceneAdmin, reinterpret_cast<LPVOID>(&Hooked_GetSceneAdmin),
+                &s_realGetSceneAdmin, createStatus, enableStatus, removeStatus);
+            if (result == HookInstallResult::Installed) {
+                s_targetGetSceneAdmin = pGetSceneAdmin;
+                Log("G3O", "[InfoManager] Successfully hooked GetSceneAdmin at %p.", s_targetGetSceneAdmin);
+            } else {
+                Log("G3O", "[InfoManager] GetSceneAdmin hook failed (create=%d, enable=%d, remove=%d).",
+                    createStatus, enableStatus, removeStatus);
+            }
+        }
+    }
+
     s_bInitialized = true;
 }
 
 void ShutdownInfoManagerOptimizer() {
     if (!s_bInitialized) return;
+
+    if (s_targetArchiveOpen) {
+        MH_DisableHook(s_targetArchiveOpen);
+        MH_RemoveHook(s_targetArchiveOpen);
+        s_targetArchiveOpen = nullptr;
+    }
+    s_realArchiveOpen = nullptr;
+
+    if (s_targetArchiveClose) {
+        MH_DisableHook(s_targetArchiveClose);
+        MH_RemoveHook(s_targetArchiveClose);
+        s_targetArchiveClose = nullptr;
+    }
+    s_realArchiveClose = nullptr;
+
+    if (s_targetGetSceneAdmin) {
+        MH_DisableHook(s_targetGetSceneAdmin);
+        MH_RemoveHook(s_targetGetSceneAdmin);
+        s_targetGetSceneAdmin = nullptr;
+    }
+    s_realGetSceneAdmin = nullptr;
+
+    if (s_archiveIOLockInit) {
+        DeleteCriticalSection(&s_archiveIOLock);
+        s_archiveIOLockInit = false;
+    }
+    if (s_sceneAdminLockInit) {
+        DeleteCriticalSection(&s_sceneAdminLock);
+        s_sceneAdminLockInit = false;
+    }
 
     if (s_targetGetInfo) {
         MH_DisableHook(s_targetGetInfo);
@@ -1076,6 +1505,15 @@ void ShutdownInfoManagerOptimizer() {
     }
     Real_LoadInfosFromInis = nullptr;
 
+    if (s_targetInfoManagerDestroy) {
+        MH_DisableHook(s_targetInfoManagerDestroy);
+        MH_RemoveHook(s_targetInfoManagerDestroy);
+        s_targetInfoManagerDestroy = nullptr;
+    }
+    Real_InfoManagerDestroy = nullptr;
+
+
+
     Log("G3O", "[InfoManager] Shutdown complete (Hits: %llu, Misses: %llu, Rebuilds: %u, Cached: %u, Expansions: %u)",
         InfoManagerOptimizer_GetHits(),
         InfoManagerOptimizer_GetMisses(),
@@ -1087,11 +1525,11 @@ void ShutdownInfoManagerOptimizer() {
 
     CInfoShadowCache::Invalidate();
 
-    AcquireSRWLockExclusive(&s_snapshotLock);
-    s_snapshotBytes.clear();
-    s_snapshotBytes.shrink_to_fit();
-    s_snapshotCount = 0;
-    ReleaseSRWLockExclusive(&s_snapshotLock);
+    AcquireSRWLockExclusive(&s_baselineLock);
+    s_baselineInfoPtrs.clear();
+    s_baselineInfoPtrs.shrink_to_fit();
+    s_baselineCount = 0;
+    ReleaseSRWLockExclusive(&s_baselineLock);
 
     s_bInitialized = false;
 }

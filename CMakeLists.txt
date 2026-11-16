@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima VERSION 1.7.1 LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.8.0 LANGUAGES C CXX)
 
 configure_file(src/g3o_build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/g3o_build_info.h @ONLY)
 
@@ -103,6 +103,8 @@ add_library(dinput8 SHARED
 
     src/info_manager_optimizer.cpp
     src/info_manager_optimizer.h
+    src/dynamic_layer_optimizer.cpp
+    src/dynamic_layer_optimizer.h
     src/session_start_policy.h
     src/session_start_optimizer.cpp
     src/session_start_optimizer.h
