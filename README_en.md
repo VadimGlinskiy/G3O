@@ -133,12 +133,6 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
 * **`EnableEntitySearchOptimizer`** (default `true`)<br>
   Optimizes entity component lookups with fast-path early exit.
 
-* **`EnableInfoManagerOptimizer`** (default `true`)<br>
-  Accelerates dialogue resolution using a hash table, removing micro-stutters when approaching NPCs and opening dialogue screens.
-
-* **`EnableInfoManagerParallelColdLoad`** (default `false`)<br>
-  Multi-threaded parser for the initial ("cold") loading of `InfoManager` dialogs across CPU cores. Kept off by default for maximum stability, as G3O's built-in O(1) Shadow Table cache and fast RAM-replay already deliver instantaneous dialog loading (~3 ms) on subsequent loads.
-
 * **`EnableNavigationOptimizer`** (default `true`)<br>
   Optimizes pathfinding lookups, cutting CPU overhead during navigation updates in gameplay and loading.
 

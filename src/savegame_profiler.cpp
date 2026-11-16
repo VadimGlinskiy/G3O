@@ -16,7 +16,6 @@
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
 
-#include "info_manager_optimizer.h"
 #include "dynamic_layer_optimizer.h"
 #include "pak_tracer.h"
 #include "pak_read_at.h"
@@ -1076,12 +1075,6 @@ static void LogLoadReport(double totalSec) {
     Log("G3O", "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)",
         ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
 
-    Log("G3O", "  - Info Manager Dialog Cache:      %llu hits, %llu misses, %u rebuilds (cached %u dialogs, %u expansions)",
-        InfoManagerOptimizer_GetHits(), InfoManagerOptimizer_GetMisses(),
-        InfoManagerOptimizer_GetRebuilds(), InfoManagerOptimizer_GetIndexedCount(),
-        InfoManagerOptimizer_GetBucketExpansions());
-    InfoManagerOptimizer_LogStats();
-
     Log("G3O", "================================================================================");
 
     FILE* fp = nullptr;
@@ -1196,10 +1189,6 @@ static void LogLoadReport(double totalSec) {
         fprintf(fp, "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)\n",
             ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
 
-        fprintf(fp, "  - Info Manager Dialog Cache:      %llu hits, %llu misses, %u rebuilds (cached %u dialogs, %u expansions)\n",
-            InfoManagerOptimizer_GetHits(), InfoManagerOptimizer_GetMisses(),
-            InfoManagerOptimizer_GetRebuilds(), InfoManagerOptimizer_GetIndexedCount(),
-            InfoManagerOptimizer_GetBucketExpansions());
         fprintf(fp, "================================================================================\n");
         fclose(fp);
     }

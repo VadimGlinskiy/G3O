@@ -34,7 +34,8 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
     output.AppendFormat(
         "EnableSharedBaseOptimizations=%s\nEnableEntitySearchOptimizer=%s\nEnableFastPakDecompressor=%s\nEnableLayerRingArena=%s\nEnablePropertyCache=%s\nEnablePakPrefetch=%s\n"
         "EnableFrustumDatabaseOptimizer=%s\nEnableHashProxyOptimizer=%s\nEnableNavigationOptimizer=%s\n"
-        "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\nEnableInfoManagerOptimizer=%s\n"
+        "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\n"
+        "EnableParallelDynamicLayers=%s\n"
         "EnableSessionStartOptimizer=%s\nSessionStartSleepMs=%u\n"
         "EnableD3D9StateFilter=%s\nEnableFastTextureLoader=%s\nEnableVegetationOptimizer=%s\nEnableAdaptiveTreeShadows=%s\n"
         "TreeShadowDistance=%.9g\nVegetationGridRangeClamp=%.9g\n"
@@ -54,7 +55,7 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.enableSceneNodeOptimizer ? "true" : "false",
         config.enableShadowOptimizer ? "true" : "false",
         config.enableClassFactoryOptimizer ? "true" : "false",
-        config.enableInfoManagerOptimizer ? "true" : "false",
+        config.enableParallelDynamicLayers ? "true" : "false",
         config.enableSessionStartOptimizer ? "true" : "false",
         config.sessionStartSleepMs,
         config.enableD3D9StateFilter ? "true" : "false",

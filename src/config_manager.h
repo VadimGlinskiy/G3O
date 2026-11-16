@@ -40,8 +40,6 @@ struct Config {
     bool enableShadowOptimizer = true;
     bool enableClassFactoryOptimizer = true;
 
-    bool enableInfoManagerOptimizer = true;
-    bool enableInfoManagerParallelColdLoad = false;
     bool enableParallelDynamicLayers = true;
     bool enableSessionStartOptimizer = true;
     uint32_t sessionStartSleepMs = 1;

@@ -126,6 +126,8 @@ int main() {
                  "generated INI should not expose the no-op watermark setting");
     ok &= Expect(text.find("EnableQuestLoadOptimizer=") == std::string::npos,
                  "generated INI should not expose quest checks that return false during save loading");
+    ok &= Expect(text.find("EnableInfoManagerOptimizer=") == std::string::npos,
+                 "generated INI should not expose the removed InfoManager optimizer");
     ok &= Expect(text.find("EnableInfoManagerBinaryCache=") == std::string::npos,
                  "generated INI should not expose the removed compiled-info cache");
     ok &= Expect(text.find("без проверки контрольной суммы zlib") != std::string::npos,
