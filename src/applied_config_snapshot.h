@@ -33,7 +33,7 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
     output.Append("[Performance]\n");
     output.AppendFormat(
         "EnableSharedBaseOptimizations=%s\nEnableEntitySearchOptimizer=%s\nEnableFastPakDecompressor=%s\nEnableLayerRingArena=%s\nEnablePropertyCache=%s\nEnablePakPrefetch=%s\n"
-        "EnableFrustumDatabaseOptimizer=%s\nEnableHashProxyOptimizer=%s\nEnableNavigationOptimizer=%s\n"
+        "EnableFrustumDatabaseOptimizer=%s\n"
         "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\n"
         "EnableParallelDynamicLayers=%s\n"
         "EnableSessionStartOptimizer=%s\nSessionStartSleepMs=%u\n"
@@ -50,8 +50,6 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.enableLayerRingArena ? "true" : "false",
         config.enablePropertyCache ? "true" : "false", config.enablePakPrefetch ? "true" : "false",
         config.enableFrustumDatabaseOptimizer ? "true" : "false",
-        config.enableHashProxyOptimizer ? "true" : "false",
-        config.enableNavigationOptimizer ? "true" : "false",
         config.enableSceneNodeOptimizer ? "true" : "false",
         config.enableShadowOptimizer ? "true" : "false",
         config.enableClassFactoryOptimizer ? "true" : "false",

@@ -124,17 +124,11 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
 * **`EnableSceneNodeOptimizer`** (default `true`)<br>
   Pre-allocates scene node child arrays in stepped blocks (1024 -> 8192 -> 32768) rather than the engine's incremental 25% growth, eliminating cascading reallocations in heavily populated cities.
 
-* **`EnableHashProxyOptimizer`** (default `true`)<br>
-  Fast entity template lookup by name. Caches templates in memory to avoid linear list traversals when spawning items, monsters, and NPCs.
-
 * **`EnableClassFactoryOptimizer`** (default `true`)<br>
   Class factory caching. Caches reflection type descriptors and reuses string buffers, eliminating tens of thousands of memory allocations during sector deserialization.
 
 * **`EnableEntitySearchOptimizer`** (default `true`)<br>
   Optimizes entity component lookups with fast-path early exit.
-
-* **`EnableNavigationOptimizer`** (default `true`)<br>
-  Optimizes pathfinding lookups, cutting CPU overhead during navigation updates in gameplay and loading.
 
 #### 3. Graphics, Draw Distance & Atmosphere
 

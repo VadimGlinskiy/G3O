@@ -10,8 +10,6 @@
 #include "property_cache_optimizer.h"
 #include "vfs_cache_optimizer.h"
 #include "frustum_database_optimizer.h"
-#include "hash_proxy_optimizer.h"
-#include "template_cache_policy.h"
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
@@ -1066,8 +1064,6 @@ static void LogLoadReport(double totalSec) {
         totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
     Log("G3O", "  - Frustum Spatial Updates:        %u calls batched -> %u flushed (%u deletions guarded)",
         FrustumOptimizer_GetDeferredCalls(), FrustumOptimizer_GetFlushedUpdates(), FrustumOptimizer_GetDeletionsHandled());
-    Log("G3O", "  - String Hash & Template Cache:   %u fast hashes | %u proxy hits (%u neg hits), %u misses",
-        HashProxy_GetHashHits(), HashProxy_GetProxyHits(), HashProxy_GetProxyNegHits(), HashProxy_GetProxyMisses());
     Log("G3O", "  - Scene Node Preallocations:      %u sector root nodes expanded to 1024-32768",
         SceneNodeOptimizer_GetPreallocations());
     Log("G3O", "  - Directional Shadow Casters:     %u fast adds (%u duplicates avoided), %u fast removes (memmove bypassed)",
@@ -1180,8 +1176,6 @@ static void LogLoadReport(double totalSec) {
             totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
         fprintf(fp, "  - Frustum Spatial Updates:        %u calls batched -> %u flushed (%u deletions guarded)\n",
             FrustumOptimizer_GetDeferredCalls(), FrustumOptimizer_GetFlushedUpdates(), FrustumOptimizer_GetDeletionsHandled());
-        fprintf(fp, "  - String Hash & Template Cache:   %u fast hashes | %u proxy hits (%u neg hits), %u misses\n",
-            HashProxy_GetHashHits(), HashProxy_GetProxyHits(), HashProxy_GetProxyNegHits(), HashProxy_GetProxyMisses());
         fprintf(fp, "  - Scene Node Preallocations:      %u sector root nodes expanded to 1024-32768\n",
             SceneNodeOptimizer_GetPreallocations());
         fprintf(fp, "  - Directional Shadow Casters:     %u fast adds (%u duplicates avoided), %u fast removes (memmove bypassed)\n",
@@ -1338,8 +1332,6 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     ProfilerSetGameplayReady(false);
     SetEnginePhase(Phase_PreLoad_SysDyn);
     s_isLoadActive = true;
-    HashProxy_InvalidateNegativeCache();
-    FastTemplateCache::ClearAll();
     s_layerAuditMetrics = {};
     s_pvsPrefetchMetrics = {};
     s_capturePvsPrefetchMetrics = false;
@@ -1867,7 +1859,6 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
     // Batch frustum updates across both GotoLoadedPosition and Session::Start.
     // Flushed at the end of Session::Start before gameplay begins.
     FrustumOptimizer_BeginDefer();
-    HashProxy_InvalidateNegativeCache();
     Real_GotoLoadedPosition(pThis, pEntity, a);
 
     s_capturePvsPrefetchMetrics = wasCapturingPvsMetrics;

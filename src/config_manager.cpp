@@ -154,14 +154,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Откладывает частые мелкие перерасчеты и применяет их пачкой, сокращая время загрузочного экрана.\n"
         << "EnableFrustumDatabaseOptimizer=true\n"
         << "\n"
-        << "; Быстрый поиск шаблонов игровых сущностей по имени.\n"
-        << "; Кэширует шаблоны в памяти, избавляя движок от долгого перебора списков при спавне NPC, монстров и предметов.\n"
-        << "EnableHashProxyOptimizer=true\n"
-        << "\n"
-        << "; Оптимизация навигации.\n"
-        << "; Устраняет холостые накладные расходы при обработке путей перемещения NPC во время игры и загрузки.\n"
-        << "EnableNavigationOptimizer=true\n"
-        << "\n"
         << "; Оптимизация работы с большими секторами мира.\n"
         << "; Когда массив дочерних узлов сцены заполнен и содержит не менее 64 элементов, заранее увеличивает вместимость до 1024, 8192 или 32768.\n"
         << "; Предотвращает миллионы повторных выделений памяти при загрузке мира.\n"
@@ -372,8 +364,6 @@ void LoadConfig() {
     s_config.enablePropertyCache = ReadIniBool("Performance", "EnablePropertyCache", true, path);
     s_config.enablePakPrefetch = ReadIniBool("Performance", "EnablePakPrefetch", true, path);
     s_config.enableFrustumDatabaseOptimizer = ReadIniBool("Performance", "EnableFrustumDatabaseOptimizer", true, path);
-    s_config.enableHashProxyOptimizer = ReadIniBool("Performance", "EnableHashProxyOptimizer", true, path);
-    s_config.enableNavigationOptimizer = ReadIniBool("Performance", "EnableNavigationOptimizer", true, path);
     s_config.enableSceneNodeOptimizer = ReadIniBool("Performance", "EnableSceneNodeOptimizer", true, path);
     s_config.enableShadowOptimizer = ReadIniBool("Performance", "EnableShadowOptimizer", true, path);
     s_config.enableClassFactoryOptimizer = ReadIniBool("Performance", "EnableClassFactoryOptimizer", true, path);

@@ -16,8 +16,6 @@
 #include "property_cache_optimizer.h"
 #include "entity_search_optimizer.h"
 #include "frustum_database_optimizer.h"
-#include "hash_proxy_optimizer.h"
-#include "navigation_optimizer.h"
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
 #include "class_factory_optimizer.h"
@@ -144,19 +142,9 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeVFSCacheOptimizer();
     }
 
-    // Hash & Proxy Optimizer: Fast djb2 string hashing & template entity proxy resolution (Phase 1)
-    if (cfg.enableHashProxyOptimizer) {
-        G3O::InitializeHashProxyOptimizer();
-    }
-
     // Frustum Database Optimizer: Deferred spatial tree updates during entity streaming (Phase 3)
     if (cfg.enableFrustumDatabaseOptimizer) {
         G3O::InitializeFrustumDatabaseOptimizer();
-    }
-
-    // Navigation Optimizer: Suppress redundant nav-mesh iterations during save loading
-    if (cfg.enableNavigationOptimizer) {
-        G3O::InitializeNavigationOptimizer();
     }
 
     // Scene Node Optimizer: Preallocate m_ppChildren in eCNode::AttachChild for massive sectors (SysDyn)
@@ -255,7 +243,6 @@ static void ShutdownOptima() {
     G3O::ShutdownEntitySearchOptimizer();
     G3O::ShutdownPropertyCacheOptimizer();
     G3O::ShutdownFrustumDatabaseOptimizer();
-    G3O::ShutdownHashProxyOptimizer();
     G3O::ShutdownSceneNodeOptimizer();
     G3O::ShutdownShadowCasterOptimizer();
     G3O::ShutdownClassFactoryOptimizer();
@@ -263,7 +250,6 @@ static void ShutdownOptima() {
     G3O::ShutdownSessionStartOptimizer();
     G3O::ShutdownSelectiveCullingOptimizer();
     G3O::ShutdownFogOptimizer();
-    G3O::ShutdownNavigationOptimizer();
     G3O::ShutdownVFSCacheOptimizer();
     G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();

@@ -34,8 +34,6 @@ struct Config {
     bool enablePropertyCache = true;
     bool enablePakPrefetch = true;
     bool enableFrustumDatabaseOptimizer = true;
-    bool enableHashProxyOptimizer = true;
-    bool enableNavigationOptimizer = true;
     bool enableSceneNodeOptimizer = true;
     bool enableShadowOptimizer = true;
     bool enableClassFactoryOptimizer = true;

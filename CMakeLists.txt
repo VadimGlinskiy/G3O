@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Gothic3Optima VERSION 1.8.1 LANGUAGES C CXX)
+project(Gothic3Optima VERSION 1.8.2 LANGUAGES C CXX)
 
 configure_file(src/g3o_build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/g3o_build_info.h @ONLY)
 
@@ -86,12 +86,6 @@ add_library(dinput8 SHARED
     src/frustum_database_policy.h
     src/frustum_database_optimizer.cpp
     src/frustum_database_optimizer.h
-    src/fast_djb2.h
-    src/template_cache_policy.h
-    src/hash_proxy_optimizer.cpp
-    src/hash_proxy_optimizer.h
-    src/navigation_optimizer.cpp
-    src/navigation_optimizer.h
     src/scene_node_optimizer.cpp
     src/scene_node_optimizer.h
     src/shadow_caster_policy.h
