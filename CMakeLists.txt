@@ -81,6 +81,8 @@ add_library(dinput8 SHARED
     src/decompressor_avx2.h
     src/fast_pak_decompressor.cpp
     src/fast_pak_decompressor.h
+    src/static_slab_arena.cpp
+    src/static_slab_arena.h
     src/layer_ring_arena.cpp
     src/layer_ring_arena.h
     src/frustum_database_policy.h

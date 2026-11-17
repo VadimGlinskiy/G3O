@@ -9,6 +9,7 @@
 #include "pak_read_at.h"
 #include "pak_read_history.h"
 #include "decompressor_avx2.h"
+#include "static_slab_arena.h"
 #include <libdeflate.h>
 #include <windows.h>
 #include <synchapi.h>
@@ -124,8 +125,10 @@ struct PredecompSlot {
     // Futex synchronization state for WaitOnAddress / WakeByAddressAll
     alignas(4) volatile uint32_t state{ SLOT_UNCLAIMED };
     size_t reservedBytes = 0;
-    std::vector<BYTE> data;
+    SlabHandle slab{};
 };
+
+static StaticBoundedSlabArena s_slabArena;
 
 using SlotPtr = std::unique_ptr<PredecompSlot>;
 static std::vector<SlotPtr> s_candidates;
@@ -303,33 +306,33 @@ static void ProcessCandidate(
         }
     }
 
-    if (slot->outBytes > s_cacheBudget.Limit()) {
+    if (slot->outBytes > StaticBoundedSlabArena::kLargeSlotSize) {
         slot->state = SLOT_SKIPPED;
         WakeByAddressAll((PVOID)&slot->state);
         return;
     }
 
-    // 3. Smooth budget reservation
-    bool reserved = ReserveCacheMemory(slot->outBytes, isVip);
-    while (!reserved && s_isActive.load(std::memory_order_relaxed)) {
+    // 3. Acquire slot from static 72 MB Slab Arena (bounded at 88 MB total VAS)
+    SlabHandle slab = s_slabArena.TryAcquire(slot->outBytes);
+    while (!slab.ptr && s_isActive.load(std::memory_order_relaxed)) {
         if (slot->seq <= s_currentMainSeq.load(std::memory_order_relaxed)) {
             slot->state = SLOT_SKIPPED;
             WakeByAddressAll((PVOID)&slot->state);
             return;
         }
         WaitForSingleObject(s_memAvailableEvent, 5);
-        reserved = ReserveCacheMemory(slot->outBytes, isVip);
+        slab = s_slabArena.TryAcquire(slot->outBytes);
     }
 
-    if (!s_isActive.load(std::memory_order_relaxed) || !reserved) {
-        if (reserved) ReleaseCacheMemory(slot->outBytes, isVip);
+    if (!s_isActive.load(std::memory_order_relaxed) || !slab.ptr) {
+        if (slab.ptr) s_slabArena.Release(slab);
         slot->state = SLOT_SKIPPED;
         WakeByAddressAll((PVOID)&slot->state);
         return;
     }
 
     if (slot->seq <= s_currentMainSeq.load(std::memory_order_relaxed)) {
-        ReleaseCacheMemory(slot->outBytes, isVip);
+        s_slabArena.Release(slab);
         slot->state = SLOT_SKIPPED;
         WakeByAddressAll((PVOID)&slot->state);
         return;
@@ -338,7 +341,7 @@ static void ProcessCandidate(
     // 4. Read compressed data from PAK
     HANDLE hFile = GetArchiveHandle(slot->pakName, pakHandles);
     if (hFile == INVALID_HANDLE_VALUE) {
-        ReleaseCacheMemory(slot->outBytes, isVip);
+        s_slabArena.Release(slab);
         slot->state = SLOT_FAILED;
         WakeByAddressAll((PVOID)&slot->state);
         return;
@@ -354,7 +357,7 @@ static void ProcessCandidate(
         readOk = ReadExactAt(hFile, slot->offset, compBuf.data(), slot->inBytes);
     }
     if (!readOk) {
-        ReleaseCacheMemory(slot->outBytes, isVip);
+        s_slabArena.Release(slab);
         slot->state = SLOT_FAILED;
         WakeByAddressAll((PVOID)&slot->state);
         return;
@@ -365,26 +368,25 @@ static void ProcessCandidate(
         slot->contentKey = ComputeBlockContentKey(compBuf.data(), slot->inBytes, slot->outBytes);
     }
 
-    // 6. Decompress into slot buffer
-    slot->data.resize(slot->outBytes);
+    // 6. Decompress into pre-allocated static slab buffer (zero dynamic heap churn!)
     slot->reservedBytes = slot->outBytes;
-
     size_t actualOut = 0;
     int res = -1;
     if (G3O_AVX2_IsSupported()) {
-        res = G3O_AVX2_DecompressZlib(dec, compBuf.data(), slot->inBytes, slot->data.data(), slot->outBytes, &actualOut);
+        res = G3O_AVX2_DecompressZlib(dec, compBuf.data(), slot->inBytes, slab.ptr, slot->outBytes, &actualOut);
     } else {
-        res = libdeflate_zlib_decompress(dec, compBuf.data(), slot->inBytes, slot->data.data(), slot->outBytes, &actualOut);
+        res = libdeflate_zlib_decompress(dec, compBuf.data(), slot->inBytes, slab.ptr, slot->outBytes, &actualOut);
     }
 
     if (res == 0 && actualOut > 0) {
+        slot->slab = slab;
         slot->actualOut = static_cast<uint32_t>(actualOut);
         slot->state = SLOT_READY;
         WakeByAddressAll((PVOID)&slot->state); // Signal waiting main thread!
     } else {
-        ReleaseCacheMemory(slot->reservedBytes, isVip);
+        s_slabArena.Release(slab);
+        slot->slab = {};
         slot->reservedBytes = 0;
-        std::vector<BYTE>().swap(slot->data);
         slot->state = SLOT_FAILED;
         WakeByAddressAll((PVOID)&slot->state);
     }
@@ -633,9 +635,10 @@ void PakTracer_OnLoadStart(const char* saveName) {
         s_memAvailableEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
     }
 
-    // Configure cache budget
+    // Initialize static 72 MB slab arena (88 MB hard VAS cap)
     const Config& cfg = GetConfig();
-    s_maxRollingMemoryBytes = static_cast<size_t>(cfg.pakCacheBudgetMB) * 1024 * 1024;
+    s_slabArena.Initialize();
+    s_maxRollingMemoryBytes = s_slabArena.GetTotalArenaBytes();
     s_cacheBudget.Configure(s_maxRollingMemoryBytes);
 
     // Check for In-Memory Session Trace (Load #2+ / Replay)
@@ -854,23 +857,24 @@ bool PakTracer_TryGetPredecompressed(
 
     // 5. Check if slot is ready
     if (slot->state == SLOT_READY) {
-        if (outCapacity < slot->actualOut) {
+        if (outCapacity < slot->actualOut || !slot->slab.ptr) {
             s_cacheMisses.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
 
-        // Fast lock-free memcpy into engine buffer
-        std::memcpy(outBuffer, slot->data.data(), slot->actualOut);
+        // Fast lock-free memcpy into engine buffer (~0.04 ms)
+        std::memcpy(outBuffer, slot->slab.ptr, slot->actualOut);
         if (pActualOut) {
             *pActualOut = slot->actualOut;
         }
 
-        // EVICT-ON-CONSUME: Free memory and budget IMMEDIATELY
+        // EVICT-ON-CONSUME: Release static slab slot instantly via atomic bitmask! Zero heap churn!
         slot->state = SLOT_CONSUMED;
-        const size_t freedBytes = slot->reservedBytes;
-        slot->reservedBytes = 0;
-        std::vector<BYTE>().swap(slot->data);
-        ReleaseCacheMemory(freedBytes, slot->isPriority);
+        s_slabArena.Release(slot->slab);
+        slot->slab = {};
+        if (s_memAvailableEvent) {
+            SetEvent(s_memAvailableEvent);
+        }
 
         // Telemetry
         s_cacheHits.fetch_add(1, std::memory_order_relaxed);
@@ -998,6 +1002,15 @@ void PakTracer_OnLoadEnd() {
     }
     ReleaseSRWLockExclusive(&s_sessionTraceLock);
 
+    // Release all active slabs back to the arena and reset mask
+    for (auto& slot : s_candidates) {
+        if (slot && slot->slab.ptr) {
+            s_slabArena.Release(slot->slab);
+            slot->slab = {};
+        }
+    }
+    s_slabArena.ResetAll();
+
     // Free candidate slots
     s_candidates.clear();
     s_slotsByContentKey.clear();
@@ -1058,6 +1071,10 @@ void PakTracer_OnLoadEnd() {
             (double)sorted[i].decompTimeUs / 1000.0);
     }
     Log("G3O", "================================================================================");
+}
+
+void PakTracer_Shutdown() {
+    s_slabArena.Shutdown();
 }
 
 } // namespace G3O

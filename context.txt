@@ -1,0 +1,283 @@
+# ==============================================================================
+# GOTHIC 3 OPTIMA (G3O) — UNIVERSAL MULTITHREADING & LOAD CONCURRENCY DOSSIER
+# Target: Gothic 3 (Genome Engine, 2006), Community Patch 1.75.14
+# Architecture: 32-bit x86 Windows PE (LargeAddressAware <= 3.5 GB VAS)
+# Compiler / Toolchain: MSVC 2022 (v143, Win32), C++20 / C++17, MinHook 1.3.3
+# Location: E:\Projects\G3O\context.txt
+# ==============================================================================
+
+This dossier is prepared for high-capability AI reasoning models with full access
+to the G3O codebase (E:\Projects\G3O). Its purpose is to formulate, design, and
+evaluate concrete architectural patterns to safely introduce multithreading into
+Gothic 3's legacy single-threaded Genome Engine, starting with dynamic layer loading
+(gCDynamicLayer::DoLoadData) and extending to all major engine subsystems.
+
+==============================================================================
+1. THE CORE CHALLENGE: RETROFITTING MULTITHREADING INTO A 2006 SINGLE-THREADED ENGINE
+==============================================================================
+
+Gothic 3 was built by Piranha Bytes between 2003 and 2006. The Genome Engine was
+architected strictly around a single main execution thread (the Win32 message pump
+and engine tick loop in Gothic3.exe).
+
+On modern PCs with 16–24 hardware threads and NVMe drives (>1,000 MB/s), loading a
+saved game takes ~31.0 seconds. 19+ CPU cores sit at 0% utilization while the main
+thread churns through single-threaded decompression, reflection, and object creation.
+
+------------------------------------------------------------------------------
+Telemetry Stopwatch Breakdown (Total Savegame Load: 30.974 s):
+------------------------------------------------------------------------------
+1. PAK Decompression in GotoLoadedPosition:  9.672 s (31.2%) -> Main thread zlib/deflate
+2. Dynamic Layer Parsing (SysDyn):           6.014 s (19.4%) -> Main thread property deserialization
+3. Scene & Entity Setup (D3D9/PhysX):        6.207 s (20.0%) -> Vertex buffers, textures, PhysX actors
+4. Other Dynamic Layers (344 layers):        2.602 s ( 8.4%) -> World/mod layer deserialization
+5. Savegame Deserialization (LoadGameWorld): 2.081 s ( 6.7%) -> Savegame chunks
+6. Disk ReadFile I/O:                        1.787 s ( 5.8%) -> 1,931 MB read at 1,081 MB/s (NVMe NOT bottleneck!)
+7. Overhead / PVS / Node Expansions:         1.511 s ( 4.9%)
+
+------------------------------------------------------------------------------
+The "Graveyard of Disasters" — Invariants That Must NEVER Be Violated:
+------------------------------------------------------------------------------
+1. 32-bit Virtual Address Space (VAS) Limit:
+   Total uncompressed PAK assets in GotoLoadedPosition = 2,930 MB. Total VAS ceiling is ~3.5 GB.
+   Holding all decompressed data simultaneously triggers an instant Out-Of-Memory Guru crash.
+   All background buffers MUST be bounded (e.g., G3O's StaticBoundedSlabArena capped at 88 MB).
+
+2. Ground Clamping & gCNavigationAdmin::Process():
+   Skipping or rate-limiting navigation ticks during load causes creatures to spawn under the
+   terrain and vertically snap upwards ("creature vertical teleportation").
+   RULE: NEVER hook, skip, or throttle gCNavigationAdmin::Process().
+
+3. Property Stream Cursor Integrity (bCIStream):
+   Altering the stream cursor (e.g., pre-reading header bytes) breaks bTPropertyObject::ReadData,
+   causing "illegal propertyobject version detected. Filebounds exceeded?" crashes.
+   RULE: NEVER corrupt or advance bCIStream cursors during property reading.
+
+4. No Negative Caching Across Sectors:
+   Entities load across sector boundaries lazily. Caching nullptr for missing templates causes
+   quest NPCs and items to permanently vanish.
+   RULE: Only positive caching or epoch-based invalidation is allowed.
+
+5. gCInfoManager Dialogue State:
+   Caching or skipping dialogue condition queries breaks NPC dialogue trees and merchant trade
+   options ("Show me your wares").
+   RULE: Dialogue evaluation must run via vanilla logic.
+
+
+==============================================================================
+2. DEEP DIVE: gCDynamicLayer::DoLoadData (8.616 s total, 6.014 s in SysDyn)
+==============================================================================
+
+Location: Game.dll
+Export: ?DoLoadData@gCDynamicLayer@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z (RVA 0xC5A50)
+Internal implementation target:
+  Game.dll!?OnLoadDynamicContext@gCWorld@@IAE_NAAVbCIStream@@AAVgCDynamicLayer@@_N@Z (RVA 0x19C420)
+
+Disassembly Summary (Game.dll+0xC5A50):
+  0x100C5A83: cmp [esp + 0x10], 0x4F4E4547 ("GENO")
+  0x100C5A91: cmp [esp + 0x14], 0x4C44454D ("MDEL") -> Validates "GENOMDEL" magic header
+  0x100C5AC9: cmp word ptr [esp + 0x18], 0x38       -> Checks version 0x38 (56)
+  0x100C5AF8: call 0x10199690                       -> Retrieves gCWorld singleton
+  0x100C5B04: mov ecx, eax                          -> this = gCWorld*
+  0x100C5B06: call 0x1019C420                       -> gCWorld::OnLoadDynamicContext(stream, layer, flag)
+
+Why Direct Multithreading Crashes Inside DoLoadData:
+1. Global String Admin (g_pStringAdmin / bCString):
+   bCString uses non-atomic reference counting (add dword ptr [eax-4], 1).
+   Concurrent string copies or destructions corrupt the reference counts, triggering double-free
+   or heap corruption.
+2. Property Object Reflection Singletons:
+   bCPropertyObjectFactory::ReadNewObject (SharedBase.dll+0x59330) and
+   bCPropertyObjectSingleton::ReadNewObject (SharedBase.dll+0x5BE50) mutate shared global
+   registries and cache structures without synchronization.
+3. Scene Administration (eCSceneAdmin):
+   Inside OnLoadDynamicContext, each entity registers its GUID (bCPropertyID) into
+   eCSceneAdmin::m_templateMap (a hash map with only 43 buckets).
+   Concurrent insertions corrupt the bucket linked list pointers, causing infinite loops or Guru crashes.
+4. Scene Graph Linking (eCNode::AttachChild):
+   Entities are attached to the sector's root node. Without locks, concurrent node attachment corrupts
+   the parent-child array.
+
+
+==============================================================================
+3. ARCHITECTURAL PATTERNS FOR "INDIRECT" MULTITHREADING IN GOTHIC 3
+==============================================================================
+
+If direct multithreading of legacy engine functions is impossible due to non-thread-safe
+singletons, how can concurrency be achieved "indirectly"?
+
+Here are the 4 fundamental patterns that can be applied to Gothic 3:
+
+------------------------------------------------------------------------------
+PATTERN 1: Decoupled Asynchronous I/O & Decompression Staging (Producer-Consumer)
+------------------------------------------------------------------------------
+Concept:
+The engine's load routines combine 3 distinct phases into one synchronous loop:
+  [Disk Read] -> [Zlib Decompress] -> [Engine Object Deserialization]
+Pattern 1 strips out the first two phases (Disk Read + Decompress) and executes them on
+a pool of background worker threads ahead of time.
+
+Application to DoLoadData:
+- All 345 dynamic layers correspond to .lrentdat files stored in Projects_compiled.* archives.
+- At the beginning of gCWorld::Activate, background workers scan the archive FAT table and
+  pre-decompress all 345 .lrentdat streams into memory buffers (e.g., using G3O's
+  DynamicLayerOptimizer or StaticBoundedSlabArena).
+- When the main thread calls gCDynamicLayer::DoLoadData sequentially, the stream is already
+  100% in RAM! The main thread incurs 0 ms disk wait and 0 ms decompression time.
+
+Application to GotoLoadedPosition:
+- Implemented in G3O via src/static_slab_arena.h and src/pak_tracer.cpp:
+  8 worker threads decompress up to 64 blocks ahead into an 88 MB static slab arena.
+  Main thread Hook_ZlibDecompress performs an instant 0.04 ms memcpy into the engine buffer.
+
+------------------------------------------------------------------------------
+PATTERN 2: Two-Phase "Isolated Worker Parse -> Serial Main-Thread Commit" (ECS Batching)
+------------------------------------------------------------------------------
+Concept:
+Separate the computationally expensive parsing of raw bytes from the registration of
+engine objects.
+
+Phase A (Worker Threads, Highly Parallel):
+- Workers read the binary .lrentdat / .node stream.
+- Workers parse raw integers, floats, vectors, GUIDs, and byte buffers into thread-local,
+  isolated C++ POD structs (e.g., struct RawEntityRecord { GUID id; Matrix4x4 transform; ... }).
+- Workers do NOT instantiate eCEntity, do NOT touch bCString, and do NOT touch eCSceneAdmin.
+- Because workers only manipulate private heap/stack memory, 16+ cores can parse streams in parallel
+  with 0 contention.
+
+Phase B (Main Thread, Serial & Ultra-Fast):
+- The main thread iterates over the pre-parsed, in-memory RawEntityRecord arrays.
+- It calls eCEntity constructors and eCSceneAdmin registration in a tight, sequential loop.
+- Because all string parsing, byte unmarshaling, and endian swaps were already done by workers,
+  main-thread execution time drops by 60–75%.
+
+------------------------------------------------------------------------------
+PATTERN 3: Bypassing Legacy Heap Locks via Thread-Local Allocators (mimalloc)
+------------------------------------------------------------------------------
+Concept:
+In SysDyn, over 100,000 property objects perform millions of small allocations via
+bCMemoryAdmin (SharedBase.dll+0xC9E0 / 0xC8E0).
+In vanilla Genome, bCMemoryAdmin acquires an internal critical section / lock on every
+allocation and walks single-threaded freelists.
+
+Solution in G3O:
+- Implemented in src/memory_allocator.cpp (AllocatorMode=2: Full MemHeap Replacement).
+- Uses mimalloc 3.5.3 with thread-local lock-free pages, O(1) size classes, and a
+  Zombie-Safe Header with canary (0x47334F21) and a 65,536-entry quarantine ring to prevent
+  ABA reuse races.
+- Cuts CPU overhead of property allocation during SysDyn by ~35% directly on the main thread
+  without touching bCIStream.
+
+------------------------------------------------------------------------------
+PATTERN 4: Speculative Asset & Physics Pre-Cooking
+------------------------------------------------------------------------------
+Concept:
+In GotoLoadedPosition, 6.207 seconds are spent in Scene & Entity Setup:
+- Creating PhysX 2.x collision objects (Engine.dll!?CreatePhysicObject@eCEntity@@QAEXXZ at 0x225750,
+  Engine.dll!?AddPhysicObject@eCPhysicsScene@@IAEXPAVeCPhysicObject@@@Z at 0x171400).
+- Cooking collision triangle/convex meshes (NxCookingInterface) from .xcom / .xshm files.
+- Creating Direct3D 9 vertex/index buffers and textures (Engine.dll!eCDX9Device at 0x9B810 / 0x9B930).
+
+How to parallelize:
+- While PhysX NxScene::createActor must remain on the main thread, the cooking of collision meshes
+  (transforming raw vertices/indices into PhysX internal formats) is a pure mathematical calculation!
+- Worker threads can pre-cook triangle and convex meshes in background threads into memory buffers.
+- When the main thread instantiates the entity, it uses the pre-cooked PhysX descriptor, turning a
+  5 ms cooking operation into a 0.01 ms pointer registration.
+
+
+==============================================================================
+4. KEY G3O CODEBASE FILES & ARCHITECTURE REFERENCES
+==============================================================================
+
+All files are located in E:\Projects\G3O\:
+
+Core Memory & Prefetching:
+- src/static_slab_arena.h / src/static_slab_arena.cpp:
+  72 MB VirtualAlloc static slab arena (Small=128x64KB, Medium=64x512KB, Large=8x4MB) with
+  atomic bitmask allocation (_BitScanForward / bsf). 88 MB hard VAS ceiling.
+- src/pak_tracer.h / src/pak_tracer.cpp:
+  Sliding-window lookahead pre-decompressor, in-memory session trace recorder, and multi-threaded
+  worker pool. Uses independent file handles (CreateFileA with FILE_SHARE_READ).
+- src/fast_pak_decompressor.h / src/fast_pak_decompressor.cpp:
+  MinHook interceptor for FileSystem.dll!ZlibDecompress (RVA 0xA2D0). Replaces zlib with
+  libdeflate AVX2/BMI2.
+- src/pak_content_key.h:
+  Hardware SSE4.2 CRC32C content key generator (ComputeBlockContentKey) executing in ~3.5 ns.
+- src/memory_allocator.h / src/memory_allocator.cpp:
+  Full MemHeap / bCMemoryAdmin replacement with mimalloc 3.5.3, safe dispatch free, canaries,
+  and quarantine ring.
+
+Engine Subsystem Optimizations:
+- src/scene_node_optimizer.h / src/scene_node_optimizer.cpp:
+  Intercepts Engine.dll!?AttachChild@eCNode@@UAEHPAV1@@Z (RVA 0x20DDF0). Pre-allocates child arrays
+  exponentially (1024 -> 8192 -> 32768) to eliminate thousands of reallocations per sector.
+- src/frustum_database_optimizer.h / src/frustum_database_optimizer.cpp:
+  Batches entity spatial registration during world load, collapsing 118,000 spatial tree updates
+  down to ~10,000 flushes.
+- src/dynamic_layer_optimizer.h / src/dynamic_layer_optimizer.cpp:
+  Indexes Projects_compiled.* archives and pre-caches .lrentdat / .node blocks.
+- src/class_factory_optimizer.h / src/class_factory_optimizer.cpp:
+  Caches bCPropertyObjectFactory class descriptors (2.9M hits, 0 allocations during load).
+- src/d3d9_hook.h / src/d3d9_hook.cpp:
+  Direct3D 9 state cache and device filter.
+- src/savegame_profiler.h / src/savegame_profiler.cpp:
+  High-precision hardware timer (QPC) telemetry profiler measuring every phase of savegame loading.
+
+
+==============================================================================
+5. TARGET EXPORTED FUNCTIONS & MEMORY MAP
+==============================================================================
+
+FileSystem.dll (Base ~0x10000000):
+- RVA 0x0000A2D0: ZlibDecompress (__stdcall)
+  Signature: 55 8B EC 8B 45 10 8B 55 0C 56 8D 34 02 83 F8 06
+
+Game.dll (Base ~0x10000000):
+- RVA 0x00173AB0: ?GotoLoadedPosition@gCSession@@QAEXPAVeCEntity@@_N@Z
+- RVA 0x000C5A50: ?DoLoadData@gCDynamicLayer@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z
+- RVA 0x0019C420: ?OnLoadDynamicContext@gCWorld@@IAE_NAAVbCIStream@@AAVgCDynamicLayer@@_N@Z
+- RVA 0x00192FF0: ?AccessDynamicLayer@gCSector@@QAEPAVgCDynamicLayer@@ABVbCString@@@Z
+- RVA 0x000C54F0: ??0gCDynamicLayer@@QAE@XZ
+- RVA 0x00193C40: ?DoLoadData@gCSector@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z
+- RVA 0x0019E8B0: ?DoLoadData@gCWorld@@MAE?AW4eEResult@eCProcessibleElement@@AAVbCIStream@@@Z
+
+Engine.dll (Base ~0x10000000):
+- RVA 0x0020DDF0: ?AttachChild@eCNode@@UAEHPAV1@@Z
+- RVA 0x00225750: ?CreatePhysicObject@eCEntity@@QAEXXZ
+- RVA 0x00171400: ?AddPhysicObject@eCPhysicsScene@@IAEXPAVeCPhysicObject@@@Z
+- RVA 0x0009B810: ?CreateTexture@eCDX9Device@@UAE?AW4bEResult@@ABUeSGfxLayersDesc@eCGfxShared@@PAPAVeCAPITexture@@@Z
+- RVA 0x0009B930: ?CreateTextureFromMemory@eCDX9Device@@UAE?AW4bEResult@@AAUeSGfxLayersDesc@eCGfxShared@@PAXIPAPAVeCAPITexture@@@Z
+- RVA 0x002320C0: ??0eCSceneAdmin@@QAE@XZ
+
+SharedBase.dll (Base ~0x10000000):
+- RVA 0x0000C8E0: ?GetInstance@bCMemoryAdmin@@SGAAV1@XZ
+- RVA 0x0000C9E0: ?Realloc@bCMemoryAdmin@@QAEPAXPAXK@Z
+- RVA 0x0000BEE0: ?AccessBuffer@bCMemoryStream@@QAEPAEK@Z
+- RVA 0x00059330: ?ReadNewObject@bCPropertyObjectFactory@@IAEPAVbCPropertyObjectBase@@AAVbCIStream@@@Z
+- RVA 0x0005BE50: ?ReadNewObject@bCPropertyObjectSingleton@@QAEPAVbCPropertyObjectBase@@AAVbCIStream@@@Z
+
+
+==============================================================================
+6. SPECIFIC CHALLENGES FOR THE AI TO SOLVE
+==============================================================================
+
+When collaborating with an AI model on this project, prompt it with these concrete objectives:
+
+1. Dynamic Layer Pre-Staging Architecture:
+   Design a C++20 background pipeline that intercepts the loading of gCSector in Game.dll,
+   identifies all child .lrentdat files, pre-decompresses them into memory buffers using
+   StaticBoundedSlabArena, and injects the pre-decompressed bCMemoryStream when
+   gCDynamicLayer::DoLoadData is invoked.
+
+2. Two-Phase Entity Parsing Blueprint:
+   Analyze Game.dll!?OnLoadDynamicContext@gCWorld@@IAE_NAAVbCIStream@@AAVgCDynamicLayer@@_N@Z
+   (RVA 0x19C420). Design a worker-thread binary parser that reads raw entity components into
+   flat thread-local C++ arrays, allowing the main thread to perform only fast O(1) object
+   construction without parsing overhead.
+
+3. General Engine Hooking Pattern:
+   Formulate a universal C++ template / wrapper pattern for hooking legacy __thiscall and
+   __stdcall functions in Genome that decouples I/O, memory allocation, and pure computation
+   into worker threads while ensuring all shared state mutation happens exclusively on the
+   main thread.

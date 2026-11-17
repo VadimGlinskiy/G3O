@@ -9,6 +9,7 @@ void PakTracer_OnWorldActivateStart();
 void PakTracer_OnLoadGameWorldStart(bool worldAlreadyActive = false);
 void PakTracer_OnGotoLoadedPositionStart();
 void PakTracer_OnLoadEnd();
+void PakTracer_Shutdown();
 
 void PakTracer_RecordRead(
     HANDLE hFile,

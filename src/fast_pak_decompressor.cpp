@@ -488,6 +488,7 @@ bool InitializeFastPakDecompressor() {
 }
 
 void ShutdownFastPakDecompressor() {
+    PakTracer_Shutdown();
     ShutdownLayerRingArena();
     if (s_targetPakDecompressor) {
         MH_DisableHook(s_targetPakDecompressor);
