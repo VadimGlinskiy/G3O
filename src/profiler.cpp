@@ -59,7 +59,6 @@ static Present_t Real_Present = NULL;
 static void* s_targetPresent = nullptr;
 
 void ProfilerRecordPresentedFrame() {
-    InvalidateD3D9StateCaches();
     if (GetConfig().enableProfiler && s_freq.QuadPart > 0) {
         if (!IsGameplayCaptureActive(
                 s_gameplaySessionStarted.load(std::memory_order_acquire),

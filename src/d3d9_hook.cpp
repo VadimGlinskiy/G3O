@@ -2,7 +2,6 @@
 #include "diagnostic_logger.h"
 #include "config_manager.h"
 #include "profiler.h"
-#include "d3d_state_cache.h"
 #include "blackbox_recorder.h"
 #include "hook_install_policy.h"
 #include <minhook.h>
@@ -11,105 +10,7 @@
 
 namespace G3O {
 
-#define MAX_RENDER_STATES 256
-#define MAX_STAGES 8
-#define MAX_STAGE_STATES 36
-#define MAX_SAMPLERS 16
-#define MAX_SAMPLER_STATES 16
-
-static DWORD s_renderStateCache[MAX_RENDER_STATES];
-static BYTE  s_renderStateValid[MAX_RENDER_STATES] = { 0 };
-
-static DWORD s_stageStateCache[MAX_STAGES][MAX_STAGE_STATES];
-static BYTE  s_stageStateValid[MAX_STAGES][MAX_STAGE_STATES] = { { 0 } };
-
-static DWORD s_samplerStateCache[MAX_SAMPLERS][MAX_SAMPLER_STATES];
-static BYTE  s_samplerStateValid[MAX_SAMPLERS][MAX_SAMPLER_STATES] = { { 0 } };
-static IDirect3DDevice9* s_cachedDevice = nullptr;
-static IDirect3DDevice9* s_attachedDevice = nullptr;
-static void** s_deviceVtable = nullptr;
-static IDirect3DDevice9* s_stateBlockRecordingDevice = nullptr;
-
-static bool s_deviceFilterInstalled = false;
 static bool s_presentHooked = false;
-static bool s_stateCacheEnabled = false;
-static bool s_stateBlockApplyInProgress = false;
-static bool s_stateBlockApplyHookUnavailable = false;
-static void* s_deviceHookTargets[7] = {};
-static void* s_stateBlockApplyHookTarget = nullptr;
-
-typedef HRESULT (STDMETHODCALLTYPE* SetRenderState_t)(IDirect3DDevice9* This, D3DRENDERSTATETYPE State, DWORD Value);
-static SetRenderState_t Real_SetRenderState = NULL;
-
-typedef HRESULT (STDMETHODCALLTYPE* SetTextureStageState_t)(IDirect3DDevice9* This, DWORD Stage, D3DTEXTURESTAGESTATETYPE Type, DWORD Value);
-static SetTextureStageState_t Real_SetTextureStageState = NULL;
-
-typedef HRESULT (STDMETHODCALLTYPE* SetSamplerState_t)(IDirect3DDevice9* This, DWORD Sampler, D3DSAMPLERSTATETYPE Type, DWORD Value);
-static SetSamplerState_t Real_SetSamplerState = NULL;
-
-typedef HRESULT (STDMETHODCALLTYPE* Reset_t)(IDirect3DDevice9* This, D3DPRESENT_PARAMETERS* pPresentationParameters);
-static Reset_t Real_Reset = NULL;
-typedef HRESULT (STDMETHODCALLTYPE* CreateStateBlock_t)(IDirect3DDevice9* This, D3DSTATEBLOCKTYPE Type, IDirect3DStateBlock9** ppSB);
-static CreateStateBlock_t Real_CreateStateBlock = NULL;
-typedef HRESULT (STDMETHODCALLTYPE* BeginStateBlock_t)(IDirect3DDevice9* This);
-static BeginStateBlock_t Real_BeginStateBlock = NULL;
-typedef HRESULT (STDMETHODCALLTYPE* EndStateBlock_t)(IDirect3DDevice9* This, IDirect3DStateBlock9** ppSB);
-static EndStateBlock_t Real_EndStateBlock = NULL;
-typedef HRESULT (STDMETHODCALLTYPE* StateBlockApply_t)(IDirect3DStateBlock9* This);
-static StateBlockApply_t Real_StateBlockApply = NULL;
-
-void InvalidateD3D9StateCaches() {
-    memset(s_renderStateValid, 0, sizeof(s_renderStateValid));
-    memset(s_stageStateValid, 0, sizeof(s_stageStateValid));
-    memset(s_samplerStateValid, 0, sizeof(s_samplerStateValid));
-    s_cachedDevice = nullptr;
-}
-
-static void PrepareD3D9StateCacheForDevice(IDirect3DDevice9* device) {
-    PrepareD3DStateCacheForDevice(device, s_cachedDevice, [] {
-        InvalidateD3D9StateCaches();
-    });
-}
-
-static bool ShouldBypassD3D9StateCache() {
-    return !s_stateCacheEnabled || s_stateBlockRecordingDevice != nullptr || s_stateBlockApplyInProgress;
-}
-
-static HRESULT STDMETHODCALLTYPE Hooked_SetRenderState(IDirect3DDevice9* This, D3DRENDERSTATETYPE State, DWORD Value) {
-    if ((DWORD)State >= MAX_RENDER_STATES) return Real_SetRenderState(This, State, Value);
-    PrepareD3D9StateCacheForDevice(This);
-    return ApplyCachedD3DState(Value, s_renderStateCache[State], s_renderStateValid[State],
-        [&]() { return Real_SetRenderState(This, State, Value); }, ShouldBypassD3D9StateCache());
-}
-
-static HRESULT STDMETHODCALLTYPE Hooked_SetTextureStageState(IDirect3DDevice9* This, DWORD Stage, D3DTEXTURESTAGESTATETYPE Type, DWORD Value) {
-    if (Stage >= MAX_STAGES || (DWORD)Type >= MAX_STAGE_STATES) {
-        return Real_SetTextureStageState(This, Stage, Type, Value);
-    }
-    PrepareD3D9StateCacheForDevice(This);
-    return ApplyCachedD3DState(Value, s_stageStateCache[Stage][Type], s_stageStateValid[Stage][Type],
-        [&]() { return Real_SetTextureStageState(This, Stage, Type, Value); }, ShouldBypassD3D9StateCache());
-}
-
-static HRESULT STDMETHODCALLTYPE Hooked_SetSamplerState(IDirect3DDevice9* This, DWORD Sampler, D3DSAMPLERSTATETYPE Type, DWORD Value) {
-    if (Sampler >= MAX_SAMPLERS || (DWORD)Type >= MAX_SAMPLER_STATES) {
-        return Real_SetSamplerState(This, Sampler, Type, Value);
-    }
-    PrepareD3D9StateCacheForDevice(This);
-    return ApplyCachedD3DState(Value, s_samplerStateCache[Sampler][Type], s_samplerStateValid[Sampler][Type],
-        [&]() { return Real_SetSamplerState(This, Sampler, Type, Value); }, ShouldBypassD3D9StateCache());
-}
-
-static HRESULT STDMETHODCALLTYPE Hooked_Reset(IDirect3DDevice9* This, D3DPRESENT_PARAMETERS* pPresentationParameters) {
-    InvalidateD3D9StateCaches();
-    const HRESULT result = Real_Reset(This, pPresentationParameters);
-    if (SUCCEEDED(result) && s_stateBlockRecordingDevice == This) {
-        s_stateBlockRecordingDevice = nullptr;
-    }
-    InvalidateD3D9StateCaches();
-    return result;
-}
-
 // ---------------------------------------------------------------------------
 // Fast Texture Loader (D3DX Optimization)
 // Eliminates CPU triangle mip-filtering and dither calculations during save loading
@@ -173,10 +74,16 @@ static HRESULT WINAPI Hooked_D3DXCreateTextureFromFileInMemoryEx(
             if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
                 MipFilter = D3DX_FILTER_NONE;
             }
+            if (Filter == D3DX_DEFAULT || (Filter & 0xF) == D3DX_FILTER_TRIANGLE) {
+                Filter = D3DX_FILTER_POINT;
+            }
         } else {
             // Mip generation needed: replace heavy CPU triangle filtering with fast 2x2 box filtering
             if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
                 MipFilter = D3DX_FILTER_BOX;
+            }
+            if (Filter == D3DX_DEFAULT || (Filter & 0xF) == D3DX_FILTER_TRIANGLE) {
+                Filter = D3DX_FILTER_BOX;
             }
         }
     }
@@ -235,6 +142,9 @@ static HRESULT WINAPI Hooked_D3DXCreateTextureFromFileExA(
         if (MipFilter == D3DX_DEFAULT || (MipFilter & 0xF) == D3DX_FILTER_TRIANGLE) {
             MipFilter = D3DX_FILTER_BOX;
         }
+        if (Filter == D3DX_DEFAULT || (Filter & 0xF) == D3DX_FILTER_TRIANGLE) {
+            Filter = D3DX_FILTER_BOX;
+        }
     }
 
     BlackboxScope bb(BB_OP_CREATING_TEXTURE, "TextureFile", 0, 0, pSrcFile ? pSrcFile : "");
@@ -268,204 +178,9 @@ static bool CreateEnableDeviceHook(void* target, LPVOID detour, LPVOID* original
     return true;
 }
 
-static void DisableD3D9StateCache(const char* reason) {
-    if (!s_stateCacheEnabled) return;
-    s_stateCacheEnabled = false;
-    InvalidateD3D9StateCaches();
-    Log("G3O", "Direct3D 9 state cache disabled; calls now pass through: %s", reason);
-}
-
-static HRESULT STDMETHODCALLTYPE Hooked_StateBlockApply(IDirect3DStateBlock9* This) {
-    return ApplyD3DStateBlockAndInvalidateCache(
-        [&]() { return Real_StateBlockApply(This); },
-        []() { InvalidateD3D9StateCaches(); },
-        s_stateBlockApplyInProgress);
-}
-
-static void EnsureStateBlockApplyHook(IDirect3DStateBlock9* pStateBlock) {
-    if (s_stateBlockApplyHookUnavailable) return;
-    void** vtbl = pStateBlock ? *reinterpret_cast<void***>(pStateBlock) : nullptr;
-    void* target = vtbl ? vtbl[5] : nullptr;
-    if (!target) {
-        s_stateBlockApplyHookUnavailable = true;
-        DisableD3D9StateCache("state-block Apply entry point was unavailable");
-        return;
-    }
-    if (s_stateBlockApplyHookTarget == target) return;
-    if (s_stateBlockApplyHookTarget) {
-        s_stateBlockApplyHookUnavailable = true;
-        DisableD3D9StateCache("multiple state-block implementations were encountered");
-        return;
-    }
-    if (!CreateEnableDeviceHook(target, (LPVOID)Hooked_StateBlockApply,
-                                (LPVOID*)&Real_StateBlockApply, &s_stateBlockApplyHookTarget)) {
-        s_stateBlockApplyHookUnavailable = true;
-        DisableD3D9StateCache("state-block Apply hook could not be installed");
-    }
-}
-
-static HRESULT STDMETHODCALLTYPE Hooked_CreateStateBlock(
-    IDirect3DDevice9* This, D3DSTATEBLOCKTYPE Type, IDirect3DStateBlock9** ppSB) {
-    const HRESULT result = Real_CreateStateBlock(This, Type, ppSB);
-    if (SUCCEEDED(result) && ppSB && *ppSB) EnsureStateBlockApplyHook(*ppSB);
-    return result;
-}
-
-static HRESULT STDMETHODCALLTYPE Hooked_BeginStateBlock(IDirect3DDevice9* This) {
-    const HRESULT result = Real_BeginStateBlock(This);
-    if (SUCCEEDED(result)) {
-        if (s_stateBlockRecordingDevice && s_stateBlockRecordingDevice != This) {
-            DisableD3D9StateCache("state-block recording began on multiple devices");
-        }
-        s_stateBlockRecordingDevice = This;
-    }
-    InvalidateD3D9StateCaches();
-    return result;
-}
-
-static HRESULT STDMETHODCALLTYPE Hooked_EndStateBlock(IDirect3DDevice9* This, IDirect3DStateBlock9** ppSB) {
-    const HRESULT result = Real_EndStateBlock(This, ppSB);
-    if (s_stateBlockRecordingDevice == This) {
-        s_stateBlockRecordingDevice = nullptr;
-        if (FAILED(result)) {
-            DisableD3D9StateCache("state-block recording could not be finalized");
-        }
-    }
-    InvalidateD3D9StateCaches();
-    if (SUCCEEDED(result) && ppSB && *ppSB) EnsureStateBlockApplyHook(*ppSB);
-    return result;
-}
-
-static void RemoveDeviceStateFilterHooks() {
-    for (void*& target : s_deviceHookTargets) {
-        if (!target) continue;
-        MH_DisableHook(target);
-        MH_RemoveHook(target);
-        target = nullptr;
-    }
-    if (s_stateBlockApplyHookTarget) {
-        MH_DisableHook(s_stateBlockApplyHookTarget);
-        MH_RemoveHook(s_stateBlockApplyHookTarget);
-        s_stateBlockApplyHookTarget = nullptr;
-    }
-    Real_SetRenderState = nullptr;
-    Real_SetTextureStageState = nullptr;
-    Real_SetSamplerState = nullptr;
-    Real_Reset = nullptr;
-    Real_CreateStateBlock = nullptr;
-    Real_BeginStateBlock = nullptr;
-    Real_EndStateBlock = nullptr;
-    Real_StateBlockApply = nullptr;
-    s_stateBlockRecordingDevice = nullptr;
-    s_stateCacheEnabled = false;
-    s_stateBlockApplyInProgress = false;
-    s_stateBlockApplyHookUnavailable = false;
-    s_deviceFilterInstalled = false;
-    s_attachedDevice = nullptr;
-    s_deviceVtable = nullptr;
-    InvalidateD3D9StateCaches();
-}
-
-static void InstallDeviceStateFilter(IDirect3DDevice9* pDevice) {
-    if (!pDevice) return;
-    void** vtbl = *reinterpret_cast<void***>(pDevice);
-    if (!vtbl) return;
-    if (s_deviceFilterInstalled) {
-        if (!s_deviceVtable) return;
-        if (vtbl != s_deviceVtable) {
-            DisableD3D9StateCache("multiple Direct3D device implementations were encountered");
-            return;
-        }
-        if (s_stateCacheEnabled && s_attachedDevice != pDevice) {
-            D3DDEVICE_CREATION_PARAMETERS creationParameters = {};
-            const HRESULT creationParametersResult = pDevice->GetCreationParameters(&creationParameters);
-            if (!CanUseSingleThreadedD3D9StateCache(creationParametersResult,
-                                                     creationParameters.BehaviorFlags)) {
-                DisableD3D9StateCache("a new device is multithreaded or its threading flags are unavailable");
-            }
-            s_attachedDevice = pDevice;
-            InvalidateD3D9StateCaches();
-        }
-        return;
-    }
-    ResetD3DStateCacheForNewDevice(pDevice, s_cachedDevice, [] {
-        InvalidateD3D9StateCaches();
-    });
-
-    D3DDEVICE_CREATION_PARAMETERS creationParameters = {};
-    const HRESULT creationParametersResult = pDevice->GetCreationParameters(&creationParameters);
-    if (!CanUseSingleThreadedD3D9StateCache(creationParametersResult,
-                                             creationParameters.BehaviorFlags)) {
-        s_stateCacheEnabled = false;
-        s_deviceFilterInstalled = true;
-        if (FAILED(creationParametersResult)) {
-            Log("G3O", "Direct3D 9 state filter disabled: device threading flags could not be verified (hr=0x%08X).",
-                creationParametersResult);
-        } else {
-            Log("G3O", "Direct3D 9 state filter disabled: multithreaded device state is not safely cacheable.");
-        }
-        return;
-    }
-
-    // Direct3D 9 vtable indices:
-    // 16: Reset
-    // 57: SetRenderState
-    // 59: CreateStateBlock
-    // 60: BeginStateBlock
-    // 61: EndStateBlock
-    // 67: SetTextureStageState
-    // 69: SetSamplerState
-    const bool installed =
-        CreateEnableDeviceHook(vtbl[57], (LPVOID)Hooked_SetRenderState,
-                               (LPVOID*)&Real_SetRenderState, &s_deviceHookTargets[0]) &&
-        CreateEnableDeviceHook(vtbl[67], (LPVOID)Hooked_SetTextureStageState,
-                               (LPVOID*)&Real_SetTextureStageState, &s_deviceHookTargets[1]) &&
-        CreateEnableDeviceHook(vtbl[69], (LPVOID)Hooked_SetSamplerState,
-                               (LPVOID*)&Real_SetSamplerState, &s_deviceHookTargets[2]) &&
-        CreateEnableDeviceHook(vtbl[16], (LPVOID)Hooked_Reset,
-                               (LPVOID*)&Real_Reset, &s_deviceHookTargets[3]) &&
-        CreateEnableDeviceHook(vtbl[59], (LPVOID)Hooked_CreateStateBlock,
-                               (LPVOID*)&Real_CreateStateBlock, &s_deviceHookTargets[4]) &&
-        CreateEnableDeviceHook(vtbl[60], (LPVOID)Hooked_BeginStateBlock,
-                               (LPVOID*)&Real_BeginStateBlock, &s_deviceHookTargets[5]) &&
-        CreateEnableDeviceHook(vtbl[61], (LPVOID)Hooked_EndStateBlock,
-                               (LPVOID*)&Real_EndStateBlock, &s_deviceHookTargets[6]);
-    if (!installed) {
-        RemoveDeviceStateFilterHooks();
-        Log("G3O", "Direct3D 9 state filter not installed: a required hook failed.");
-        return;
-    }
-
-    s_attachedDevice = pDevice;
-    s_deviceVtable = vtbl;
-    InvalidateD3D9StateCaches();
-    s_stateBlockApplyHookUnavailable = false;
-    s_stateCacheEnabled = true;
-
-    IDirect3DStateBlock9* stateBlockProbe = nullptr;
-    const HRESULT probeResult = Real_CreateStateBlock(pDevice, D3DSBT_ALL, &stateBlockProbe);
-    const bool stateBlockProbeSucceeded = SUCCEEDED(probeResult) && stateBlockProbe != nullptr;
-    if (stateBlockProbeSucceeded) EnsureStateBlockApplyHook(stateBlockProbe);
-    if (stateBlockProbe) stateBlockProbe->Release();
-    if (!stateBlockProbeSucceeded) {
-        s_stateBlockApplyHookUnavailable = true;
-        DisableD3D9StateCache("could not validate the state-block Apply hook");
-    }
-
-    s_deviceFilterInstalled = true;
-    if (s_stateCacheEnabled) {
-        Log("G3O", "Direct3D 9 State Redundancy Filter installed with state-block tracking.");
-    } else {
-        Log("G3O", "Direct3D 9 state hooks installed, but state caching is disabled for safety.");
-    }
-}
-
 void AttachD3D9DeviceIfReady(void* rawDevice) {
     IDirect3DDevice9* pDevice = reinterpret_cast<IDirect3DDevice9*>(rawDevice);
     if (!pDevice) return;
-    if (GetConfig().enableD3D9StateFilter) {
-        InstallDeviceStateFilter(pDevice);
-    }
     if (GetConfig().enableProfiler && !s_presentHooked) {
         void** vtbl = *(void***)pDevice;
         if (vtbl) {
@@ -506,13 +221,12 @@ static bool TryAttachExistingD3D9Device(HMODULE hEngine) {
 
 static void* __fastcall Hooked_eCDX9Device_ctor(void* pThis, void* /*edx*/, IDirect3DDevice9* pDevice) {
     void* result = Real_eCDX9Device_ctor(pThis, pDevice);
-    InvalidateD3D9StateCaches();
     AttachD3D9DeviceIfReady(pDevice);
     return result;
 }
 
 void InitializeD3D9Optimizer() {
-    if (GetConfig().enableD3D9StateFilter || GetConfig().enableProfiler) {
+    if (GetConfig().enableProfiler) {
         HMODULE hEngine = GetModuleHandleA("Engine.dll");
         if (!hEngine) {
             Log("G3O", "D3D9 device attachment hook not installed: Engine.dll is not loaded.");
@@ -532,7 +246,7 @@ void InitializeD3D9Optimizer() {
                         [&] { Real_eCDX9Device_ctor = nullptr; });
                     if (result == HookInstallResult::Installed) {
                         s_targetD3D9DeviceCtor = pCtor;
-                        Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for Direct3D 9 state filtering.");
+                        Log("G3O", "Hooked Engine.dll!eCDX9Device constructor for profiler device attachment.");
                     } else {
                         Log("G3O", "D3D9 device attachment hook failed (create=%d, enable=%d, remove=%d).",
                             (int)createStatus, (int)enableStatus, (int)removeStatus);
@@ -607,7 +321,6 @@ void InitializeD3D9Optimizer() {
 }
 
 void ShutdownD3D9Optimizer() {
-    RemoveDeviceStateFilterHooks();
     if (s_targetD3D9DeviceCtor) {
         MH_DisableHook(s_targetD3D9DeviceCtor);
         MH_RemoveHook(s_targetD3D9DeviceCtor);

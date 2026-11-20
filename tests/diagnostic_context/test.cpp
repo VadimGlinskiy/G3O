@@ -62,14 +62,20 @@ int main() {
         "EnableG3O=", "LoadG3SEPlugins=", "LoadReShade=", "FixVulkanLayerConflicts=",
         "EnableBorderless=", "AutoBorderless=", "PreventMinimizeOnFocusLoss=",
         "EnableCrashInvestigator=", "ShowCrashDialog=", "WriteCrashDump=", "WriteCrashLog=",
-        "EnableSharedBaseOptimizations=", "EnableFastPakDecompressor=", "EnablePropertyCache=", "EnablePakPrefetch=",
-        "EnableD3D9StateFilter=", "EnableFastTextureLoader=", "EnableVegetationOptimizer=",
+        "EnableSharedBaseOptimizations=", "EnableFastPakDecompressor=",
+        "EnableFastTextureLoader=", "EnableVegetationOptimizer=",
         "TreeShadowDistance=", "VegetationGridRangeClamp=", "EnableHighPrecisionTimer=", "EnableHighProcessPriority=",
-        "EnableCPUTopologyAffinity=", "EnableVFSCache=", "CPUCores=", "CPUThreads=", "CPUAffinityMask=",
-        "PakCacheBudgetMB=", "PakPrefetchWorkers=", "AllocatorMode=", "EnableDiagnosticLog=", "InterceptOutputDebugString=",
+        "EnableCPUTopologyAffinity=", "CPUCores=", "CPUThreads=", "CPUAffinityMask=",
+        "AllocatorMode=", "EnableDiagnosticLog=", "InterceptOutputDebugString=",
         "EnableProfiler=", "EnableSavegameAudit="
     };
     for (const char* key : expectedKeys) requireContains(configText.CStr(), key);
+    const char* const removedCacheKeys[] = {
+        "EnableLayerRingArena=", "EnableParallelDynamicLayers=", "EnablePropertyCache=",
+        "EnablePakPrefetch=", "PakCacheBudgetMB=", "PakPrefetchWorkers=",
+        "EnableClassFactoryOptimizer=", "EnableVFSCache=", "EnableD3D9StateFilter="
+    };
+    for (const char* key : removedCacheKeys) requireAbsent(configText.CStr(), key);
     requireAbsent(configText.CStr(), "ShowWatermark=");
     requireAbsent(configText.CStr(), "ToggleBorderlessKey=");
     requireAbsent(configText.CStr(), "[Camera]");

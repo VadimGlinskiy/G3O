@@ -1,17 +1,17 @@
 #include "fast_pak_decompressor.h"
 #include "decompressor_avx2.h"
+#include "pak_content_key.h"
+#include "pak_streaming_ring.h"
 #include "config_manager.h"
 #include "diagnostic_logger.h"
-#include "pak_tracer.h"
 #include "blackbox_recorder.h"
+#include <algorithm>
 #include "hook_install_policy.h"
-#include "layer_ring_arena.h"
-#include "dynamic_layer_optimizer.h"
 #include <minhook.h>
 #include <windows.h>
 #include <libdeflate.h>
 #include <stdio.h>
-#include <vector>
+
 
 namespace G3O {
 
@@ -62,6 +62,12 @@ static volatile LONG64 s_savegameDecompInBytes = 0;
 static volatile LONG64 s_savegameDecompOutBytes = 0;
 static volatile LONG64 s_savegameDecompTimeUs = 0;
 
+static volatile LONG   s_loadThreadId = 0;
+static volatile LONG   s_decompMainCount = 0;
+static volatile LONG64 s_decompMainTimeUs = 0;
+static volatile LONG   s_decompWorkerCount = 0;
+static volatile LONG64 s_decompWorkerTimeUs = 0;
+
 static LARGE_INTEGER s_timerFreq = []() {
     LARGE_INTEGER li;
     QueryPerformanceFrequency(&li);
@@ -78,19 +84,6 @@ static void* GetThreadDecompressor() {
     return s_tlDecompressor;
 }
 
-static volatile LONG s_consecutiveHits = 0;
-static volatile LONG64 s_consecutiveBytesSaved = 0;
-
-// -----------------------------------------------------------------------------
-// Decompression Cache Telemetry
-// -----------------------------------------------------------------------------
-LONG GetDecompCacheHits() { return s_consecutiveHits; }
-LONG64 GetDecompCacheBytesSaved() { return s_consecutiveBytesSaved; }
-void ClearDecompCache() {
-    InterlockedExchange(&s_consecutiveHits, 0);
-    InterlockedExchange64(&s_consecutiveBytesSaved, 0);
-}
-
 static int __stdcall Hooked_ZlibDecompress(
     void* context,
     const void* inBuffer,
@@ -101,112 +94,76 @@ static int __stdcall Hooked_ZlibDecompress(
 ) {
     BlackboxScope bbScope(BB_OP_DECOMPRESSING_PAK, "PAK_Stream", (uint64_t)(uintptr_t)inBuffer, inSize);
     if (inBuffer && inSize >= 6 && outBuffer && outCapacity > 0) {
-        // Step 2.0: Serve pre-decompressed dynamic layer / mod node block from DynamicLayerOptimizer
-        if (GetConfig().enableParallelDynamicLayers) {
-            DWORD layerOut = 0;
-            LARGE_INTEGER t0_layer, t1_layer;
-            QueryPerformanceCounter(&t0_layer);
-            if (DynamicLayerOptimizer_TryGet(inBuffer, inSize, outBuffer, outCapacity, &layerOut)) {
-                QueryPerformanceCounter(&t1_layer);
+        // 0. Fast-path: Check if pre-decompressed in the streaming producer-consumer ring buffer
+        const uint64_t contentKey = ComputeBlockContentKey(inBuffer, inSize, outCapacity);
+        if (contentKey != 0) {
+            DWORD ringWritten = 0;
+            LARGE_INTEGER tRing0, tRing1;
+            QueryPerformanceCounter(&tRing0);
+            if (PakStreamingRing_TryConsume(contentKey, outBuffer, outCapacity, &ringWritten)) {
+                QueryPerformanceCounter(&tRing1);
                 const LONG64 us = (s_timerFreq.QuadPart > 0)
-                    ? ((t1_layer.QuadPart - t0_layer.QuadPart) * 1000000LL / s_timerFreq.QuadPart)
+                    ? ((tRing1.QuadPart - tRing0.QuadPart) * 1000000LL / s_timerFreq.QuadPart)
                     : 0;
-                if (pOutWritten) *pOutWritten = layerOut;
                 InterlockedExchangeAdd64(&s_decompTimeUs, us);
-                InterlockedIncrement(&s_decompCount);
-                InterlockedExchangeAdd64(&s_decompInBytes, static_cast<LONG64>(inSize));
-                InterlockedExchangeAdd64(&s_decompOutBytes, static_cast<LONG64>(layerOut));
-                PakTracer_RecordDecompress(inBuffer, inSize, outCapacity, layerOut, static_cast<uint64_t>(us), outBuffer);
-                return 0;
-            }
-        }
-
-        // Serve an exact RB_Mod .node block prepared by LayerRingArena when its slot is ready.
-        if (GetConfig().enableLayerRingArena && LayerRingArena_IsActive()) {
-            DWORD arenaOut = 0;
-            LARGE_INTEGER t0_arena, t1_arena;
-            QueryPerformanceCounter(&t0_arena);
-            if (LayerRingArena_TryGet(inBuffer, inSize, outBuffer, outCapacity, &arenaOut)) {
-                QueryPerformanceCounter(&t1_arena);
-                const LONG64 us = (s_timerFreq.QuadPart > 0)
-                    ? ((t1_arena.QuadPart - t0_arena.QuadPart) * 1000000LL / s_timerFreq.QuadPart)
-                    : 0;
-                if (pOutWritten) *pOutWritten = arenaOut;
-                InterlockedExchangeAdd64(&s_decompTimeUs, us);
-                InterlockedIncrement(&s_decompCount);
-                InterlockedExchangeAdd64(&s_decompInBytes, static_cast<LONG64>(inSize));
-                InterlockedExchangeAdd64(&s_decompOutBytes, static_cast<LONG64>(arenaOut));
-                PakTracer_RecordDecompress(inBuffer, inSize, outCapacity, arenaOut, static_cast<uint64_t>(us), outBuffer);
-                return 0;
-            }
-        }
-
-        // Step 2.3: Fast speculative pre-decompression cache lookup
-        if (PakTracer_CanTryGetPredecompressed()) {
-            DWORD cachedOut = 0;
-            LARGE_INTEGER t0_cache, t1_cache;
-            QueryPerformanceCounter(&t0_cache);
-            if (PakTracer_TryGetPredecompressed(inBuffer, inSize, outBuffer, outCapacity, &cachedOut)) {
-                QueryPerformanceCounter(&t1_cache);
-                LONG64 us = (s_timerFreq.QuadPart > 0) ? ((t1_cache.QuadPart - t0_cache.QuadPart) * 1000000LL / s_timerFreq.QuadPart) : 0;
-                InterlockedExchangeAdd64(&s_decompTimeUs, us);
-                if (pOutWritten) {
-                    *pOutWritten = cachedOut;
+                const DWORD loadTid = static_cast<DWORD>(InterlockedCompareExchange(&s_loadThreadId, 0, 0));
+                if (loadTid != 0) {
+                    if (GetCurrentThreadId() == loadTid) {
+                        InterlockedIncrement(&s_decompMainCount);
+                        InterlockedExchangeAdd64(&s_decompMainTimeUs, us);
+                    } else {
+                        InterlockedIncrement(&s_decompWorkerCount);
+                        InterlockedExchangeAdd64(&s_decompWorkerTimeUs, us);
+                    }
                 }
+                if (pOutWritten) *pOutWritten = ringWritten;
                 InterlockedIncrement(&s_decompCount);
-                InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
-                InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)cachedOut);
-                return 0; // Served from the pre-decompressed cache
+                InterlockedExchangeAdd64(&s_decompInBytes, static_cast<LONG64>(inSize));
+                InterlockedExchangeAdd64(&s_decompOutBytes, static_cast<LONG64>(ringWritten));
+                return 0; // Instant return in ~0.04 ms
             }
         }
 
+        // 1. Synchronous fallback: decompress on calling thread
         if (s_fnZlib) {
             void* dec = GetThreadDecompressor();
             if (dec) {
-            LARGE_INTEGER t0, t1;
-            QueryPerformanceCounter(&t0);
+                LARGE_INTEGER t0, t1;
+                QueryPerformanceCounter(&t0);
 
-            size_t actual_out = 0;
-            // Primary path: Standard zlib-wrapped stream
-            int res = s_fnZlib(
-                dec,
-                inBuffer,
-                (size_t)inSize,
-                outBuffer,
-                (size_t)outCapacity,
-                &actual_out
-            );
-
-            // Secondary path: Raw deflate with header/trailer stripped
-            if (res != 0 && inSize >= 6 && s_fnDeflate) {
-                res = s_fnDeflate(
-                    dec,
-                    (const BYTE*)inBuffer + 2,
-                    (size_t)(inSize - 6),
-                    outBuffer,
-                    (size_t)outCapacity,
-                    &actual_out
-                );
-            }
-
-            if (res == 0) { // 0 == LIBDEFLATE_SUCCESS
-                QueryPerformanceCounter(&t1);
-                LONG64 us = (s_timerFreq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_timerFreq.QuadPart) : 0;
-                InterlockedExchangeAdd64(&s_decompTimeUs, us);
-
-                if (pOutWritten) {
-                    *pOutWritten = (DWORD)actual_out;
+                size_t actual_out = 0;
+                int res = s_fnZlib(dec, inBuffer, static_cast<size_t>(inSize),
+                                   outBuffer, static_cast<size_t>(outCapacity), &actual_out);
+                if (res != 0 && s_fnDeflate) {
+                    res = s_fnDeflate(dec, static_cast<const BYTE*>(inBuffer) + 2,
+                                      static_cast<size_t>(inSize - 6), outBuffer,
+                                      static_cast<size_t>(outCapacity), &actual_out);
                 }
-                InterlockedIncrement(&s_decompCount);
-                InterlockedExchangeAdd64(&s_decompInBytes, (LONG64)inSize);
-                InterlockedExchangeAdd64(&s_decompOutBytes, (LONG64)actual_out);
 
-                PakTracer_RecordDecompress(inBuffer, inSize, outCapacity, (DWORD)actual_out, (uint64_t)us, outBuffer);
-
-                return 0; // Success
+                if (res == 0) {
+                    QueryPerformanceCounter(&t1);
+                    const LONG64 us = (s_timerFreq.QuadPart > 0)
+                        ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_timerFreq.QuadPart)
+                        : 0;
+                    InterlockedExchangeAdd64(&s_decompTimeUs, us);
+                    const DWORD loadTid = static_cast<DWORD>(InterlockedCompareExchange(&s_loadThreadId, 0, 0));
+                    if (loadTid != 0) {
+                        if (GetCurrentThreadId() == loadTid) {
+                            InterlockedIncrement(&s_decompMainCount);
+                            InterlockedExchangeAdd64(&s_decompMainTimeUs, us);
+                        } else {
+                            InterlockedIncrement(&s_decompWorkerCount);
+                            InterlockedExchangeAdd64(&s_decompWorkerTimeUs, us);
+                        }
+                    }
+                    if (pOutWritten) *pOutWritten = static_cast<DWORD>(actual_out);
+                    InterlockedIncrement(&s_decompCount);
+                    InterlockedExchangeAdd64(&s_decompInBytes, static_cast<LONG64>(inSize));
+                    InterlockedExchangeAdd64(&s_decompOutBytes, static_cast<LONG64>(actual_out));
+                    return 0;
+                }
             }
         }
-    }
     }
 
     // Fallback to original engine decompressor
@@ -381,12 +338,7 @@ static void* FindSavegameDecompressorTarget(HMODULE hGame) {
 
 bool InitializeFastPakDecompressor() {
     const Config& config = GetConfig();
-    if (!config.enableFastPakDecompressor) {
-        if (config.enableLayerRingArena) {
-            Log("G3O", "[LayerRingArena] Not initialized: EnableFastPakDecompressor is disabled.");
-        }
-        return false;
-    }
+    if (!config.enableFastPakDecompressor) return false;
 
     // 0. Dynamic CPU Dispatch (Select AVX2+BMI2 if CPU supports it, else universal SSE2 baseline)
     if (G3O_AVX2_IsSupported()) {
@@ -405,6 +357,15 @@ bool InitializeFastPakDecompressor() {
         s_isAvx2Active = false;
     }
     Log("G3O", "[CPU Dispatch] Decompressor backend: %s", s_backendName);
+
+    uint32_t ringWorkers = 0;
+    const auto& cfg = GetConfig();
+    if (cfg.cpuThreads > 0) {
+        ringWorkers = static_cast<uint32_t>(std::clamp(cfg.cpuThreads - 1, 1, 16));
+    } else if (cfg.cpuCores > 0) {
+        ringWorkers = static_cast<uint32_t>(std::clamp(cfg.cpuCores - 1, 1, 16));
+    }
+    InitializePakStreamingRing(ringWorkers);
 
     // 1. FileSystem.dll hook
     HMODULE hFs = GetModuleHandleA("FileSystem.dll");
@@ -441,13 +402,6 @@ bool InitializeFastPakDecompressor() {
         Log("G3O", "Fast Pak Decompressor: FileSystem.dll not loaded.");
     }
 
-    if (config.enableLayerRingArena) {
-        if (s_targetPakDecompressor) {
-            InitializeLayerRingArena();
-        } else {
-            Log("G3O", "[LayerRingArena] Not initialized: the FileSystem.dll PAK decompressor hook is unavailable.");
-        }
-    }
 
     // 2. Game.dll savegame decompressor hook
     HMODULE hGame = GetModuleHandleA("Game.dll");
@@ -488,8 +442,7 @@ bool InitializeFastPakDecompressor() {
 }
 
 void ShutdownFastPakDecompressor() {
-    PakTracer_Shutdown();
-    ShutdownLayerRingArena();
+    ShutdownPakStreamingRing();
     if (s_targetPakDecompressor) {
         MH_DisableHook(s_targetPakDecompressor);
         MH_RemoveHook(s_targetPakDecompressor);
@@ -506,14 +459,11 @@ void ShutdownFastPakDecompressor() {
         s_fnFree(s_tlDecompressor);
         s_tlDecompressor = nullptr;
     }
-    ClearDecompCache();
-    Log("G3O", "Decompressor stats: Pak files: %ld blocks (in: %.2f MB, out: %.2f MB, time: %.2f ms, cache hits: %ld, saved: %.2f MB) | Savegame: %ld chunks (in: %.2f MB, out: %.2f MB, time: %.2f ms)",
+    Log("G3O", "Decompressor stats: Pak files: %ld blocks (in: %.2f MB, out: %.2f MB, time: %.2f ms) | Savegame: %ld chunks (in: %.2f MB, out: %.2f MB, time: %.2f ms)",
         s_decompCount,
         (double)s_decompInBytes / (1024.0 * 1024.0),
         (double)s_decompOutBytes / (1024.0 * 1024.0),
         (double)s_decompTimeUs / 1000.0,
-        s_consecutiveHits,
-        (double)s_consecutiveBytesSaved / (1024.0 * 1024.0),
         s_savegameDecompCount,
         (double)s_savegameDecompInBytes / (1024.0 * 1024.0),
         (double)s_savegameDecompOutBytes / (1024.0 * 1024.0),
@@ -525,6 +475,12 @@ LONG64 GetPakDecompInBytes() { return s_decompInBytes; }
 LONG64 GetPakDecompOutBytes() { return s_decompOutBytes; }
 double GetPakDecompTimeMs() { return (double)s_decompTimeUs / 1000.0; }
 
+void SetDecompLoadThreadId(DWORD tid) { InterlockedExchange(&s_loadThreadId, static_cast<LONG>(tid)); }
+LONG GetPakDecompMainThreadCount() { return s_decompMainCount; }
+double GetPakDecompMainThreadTimeMs() { return (double)s_decompMainTimeUs / 1000.0; }
+LONG GetPakDecompWorkerCount() { return s_decompWorkerCount; }
+double GetPakDecompWorkerTimeMs() { return (double)s_decompWorkerTimeUs / 1000.0; }
+
 LONG GetSavegameDecompCount() { return s_savegameDecompCount; }
 LONG64 GetSavegameDecompInBytes() { return s_savegameDecompInBytes; }
 LONG64 GetSavegameDecompOutBytes() { return s_savegameDecompOutBytes; }
@@ -535,6 +491,10 @@ void ResetDecompTelemetry() {
     InterlockedExchange64(&s_decompInBytes, 0);
     InterlockedExchange64(&s_decompOutBytes, 0);
     InterlockedExchange64(&s_decompTimeUs, 0);
+    InterlockedExchange(&s_decompMainCount, 0);
+    InterlockedExchange64(&s_decompMainTimeUs, 0);
+    InterlockedExchange(&s_decompWorkerCount, 0);
+    InterlockedExchange64(&s_decompWorkerTimeUs, 0);
 
     InterlockedExchange(&s_savegameDecompCount, 0);
     InterlockedExchange64(&s_savegameDecompInBytes, 0);

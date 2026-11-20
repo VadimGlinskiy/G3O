@@ -32,31 +32,24 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
 
     output.Append("[Performance]\n");
     output.AppendFormat(
-        "EnableSharedBaseOptimizations=%s\nEnableEntitySearchOptimizer=%s\nEnableFastPakDecompressor=%s\nEnableLayerRingArena=%s\nEnablePropertyCache=%s\nEnablePakPrefetch=%s\n"
+        "EnableSharedBaseOptimizations=%s\nEnableEntitySearchOptimizer=%s\nEnableFastPakDecompressor=%s\n"
         "EnableFrustumDatabaseOptimizer=%s\n"
-        "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\nEnableClassFactoryOptimizer=%s\n"
-        "EnableParallelDynamicLayers=%s\n"
+        "EnableSceneNodeOptimizer=%s\nEnableShadowOptimizer=%s\n"
         "EnableSessionStartOptimizer=%s\nSessionStartSleepMs=%u\n"
-        "EnableD3D9StateFilter=%s\nEnableFastTextureLoader=%s\nEnableVegetationOptimizer=%s\nEnableAdaptiveTreeShadows=%s\n"
+        "EnableFastTextureLoader=%s\nEnableVegetationOptimizer=%s\nEnableAdaptiveTreeShadows=%s\n"
         "TreeShadowDistance=%.9g\nVegetationGridRangeClamp=%.9g\n"
         "EnableSelectiveCulling=%s\nClutterCullThreshold=%.9g\nImportantCullThreshold=%.9g\n"
         "EnableAtmosphericFogControl=%s\nFogDistanceMultiplier=%.9g\nFogEndMinDistance=%.9g\nPreserveUnderwaterFog=%s\n"
         "EnableHighPrecisionTimer=%s\nEnableHighProcessPriority=%s\n"
-        "EnableCPUTopologyAffinity=%s\nEnableVFSCache=%s\nCPUCores=%d\nCPUThreads=%d\nCPUAffinityMask=0x%llX\n"
-        "PakCacheBudgetMB=%d\nPakPrefetchWorkers=%d\n",
+        "EnableCPUTopologyAffinity=%s\nCPUCores=%d\nCPUThreads=%d\nCPUAffinityMask=0x%llX\n",
         config.enableSharedBaseOptimizations ? "true" : "false",
         config.enableEntitySearchOptimizer ? "true" : "false",
         config.enableFastPakDecompressor ? "true" : "false",
-        config.enableLayerRingArena ? "true" : "false",
-        config.enablePropertyCache ? "true" : "false", config.enablePakPrefetch ? "true" : "false",
         config.enableFrustumDatabaseOptimizer ? "true" : "false",
         config.enableSceneNodeOptimizer ? "true" : "false",
         config.enableShadowOptimizer ? "true" : "false",
-        config.enableClassFactoryOptimizer ? "true" : "false",
-        config.enableParallelDynamicLayers ? "true" : "false",
         config.enableSessionStartOptimizer ? "true" : "false",
         config.sessionStartSleepMs,
-        config.enableD3D9StateFilter ? "true" : "false",
         config.enableFastTextureLoader ? "true" : "false",
         config.enableVegetationOptimizer ? "true" : "false",
         config.enableAdaptiveTreeShadows ? "true" : "false",
@@ -69,9 +62,8 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.enableHighPrecisionTimer ? "true" : "false",
         config.enableHighProcessPriority ? "true" : "false",
         config.enableCPUTopologyAffinity ? "true" : "false",
-        config.enableVFSCache ? "true" : "false", config.cpuCores, config.cpuThreads,
-        static_cast<unsigned long long>(config.cpuAffinityMask),
-        config.pakCacheBudgetMB, config.pakPrefetchWorkers);
+        config.cpuCores, config.cpuThreads,
+        static_cast<unsigned long long>(config.cpuAffinityMask));
 
     output.Append("[Memory]\n");
     output.AppendFormat("AllocatorMode=%d\n", config.allocatorMode);
@@ -81,6 +73,21 @@ inline void AppendAppliedConfigSnapshot(FixedTextBuffer& output, const Config& c
         config.enableDiagnosticLog ? "true" : "false",
         config.interceptOutputDebugString ? "true" : "false",
         config.enableProfiler ? "true" : "false", config.enableSavegameAudit ? "true" : "false");
+    if (config.autoTestEnabled) {
+        output.Append("[AutoTest]\n");
+        output.AppendFormat(
+            "Enabled=true\nSlot=%s\nLoads=%d\nSettleFrames=%d\nMenuSettleTicks=%d\nTimeoutSec=%d\n"
+            "SkipIntro=%s\nDisableReShade=%s\nEnableLayerAudit=%s\nRunId=%s\n",
+            config.autoTestSlot.c_str(),
+            config.autoTestLoads,
+            config.autoTestSettleFrames,
+            config.autoTestMenuSettleTicks,
+            config.autoTestTimeoutSec,
+            config.autoTestSkipIntro ? "true" : "false",
+            config.autoTestDisableReShade ? "true" : "false",
+            config.autoTestEnableLayerAudit ? "true" : "false",
+            config.autoTestRunId.empty() ? "<auto>" : config.autoTestRunId.c_str());
+    }
     output.Finish();
 }
 

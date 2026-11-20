@@ -30,20 +30,13 @@ struct Config {
     bool enableSharedBaseOptimizations = true;
     bool enableEntitySearchOptimizer = true;
     bool enableFastPakDecompressor = true;
-    bool enableLayerRingArena = false;
-    bool enablePropertyCache = true;
-    bool enablePakPrefetch = true;
     bool enableFrustumDatabaseOptimizer = true;
     bool enableSceneNodeOptimizer = true;
     bool enableShadowOptimizer = true;
-    bool enableClassFactoryOptimizer = true;
 
-    bool enableParallelDynamicLayers = true;
     bool enableSessionStartOptimizer = true;
     uint32_t sessionStartSleepMs = 1;
 
-    // Fail-open if device threading or state-block hooks cannot be verified.
-    bool enableD3D9StateFilter = true;
     bool enableFastTextureLoader = true;
     bool enableVegetationOptimizer = true;
     bool enableAdaptiveTreeShadows = true;
@@ -59,12 +52,9 @@ struct Config {
     bool enableHighPrecisionTimer = true;
     bool enableHighProcessPriority = true;
     bool enableCPUTopologyAffinity = true;
-    bool enableVFSCache = true;
     int cpuCores = 0;                  // 0 = Auto-detect
     int cpuThreads = 0;                // 0 = Auto-detect
     DWORD_PTR cpuAffinityMask = 0;     // 0 = Auto-detect
-    int pakCacheBudgetMB = 384;        // Rolling pre-decompression memory budget (MB)
-    int pakPrefetchWorkers = 0;        // 0 = Auto-detect based on CPU cores (up to 6)
 
     // [Memory]
     int allocatorMode = 1;             // 0 = Vanilla, 1 = ShortUsage / ScrapHeap, 2 = Full MemHeap
@@ -75,6 +65,18 @@ struct Config {
     bool enableProfiler = false;
     bool enableSavegameAudit = false;
     bool enableLayerAudit = false;     // Deep per-entity/property QPC hooks (19 hooks, ~0.2-0.3s overhead)
+
+    // [AutoTest] (env-first: G3O_AUTOTEST*, optional INI fallback; not emitted to default G3O.ini)
+    bool autoTestEnabled = false;
+    std::string autoTestSlot = "Autosave_Slot_0001";
+    int autoTestLoads = 2;
+    int autoTestSettleFrames = 60;
+    int autoTestMenuSettleTicks = 30;
+    int autoTestTimeoutSec = 180;
+    bool autoTestSkipIntro = true;
+    bool autoTestDisableReShade = true;
+    bool autoTestEnableLayerAudit = false;
+    std::string autoTestRunId;
 
     std::string iniFilePath;
 };

@@ -90,42 +90,28 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
 #### 1. Savegame Loading and Asset Streaming
 
 * **`EnableFastPakDecompressor`** (default `true`)<br>
-  Hardware-accelerated decompression for `.pak` archives and `.g3savcpx` savegames using libdeflate with AVX2 vector instructions. Decompresses data up to 4x faster than vanilla zlib.
-
-* **`EnablePakPrefetch`** (default `true`), **`PakCacheBudgetMB`** (default `768`), **`PakPrefetchWorkers`** (default `0` — auto)<br>
-  Background asset prefetching. Preheats the Windows file cache and decompresses frequently needed archive blocks into memory based on previous session traces. Eliminates long load hitches and streaming stutters.<br>
-  *Memory limit:* 768 MB is a safe limit for a 32-bit process, preventing out-of-memory crashes. Setting `0` disables the cache.
-
-* **`EnablePropertyCache`** (default `true`)<br>
-  High-speed entity property cache. During save loading, the engine resolves properties hundreds of thousands of times. This cache stores resolved properties in a fast hash table, eliminating redundant lookups.
-
-* **`EnableVFSCache`** (default `true`)<br>
-  Virtual File System (VFS) path caching. Avoids repeated directory searches through long chains of archive files — especially valuable for large mod packages.
+  Hardware-accelerated decompression for `.pak` archives and `.g3savcpx` savegames using libdeflate (AVX2/BMI2 instructions) and the multithreaded **`PakStreamingRing`** pipeline.<br>
+  *G3O solution:* A background worker pool proactively reads and decompresses upcoming archive blocks into an isolated 64 MB ring buffer (32 slots x 2 MB). When the main engine thread requests data, it consumes pre-decompressed bytes in 0.04 ms (`memcpy`) with zero wait. Strictly adheres to the Zero-Cache policy: ephemeral, single-use, bounded to 64 MB (<= 88 MB safe VAS), with zero persistent disk or memory caches.
 
 * **`EnableSessionStartOptimizer`** (default `true`), **`SessionStartSleepMs`** (default `1`)<br>
   Removes idle wait delays on world start.<br>
   *Vanilla issue:* The original engine ran twelve consecutive `Sleep(100)` calls during session start, causing 1.2 seconds of dead waiting time on every save load.<br>
   *G3O solution:* Reduces idle sleep calls from 100 ms to 1 ms, shaving over a second off every loading screen.
 
-* **`EnableLayerRingArena`** (default `false`)<br>
-  Circular arena buffer for massive world layers (`RB_Mod`). Recommended off (`false`) for standard gameplay.
-
-* **`EnableParallelDynamicLayers`** (default `true`)<br>
-  Safe background pre-fetching and decompression of dynamic world layers (`Projects_compiled.*`) into RAM. Background worker threads read and decompress independent mod layers (CNQ, LTM, AD_World, RB_Mod) in parallel via AVX2/BMI2 `libdeflate`, while the engine activates them on the main thread without I/O stalls or crash risks. Reduces world activation time by 5–10 seconds.
-
 #### 2. Engine Memory, Scene Graph & Core Algorithms
 
 * **`EnableSharedBaseOptimizations`** (default `true`)<br>
-  Accelerates core math operations and string comparisons in `SharedBase.dll`. Uses fast CPU instructions for bounding box checks and name hashing, reducing CPU overhead in dense scenes.
+  Comprehensive mathematical and string optimizations in `SharedBase.dll`:<br>
+  1. *Vectorized string comparison `bCString::CompareFast`:* direct in-place replacement with 58 bytes of `repe cmpsb` instructions and instantaneous COW-pointer checks (halves CPU load of `CompareFast`).<br>
+  2. *Fast DJB2 hash `FastDjb2Hash`:* 4-byte unrolled string hashing loop supporting Cyrillic CP1251, plus bypassing 4 redundant virtual calls in `bCAccessorPropertyObject::SetInstance`.<br>
+  3. *Fast word extraction `bCString::GetWord`:* direct token extraction with in-place pointer trimming (TrimLeft/TrimRight), accelerating the parsing of 24,595 dialogue/quest files in `SysDyn` by ~9x (from 1388 ms to 155 ms).<br>
+  4. *SSE sphere intersection `bCSphere::Intersects`:* replaces 35 scalar x87 FPU stack instructions with fast SSE scalar math.
 
 * **`EnableFrustumDatabaseOptimizer`** (default `true`)<br>
   Optimizes visibility database updates during loading. Batches frequent intermediate frustum queries, significantly reducing save loading times.
 
 * **`EnableSceneNodeOptimizer`** (default `true`)<br>
   Pre-allocates scene node child arrays in stepped blocks (1024 -> 8192 -> 32768) rather than the engine's incremental 25% growth, eliminating cascading reallocations in heavily populated cities.
-
-* **`EnableClassFactoryOptimizer`** (default `true`)<br>
-  Class factory caching. Caches reflection type descriptors and reuses string buffers, eliminating tens of thousands of memory allocations during sector deserialization.
 
 * **`EnableEntitySearchOptimizer`** (default `true`)<br>
   Optimizes entity component lookups with fast-path early exit.
@@ -160,9 +146,6 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
 * **`EnableFastTextureLoader`** (default `true`)<br>
   Streamlined Direct3D 9 texture loading that avoids redundant intermediate buffer copies.
 
-* **`EnableD3D9StateFilter`** (default `true`)<br>
-  DirectX 9 state filtering. Discards duplicate render state calls before sending them to the GPU, saving CPU cycles.
-
 #### 4. CPU Scheduling, Priority & System Timer
 
 * **`EnableHighPrecisionTimer`** (default `true`)<br>
@@ -172,9 +155,9 @@ The configuration file `G3O.ini` is located in the game folder next to `Gothic3.
   Assigns high priority to `Gothic3.exe`, preventing background Windows applications from stealing CPU time.
 
 * **`EnableCPUTopologyAffinity`** (default `true`), **`CPUCores`** (`0`), **`CPUThreads`** (`0`), **`CPUAffinityMask`** (`0x0`)<br>
-  Pins the game to performance cores (P-cores).<br>
+  Controls CPU Affinity and the number of background workers in the `PakStreamingRing` pipeline.<br>
   *Vanilla issue:* On hybrid CPUs (Intel 12th gen and newer), Windows often incorrectly schedules the main Gothic 3 thread onto slow efficiency cores (E-cores), cutting performance in half.<br>
-  *G3O solution:* Detects CPU topology and ensures threads run exclusively on high-performance cores.
+  *G3O solution:* When set to `0` (automatic), G3O detects CPU topology and keeps the game on high-performance P-cores. When configured manually (e.g. `CPUCores=4` or `CPUThreads=6`), G3O clamps the process and background decompression workers to the chosen core count (capping CPU load at 400% or 600% respectively).
 
 ---
 
@@ -223,8 +206,7 @@ Gothic 3\
     ├── G3O_Crash_*.dmp         (memory minidumps)
     ├── G3O_LoadProfiler_*.log  (savegame load audit logs)
     ├── G3O_profile_*.log       (performance & frame time logs)
-    ├── G3O_diagnostic_*.log    (subsystem initialization logs)
-    └── G3O_PakTrace_*.csv      (PAK trace cache for prefetcher)
+    └── G3O_diagnostic_*.log    (subsystem initialization logs)
 ```
 
 ---

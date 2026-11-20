@@ -112,7 +112,10 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "\n"
         << "[Performance]\n"
         << "; Ускорение базовых математических операций и работы со строками движка (SharedBase.dll).\n"
-        << "; Использует быстрые инструкции процессора для проверки границ объектов и сравнения имен в памяти.\n"
+        << "; - Векторизованное сравнение строк bCString::CompareFast (repe cmpsb + мгновенная проверка COW-указателей);\n"
+        << "; - Быстрый 4-байтовый DJB2-хэш строк FastDjb2Hash и обход избыточных вызовов в bCAccessorPropertyObject::SetInstance;\n"
+        << "; - Быстрое извлечение слов bCString::GetWord со встроенной обрезкой пробелов по указателям (ускорение загрузки квестов и диалогов);\n"
+        << "; - Быстрый SSE-расчет пересечения сфер bCSphere::Intersects без медленных операций x87 FPU.\n"
         << "; Заметно снижает нагрузку на CPU в сценах с большим количеством объектов и ускоряет загрузку мира.\n"
         << "EnableSharedBaseOptimizations=true\n"
         << "\n"
@@ -120,35 +123,11 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Когда список компонентов отсортирован, находит нужные данные мгновенно без перебора всего списка.\n"
         << "EnableEntitySearchOptimizer=true\n"
         << "\n"
-        << "; Быстрая распаковка архивов PAK и сохранений через современную библиотеку libdeflate (AVX2).\n"
-        << "; Значительно ускоряет загрузку игры. При сбое пробует аварийную распаковку без проверки контрольной суммы zlib, а затем штатный метод.\n"
+        << "; Быстрая распаковка архивов PAK и сохранений.\n"
+        << "; - Аппаратная декомпрессия блоков через библиотеку libdeflate (AVX2/BMI2);\n"
+        << "; - Многопоточный потоковый конвейер PakStreamingRing: фоновые воркеры на опережение распаковывают\n"
+        << ";   следующие блоки архивов в 64 МБ кольцевой буфер, выдавая главному потоку готовые данные за 0.04 мс.\n"
         << "EnableFastPakDecompressor=true\n"
-        << "\n"
-        << "; Кольцевой буфер предзагрузки слоев мира для тяжелых модов (RB_Mod).\n"
-        << "; Данные берутся только при полном совпадении сжатого блока с файлом архива. Требует EnableFastPakDecompressor=true.\n"
-        << "; Для обычной игры держите выключенным (EnableLayerRingArena=false).\n"
-        << "EnableLayerRingArena=false\n"
-        << "\n"
-        << "; Безопасная фоновая предзагрузка и декомпрессия динамических слоев мира в RAM.\n"
-        << "; Заранее распаковывает независимые слои модов (CNQ, LTM, AD_World, RB_Mod) в ОЗУ в фоновых потоках без риска вылетов.\n"
-        << "EnableParallelDynamicLayers=true\n"
-        << "\n"
-        << "; Кэширование свойств объектов при загрузке.\n"
-        << "; Запоминает однажды найденные свойства в быстрой хэш-таблице, избавляя от повторных поисков и ускоряя загрузку сохранений.\n"
-        << "EnablePropertyCache=true\n"
-        << "\n"
-        << "; Фоновое чтение и предзагрузка архивов.\n"
-        << "; В фоне прогревает файловый кэш Windows перед стартом мира и заранее распаковывает отмеченные PAK-блоки по данным прошлой загрузки.\n"
-        << "; Устраняет зависания и микрофризы при входе в игру.\n"
-        << "EnablePakPrefetch=true\n"
-        << "\n"
-        << "; Максимальный объем оперативной памяти под кэш распакованных архивов (в мегабайтах).\n"
-        << "; 384 МБ — оптимальный безопасный лимит для 32-битного движка Готики 3 (предотвращает вылеты Out of Memory). 0 выключает кэш.\n"
-        << "PakCacheBudgetMB=384\n"
-        << "\n"
-        << "; Количество фоновых потоков для распаковки ресурсов по трассе сохранения.\n"
-        << "; 0 — определить автоматически по числу физических ядер процессора.\n"
-        << "PakPrefetchWorkers=0\n"
         << "\n"
         << "; Оптимизация базы видимости мира при загрузке.\n"
         << "; Откладывает частые мелкие перерасчеты и применяет их пачкой, сокращая время загрузочного экрана.\n"
@@ -162,10 +141,6 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Оптимизация солнечных теней.\n"
         << "; Быстро удаляет дубликаты из списка источников тени без лишней перетасовки памяти, повышая FPS в лесистой местности.\n"
         << "EnableShadowOptimizer=true\n"
-        << "\n"
-        << "; Кэширование фабрики классов.\n"
-        << "; Запоминает соответствие имен классов внутренним типам движка, ускоряя распознавание объектов при загрузке.\n"
-        << "EnableClassFactoryOptimizer=true\n"
         << "\n"
         << "; Устранение холостых пауз при старте сессии.\n"
         << "; В оригинале движок делает 12 пауз Sleep по 100 мс (1.2 сек). Опция сокращает их до минимума.\n"
@@ -226,22 +201,17 @@ static void CreateDefaultIniFile(const std::string& path) {
         << "; Выбирает по одному логическому процессору с каждого ядра, избегая медленных энергоэффективных E-ядер.\n"
         << "EnableCPUTopologyAffinity=true\n"
         << "\n"
-        << "; Кэширование путей к файлам в виртуальной файловой системе (VFS).\n"
-        << "; Мгновенно находит нужные архивы и файлы модов без повторного сканирования диска.\n"
-        << "EnableVFSCache=true\n"
-        << "\n"
         << "; Количество используемых физических ядер процессора (0 = автоматически).\n"
+        << "; Управляет системной привязкой процесса (CPU Affinity) и числом фоновых воркеров распаковки PakStreamingRing.\n"
+        << "; Например: при значении 4 игра и фоновые потоки используют не более 4 ядер (пик нагрузки до 400%).\n"
         << "CPUCores=0\n"
         << "\n"
         << "; Количество логических потоков процессора (0 = автоматически).\n"
+        << "; Задает лимит потоков для игры и воркеров распаковки. Например: 6 = игра и воркеры в сумме не более 6 потоков (пик нагрузки до 600%).\n"
         << "CPUThreads=0\n"
         << "\n"
         << "; Ручная шестнадцатеричная маска привязки ядер процессора (0x0 = автоматически).\n"
         << "CPUAffinityMask=0x0\n"
-        << "\n"
-        << "; Фильтр повторяющихся команд DirectX 9.\n"
-        << "; Отсекает отправку видеокарте идентичных состояний рендеринга, экономя процессорное время.\n"
-        << "EnableD3D9StateFilter=true\n"
         << "\n"
         << "\n"
         << "[Memory]\n"
@@ -320,6 +290,36 @@ static DWORD_PTR ReadIniHex(const char* section, const char* key, DWORD_PTR defa
         : defaultVal;
 }
 
+static std::string ReadIniString(const char* section, const char* key, const char* defaultVal, const char* path) {
+    char buf[256] = {};
+    GetPrivateProfileStringA(section, key, defaultVal ? defaultVal : "", buf, sizeof(buf), path);
+    return Trim(buf);
+}
+
+static bool ReadEnvString(const char* name, std::string& out) {
+    char buf[256] = {};
+    const DWORD len = GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
+    if (len == 0 || len >= sizeof(buf)) return false;
+    out = Trim(buf);
+    return true;
+}
+
+static bool ReadEnvBool(const char* name, bool fallback) {
+    std::string raw;
+    if (!ReadEnvString(name, raw)) return fallback;
+    const std::string val = ToUpper(raw);
+    if (val == "TRUE" || val == "1" || val == "YES" || val == "ON") return true;
+    if (val == "FALSE" || val == "0" || val == "NO" || val == "OFF") return false;
+    return fallback;
+}
+
+static int ReadEnvInt(const char* name, int fallback, int minimum, int maximum) {
+    std::string raw;
+    if (!ReadEnvString(name, raw)) return fallback;
+    int value = fallback;
+    return IniValue::ParseInt(raw.c_str(), minimum, maximum, value) ? value : fallback;
+}
+
 const Config& GetConfig() {
     return s_config;
 }
@@ -360,18 +360,12 @@ void LoadConfig() {
         "Performance", "EnableSharedBaseOptimizations", "EnableSIMDFrustumCulling", true, path);
     s_config.enableEntitySearchOptimizer = ReadIniBool("Performance", "EnableEntitySearchOptimizer", true, path);
     s_config.enableFastPakDecompressor = ReadIniBool("Performance", "EnableFastPakDecompressor", true, path);
-    s_config.enableLayerRingArena = ReadIniBool("Performance", "EnableLayerRingArena", false, path);
-    s_config.enablePropertyCache = ReadIniBool("Performance", "EnablePropertyCache", true, path);
-    s_config.enablePakPrefetch = ReadIniBool("Performance", "EnablePakPrefetch", true, path);
     s_config.enableFrustumDatabaseOptimizer = ReadIniBool("Performance", "EnableFrustumDatabaseOptimizer", true, path);
     s_config.enableSceneNodeOptimizer = ReadIniBool("Performance", "EnableSceneNodeOptimizer", true, path);
     s_config.enableShadowOptimizer = ReadIniBool("Performance", "EnableShadowOptimizer", true, path);
-    s_config.enableClassFactoryOptimizer = ReadIniBool("Performance", "EnableClassFactoryOptimizer", true, path);
 
-    s_config.enableParallelDynamicLayers = ReadIniBool("Performance", "EnableParallelDynamicLayers", true, path);
     s_config.enableSessionStartOptimizer = ReadIniBool("Performance", "EnableSessionStartOptimizer", true, path);
     s_config.sessionStartSleepMs = static_cast<uint32_t>(ReadIniInt("Performance", "SessionStartSleepMs", 1, 0, 100, path));
-    s_config.enableD3D9StateFilter = ReadIniBool("Performance", "EnableD3D9StateFilter", true, path);
     s_config.enableFastTextureLoader = ReadIniBool("Performance", "EnableFastTextureLoader", true, path);
     s_config.enableVegetationOptimizer = ReadIniBool("Performance", "EnableVegetationOptimizer", true, path);
     s_config.enableAdaptiveTreeShadows = ReadIniBool("Performance", "EnableAdaptiveTreeShadows", true, path);
@@ -387,12 +381,9 @@ void LoadConfig() {
     s_config.enableHighPrecisionTimer = ReadIniBool("Performance", "EnableHighPrecisionTimer", true, path);
     s_config.enableHighProcessPriority = ReadIniBool("Performance", "EnableHighProcessPriority", true, path);
     s_config.enableCPUTopologyAffinity = ReadIniBool("Performance", "EnableCPUTopologyAffinity", true, path);
-    s_config.enableVFSCache = ReadIniBool("Performance", "EnableVFSCache", true, path);
     s_config.cpuCores = ReadIniInt("Performance", "CPUCores", 0, 0, 32, path);
     s_config.cpuThreads = ReadIniInt("Performance", "CPUThreads", 0, 0, 32, path);
     s_config.cpuAffinityMask = ReadIniHex("Performance", "CPUAffinityMask", 0, path);
-    s_config.pakCacheBudgetMB = ReadIniInt("Performance", "PakCacheBudgetMB", 384, 0, 1024, path);
-    s_config.pakPrefetchWorkers = ReadIniInt("Performance", "PakPrefetchWorkers", 0, 0, 8, path);
 
     // [Memory]
     s_config.allocatorMode = ReadIniInt("Memory", "AllocatorMode", 1, 0, 2, path);
@@ -403,6 +394,50 @@ void LoadConfig() {
     s_config.enableProfiler = ReadIniBool("Logging", "EnableProfiler", false, path);
     s_config.enableSavegameAudit = ReadIniBool("Logging", "EnableSavegameAudit", false, path);
     s_config.enableLayerAudit = ReadIniBool("Logging", "EnableLayerAudit", false, path);
+
+    // [AutoTest] (optional INI fallback, overridden by child-process G3O_AUTOTEST* env vars)
+    const bool iniAutoTestEnabled = ReadIniBool("AutoTest", "Enabled", false, path);
+    const std::string iniAutoTestSlot = ReadIniString("AutoTest", "Slot", "Autosave_Slot_0001", path);
+    const int iniAutoTestLoads = ReadIniInt("AutoTest", "Loads", 2, 1, 20, path);
+    const int iniAutoTestSettleFrames = ReadIniInt("AutoTest", "SettleFrames", 60, 1, 600, path);
+    const int iniAutoTestMenuSettleTicks = ReadIniInt("AutoTest", "MenuSettleTicks", 30, 1, 600, path);
+    const int iniAutoTestTimeoutSec = ReadIniInt("AutoTest", "TimeoutSec", 180, 30, 1800, path);
+    const bool iniAutoTestSkipIntro = ReadIniBool("AutoTest", "SkipIntro", true, path);
+    const bool iniAutoTestDisableReShade = ReadIniBool("AutoTest", "DisableReShade", true, path);
+    const bool iniAutoTestEnableLayerAudit = ReadIniBool("AutoTest", "EnableLayerAudit", false, path);
+    const std::string iniAutoTestRunId = ReadIniString("AutoTest", "RunId", "", path);
+
+    s_config.autoTestEnabled = ReadEnvBool("G3O_AUTOTEST", iniAutoTestEnabled);
+    std::string envSlot;
+    if (ReadEnvString("G3O_AUTOTEST_SLOT", envSlot) && !envSlot.empty()) {
+        s_config.autoTestSlot = envSlot;
+    } else {
+        s_config.autoTestSlot = iniAutoTestSlot.empty() ? "Autosave_Slot_0001" : iniAutoTestSlot;
+    }
+    s_config.autoTestLoads = ReadEnvInt("G3O_AUTOTEST_LOADS", iniAutoTestLoads, 1, 20);
+    s_config.autoTestSettleFrames = ReadEnvInt("G3O_AUTOTEST_SETTLE_FRAMES", iniAutoTestSettleFrames, 1, 600);
+    s_config.autoTestMenuSettleTicks = ReadEnvInt("G3O_AUTOTEST_MENU_SETTLE_TICKS", iniAutoTestMenuSettleTicks, 1, 600);
+    s_config.autoTestTimeoutSec = ReadEnvInt("G3O_AUTOTEST_TIMEOUT_SEC", iniAutoTestTimeoutSec, 30, 1800);
+    s_config.autoTestSkipIntro = ReadEnvBool("G3O_AUTOTEST_SKIP_INTRO", iniAutoTestSkipIntro);
+    s_config.autoTestDisableReShade = ReadEnvBool("G3O_AUTOTEST_DISABLE_RESHADE", iniAutoTestDisableReShade);
+    s_config.autoTestEnableLayerAudit = ReadEnvBool("G3O_AUTOTEST_LAYER_AUDIT", iniAutoTestEnableLayerAudit);
+    std::string envRunId;
+    s_config.autoTestRunId = ReadEnvString("G3O_AUTOTEST_RUN_ID", envRunId) ? envRunId : iniAutoTestRunId;
+
+    // Safe in-memory runtime overrides when AutoTest is active (never written back to G3O.ini)
+    if (s_config.autoTestEnabled) {
+        s_config.enableDiagnosticLog = true;
+        s_config.enableSavegameAudit = true;
+        s_config.enableLayerAudit = s_config.enableLayerAudit || s_config.autoTestEnableLayerAudit;
+        s_config.enableCrashInvestigator = true;
+        s_config.writeCrashLog = true;
+        s_config.showCrashDialog = false;
+        s_config.windowCursorLock = false;
+        if (s_config.autoTestDisableReShade) {
+            s_config.loadReShade = false;
+        }
+        s_config.allocatorMode = ReadEnvInt("G3O_AUTOTEST_ALLOCATOR_MODE", s_config.allocatorMode, 0, 2);
+    }
 
 }
 

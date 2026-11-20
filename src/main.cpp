@@ -13,17 +13,13 @@
 #include "cpu_topology.h"
 #include "vegetation_optimizer.h"
 #include "fast_pak_decompressor.h"
-#include "property_cache_optimizer.h"
 #include "entity_search_optimizer.h"
 #include "frustum_database_optimizer.h"
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
-#include "class_factory_optimizer.h"
-#include "dynamic_layer_optimizer.h"
 #include "session_start_optimizer.h"
-#include "vfs_cache_optimizer.h"
 #include "savegame_profiler.h"
-#include "pak_prefetch.h"
+#include "autotest_runner.h"
 #include "selective_culling_optimizer.h"
 #include "fog_optimizer.h"
 #include "crash_guards.h"
@@ -40,6 +36,10 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
 
     if (!cfg.enableG3O) {
         return 0;
+    }
+
+    if (cfg.autoTestEnabled) {
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     }
 
     MH_STATUS status = MH_Initialize();
@@ -128,18 +128,8 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeFastPakDecompressor();
     }
 
-    // Property Cache Optimizer: O(1) hash cache for entity property resolution during save loading
-    if (cfg.enablePropertyCache) {
-        G3O::InitializePropertyCacheOptimizer();
-    }
-
     if (cfg.enableEntitySearchOptimizer) {
         G3O::InitializeEntitySearchOptimizer();
-    }
-
-    // VFS Cache Optimizer: O(1) hash cache for virtual file system directory lookups across 395 mod archives
-    if (cfg.enableVFSCache) {
-        G3O::InitializeVFSCacheOptimizer();
     }
 
     // Frustum Database Optimizer: Deferred spatial tree updates during entity streaming (Phase 3)
@@ -157,15 +147,6 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
         G3O::InitializeShadowCasterOptimizer();
     }
 
-    // Class Factory Optimizer: L1-cache and Zero-Alloc string reuse for bCPropertyObjectSingleton::ReadObject
-    if (cfg.enableClassFactoryOptimizer) {
-        G3O::InitializeClassFactoryOptimizer();
-    }
-
-    // Dynamic Layer Optimizer: Parallel activation of independent dynamic mod layers
-    if (cfg.enableParallelDynamicLayers) {
-        G3O::InitializeDynamicLayerOptimizer();
-    }
 
     // Session Start Optimizer: Eliminates 12x Sleep(100) idle warm-up in gCSession::Start
     if (cfg.enableSessionStartOptimizer) {
@@ -174,14 +155,18 @@ static DWORD WINAPI OptimaInitThread(LPVOID) {
 
     // Savegame Profiler: High-resolution telemetry for savegame loading phases
     G3O::InitializeSavegameProfiler();
-    G3O::InitializePakPrefetch();
+
+    // Optional AutoTest harness (active only when G3O_AUTOTEST=1 or [AutoTest] Enabled=true)
+    if (cfg.autoTestEnabled) {
+        G3O::InitializeAutoTestRunner();
+    }
 
     if (cfg.enableSharedBaseOptimizations) {
         G3O::InitializeSharedBaseOptimizations();
     }
 
-    // Direct3D 9 State Redundancy Filter, Fast Texture Loader & Texture Crash Investigator
-    if (cfg.enableD3D9StateFilter || cfg.enableFastTextureLoader || cfg.enableProfiler || cfg.enableCrashInvestigator) {
+    // Fast Texture Loader, texture diagnostics, and profiler device attachment
+    if (cfg.enableFastTextureLoader || cfg.enableProfiler || cfg.enableCrashInvestigator) {
         G3O::InitializeD3D9Optimizer();
     }
 
@@ -241,16 +226,14 @@ static void ShutdownOptima() {
     G3O::ShutdownVegetationOptimizer();
     G3O::ShutdownFastPakDecompressor();
     G3O::ShutdownEntitySearchOptimizer();
-    G3O::ShutdownPropertyCacheOptimizer();
     G3O::ShutdownFrustumDatabaseOptimizer();
     G3O::ShutdownSceneNodeOptimizer();
     G3O::ShutdownShadowCasterOptimizer();
-    G3O::ShutdownClassFactoryOptimizer();
-    G3O::ShutdownDynamicLayerOptimizer();
     G3O::ShutdownSessionStartOptimizer();
     G3O::ShutdownSelectiveCullingOptimizer();
     G3O::ShutdownFogOptimizer();
-    G3O::ShutdownVFSCacheOptimizer();
+
+    G3O::ShutdownAutoTestRunner();
     G3O::ShutdownSavegameProfiler();
     G3O::ShutdownD3D9Optimizer();
     G3O::ShutdownProfiler();

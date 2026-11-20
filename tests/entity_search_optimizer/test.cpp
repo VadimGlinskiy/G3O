@@ -50,7 +50,6 @@ int main() {
 
     void* smallArray[4] = { &elemA, &elemB, &elemC, &elemD };
 
-    G3O::ResetVTableTypeCache();
     s_virtualCallCount = 0;
 
     // Test 1: Linear scan with Early Exit (count <= 8)
@@ -62,15 +61,11 @@ int main() {
     ok &= Expect(G3O::FastSearchPropertySet(smallArray, 4, 5) == 0xFFFF, "Missing element < min returns 0xFFFF");
     ok &= Expect(G3O::FastSearchPropertySet(smallArray, 4, 25) == 0xFFFF, "Missing element between elements returns 0xFFFF");
 
-    // Test 2: Verify L1 vptr-cache hit rate
-    // With 4 distinct vtables, exactly 4 virtual calls should have occurred even after 7 searches
-    ok &= Expect(s_virtualCallCount == 4, "L1 cache should serve repeated vptr lookups without virtual calls");
-
-    // Repeat lookups 100 times - call count must remain exactly 4
-    for (int i = 0; i < 100; ++i) {
-        G3O::FastSearchPropertySet(smallArray, 4, 20);
-    }
-    ok &= Expect(s_virtualCallCount == 4, "Repeated queries must generate 0 additional virtual calls");
+    // Repeated searches must read the live component type instead of caching it.
+    const uint32_t callsBeforeRepeat = s_virtualCallCount;
+    G3O::FastSearchPropertySet(smallArray, 4, 20);
+    ok &= Expect(s_virtualCallCount == callsBeforeRepeat + 2,
+                 "each visited property set should call its current virtual type method");
 
     // Test 3: Large array binary search (count > 8)
     static uintptr_t vtablesLarge[16][32] = {};
@@ -97,6 +92,6 @@ int main() {
     ok &= Expect(G3O::FastSearchPropertySet(smallArray, 0, 10) == 0xFFFF, "Zero count returns 0xFFFF");
 
     if (!ok) return 1;
-    std::puts("PASS: Entity search policy fast linear scan, L1 vptr cache, and binary search verified.");
+    std::puts("PASS: Entity search policy live type lookup, early exit, and binary search verified.");
     return 0;
 }

@@ -15,18 +15,12 @@ inline int ResolveSamplePhaseForSector(int currentPhase, const char* sectorName)
         : currentPhase;
 }
 
-inline bool ShouldTracePakPrefetch(const Config& config) noexcept {
-    return config.enablePakPrefetch && config.enableFastPakDecompressor;
-}
-
 inline bool ShouldInstallSavegameProfilerHooks(const Config& config) noexcept {
-    return config.enableSavegameAudit || config.enableProfiler || ShouldTracePakPrefetch(config) ||
-           (config.enableLayerRingArena && config.enableFastPakDecompressor) ||
-           (config.enableParallelDynamicLayers && config.enableFastPakDecompressor);
+    return config.enableSavegameAudit || config.enableProfiler || config.autoTestEnabled;
 }
 
 inline bool ShouldCollectSavegameAudit(const Config& config) noexcept {
-    return config.enableSavegameAudit;
+    return config.enableSavegameAudit || config.autoTestEnabled;
 }
 
 } // namespace G3O

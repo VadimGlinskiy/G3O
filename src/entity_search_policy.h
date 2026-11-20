@@ -3,42 +3,15 @@
 
 namespace G3O {
 
-struct VTableTypeCacheEntry {
-    uintptr_t vptr;
-    uint32_t  type;
-};
-
-static constexpr uint32_t VTABLE_CACHE_SIZE = 256;
-static constexpr uint32_t VTABLE_CACHE_MASK = VTABLE_CACHE_SIZE - 1;
-
-// Thread-local 256-slot direct-mapped L1 cache (2 KB, fits entirely in L1D cache)
-alignas(64) static thread_local VTableTypeCacheEntry s_vtableTypeCache[VTABLE_CACHE_SIZE] = {};
-
 inline uint32_t FastGetPropertySetType(void* pPropertySet) {
     if (!pPropertySet) return 0xFFFFFFFF;
     uintptr_t vptr = *reinterpret_cast<const uintptr_t*>(pPropertySet);
-    uint32_t idx = ((vptr >> 4) ^ (vptr >> 12)) & VTABLE_CACHE_MASK;
-
-    if (s_vtableTypeCache[idx].vptr == vptr) {
-        return s_vtableTypeCache[idx].type;
-    }
 
     // Call vtable[24] (offset 0x60 in x86): uint32_t __thiscall GetType()
     using GetType_t = uint32_t(__thiscall*)(void*);
     auto vtable = reinterpret_cast<const uintptr_t*>(vptr);
     auto pfnGetType = reinterpret_cast<GetType_t>(vtable[24]);
-    uint32_t actualType = pfnGetType(pPropertySet);
-
-    s_vtableTypeCache[idx].vptr = vptr;
-    s_vtableTypeCache[idx].type = actualType;
-    return actualType;
-}
-
-inline void ResetVTableTypeCache() {
-    for (uint32_t i = 0; i < VTABLE_CACHE_SIZE; ++i) {
-        s_vtableTypeCache[i].vptr = 0;
-        s_vtableTypeCache[i].type = 0;
-    }
+    return pfnGetType(pPropertySet);
 }
 
 // Pure search algorithm operating on sorted array of PropertySets

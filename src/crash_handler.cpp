@@ -1,4 +1,5 @@
 #include "crash_handler.h"
+#include "autotest_policy.h"
 #include "diagnostic_logger.h"
 #include "config_manager.h"
 #include "applied_config_snapshot.h"
@@ -1209,6 +1210,12 @@ static LONG WINAPI G3OUnhandledCrashFilter(EXCEPTION_POINTERS* pExceptionInfo) {
     HandleCrash(pExceptionInfo);
 
     // Once crash log and dump are safely saved, terminate the crashing process cleanly
+    if (GetConfig().autoTestEnabled) {
+        Log("AutoTest", "[AutoTest] ABORT reason=unhandled_exception code=0x%08lX exitCode=%d",
+            static_cast<unsigned long>(exitCode), kAutoTestExitUnhandledException);
+        FlushDiagnosticLog();
+        TerminateProcess(GetCurrentProcess(), static_cast<UINT>(kAutoTestExitUnhandledException));
+    }
     TerminateProcess(GetCurrentProcess(), exitCode);
     return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -1374,6 +1381,13 @@ static int __fastcall HookedCallExceptionError(void* pThis, void* /*edx*/, void*
 static void __fastcall HookedCallFatalError1(void* pThis, void* /*edx*/, const char* module, const char* file, int line) {
     ReportEngineFatalError(module, nullptr, file, line);
 
+    if (GetConfig().autoTestEnabled) {
+        Log("AutoTest", "[AutoTest] ABORT reason=engine_fatal_error module=%s file=%s line=%d exitCode=%d",
+            module ? module : "unknown", file ? file : "unknown", line, kAutoTestExitEngineFatal);
+        FlushDiagnosticLog();
+        TerminateProcess(GetCurrentProcess(), static_cast<UINT>(kAutoTestExitEngineFatal));
+    }
+
     if (s_origCallFatalError1) {
         s_origCallFatalError1(pThis, module, file, line);
     }
@@ -1382,6 +1396,13 @@ static void __fastcall HookedCallFatalError1(void* pThis, void* /*edx*/, const c
 static void __fastcall HookedCallFatalError2(
     void* pThis, void* /*edx*/, const char* module, const char* description, const char* file, int line) {
     ReportEngineFatalError(module, description, file, line);
+
+    if (GetConfig().autoTestEnabled) {
+        Log("AutoTest", "[AutoTest] ABORT reason=engine_fatal_error module=%s desc=%s file=%s line=%d exitCode=%d",
+            module ? module : "unknown", description ? description : "", file ? file : "unknown", line, kAutoTestExitEngineFatal);
+        FlushDiagnosticLog();
+        TerminateProcess(GetCurrentProcess(), static_cast<UINT>(kAutoTestExitEngineFatal));
+    }
 
     if (s_origCallFatalError2) {
         s_origCallFatalError2(pThis, module, description, file, line);

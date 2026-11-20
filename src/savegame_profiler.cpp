@@ -1,4 +1,6 @@
 #include "savegame_profiler.h"
+#include "autotest_runner.h"
+#include "math_simd_optimizer.h"
 #include "diagnostic_logger.h"
 #include "config_manager.h"
 #include "savegame_profiler_policy.h"
@@ -7,18 +9,12 @@
 #include "timestamped_path.h"
 #include "g3o_output_path.h"
 #include "fast_pak_decompressor.h"
-#include "property_cache_optimizer.h"
-#include "vfs_cache_optimizer.h"
+#include "pak_streaming_ring.h"
 #include "frustum_database_optimizer.h"
 #include "scene_node_optimizer.h"
 #include "shadow_caster_optimizer.h"
-#include "class_factory_optimizer.h"
 
-#include "dynamic_layer_optimizer.h"
-#include "pak_tracer.h"
-#include "pak_read_at.h"
 #include "profiler.h"
-#include "layer_ring_arena.h"
 #include "sampling_profiler.h"
 #include <minhook.h>
 #include <windows.h>
@@ -34,20 +30,25 @@
 
 namespace G3O {
 
-static std::string s_lastSaveName = "QuickSave";
 static volatile LONG s_loadProfilerPathSequence = 0;
+static char s_lastLoadProfilerPath[MAX_PATH] = {};
 
 static LARGE_INTEGER s_freq = {};
 static bool s_qpcFrequencyInitialized = false;
 
 // -----------------------------------------------------------------------------
-// ReadFile I/O Tracker
+// ReadFile I/O profiler
 // -----------------------------------------------------------------------------
 typedef BOOL (WINAPI* ReadFile_t)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 static ReadFile_t Real_ReadFile = nullptr;
 static volatile LONG   s_readCalls = 0;
 static volatile LONG64 s_readBytes = 0;
 static volatile LONG64 s_readTimeUs = 0;
+static volatile LONG   s_loadThreadId = 0;
+static volatile LONG   s_readMainCalls = 0;
+static volatile LONG64 s_readMainTimeUs = 0;
+static volatile LONG   s_readWorkerCalls = 0;
+static volatile LONG64 s_readWorkerTimeUs = 0;
 static std::atomic<bool> s_isLoadActive{ false };
 
 bool IsSavegameLoadActive() noexcept {
@@ -89,15 +90,56 @@ static thread_local ContextAuditMetrics s_contextAuditMetrics{};
 // shortcut: tracks at most 256 targets; increase if overflow is reported.
 static constexpr std::size_t kSysDynPropertyReadDispatchCapacity = 256;
 static thread_local PropertyReadDispatchPaths<kSysDynPropertyReadDispatchCapacity> s_sysDynReadDispatchMetrics{};
-struct PropertyCacheTelemetryCounts {
-    LONG stringHits = 0;
-    LONG stringMisses = 0;
-    LONG idHits = 0;
-    LONG idMisses = 0;
-};
-static thread_local PropertyCacheTelemetryCounts s_sysDynPropertyCacheTelemetry{};
 static thread_local bool s_isSysDynSectorActive = false;
 static thread_local bool s_collectSysDynReadDispatch = false;
+static thread_local LayerAuditMetric s_sysDynInfoManagerReadMetric{};
+
+enum class InfoManagerAuditOperation : std::size_t {
+    Read,
+    ReadCompiledInfoManager,
+    LoadInfosFromInis,
+    WriteCompiledInfoManager,
+    ReadInfoArchiveFile,
+    ReadInfoArchiveOpen,
+    ReadInfoArchiveBytes,
+    ReadInfoArchiveClose,
+    ParseInfoCStringFind,
+    ParseInfoCStringGetWord,
+    ParseInfoCStringCountWords,
+    ParseInfoCStringReleaseBuffer,
+    ParseInfoGetTemplateEntityByName,
+    LoadInfosFindFiles,
+    ReadRuntimeData,
+    GetInfo,
+    BuildMapInfosByOwners,
+    Count,
+};
+
+struct InfoManagerAuditMetric {
+    std::uint64_t calls = 0;
+    std::uint64_t inclusiveTicks = 0;
+    std::uint64_t exclusiveTicks = 0;
+    std::uint64_t exclusiveUnavailableCalls = 0;
+};
+
+struct InfoManagerAuditMetrics {
+    InfoManagerAuditMetric operations[static_cast<std::size_t>(InfoManagerAuditOperation::Count)]{};
+    std::uint64_t infoArchiveBytesRequested = 0;
+    std::uint64_t infoArchiveBytesReturned = 0;
+    std::uint64_t frameOverflowCalls = 0;
+};
+
+static constexpr std::size_t kInfoManagerAuditFrameCapacity = 64;
+struct InfoManagerAuditFrame {
+    InfoManagerAuditOperation operation = InfoManagerAuditOperation::Read;
+    std::uint64_t childTicks = 0;
+    bool exclusiveAvailable = true;
+};
+static thread_local InfoManagerAuditMetrics s_infoManagerAuditMetrics{};
+static thread_local InfoManagerAuditFrame s_infoManagerAuditFrames[kInfoManagerAuditFrameCapacity]{};
+static thread_local std::size_t s_infoManagerOperationDepth = 0;
+static thread_local std::size_t s_infoManagerReadDepth = 0;
+static thread_local std::size_t s_infoArchiveReadDepth = 0;
 static thread_local PvsPrefetchMetrics s_pvsPrefetchMetrics{};
 static thread_local bool s_capturePvsPrefetchMetrics = false;
 
@@ -156,7 +198,42 @@ static PatchWithTemplateFn Real_PatchWithTemplate = nullptr;
 static ReadDependencyFn Real_ReadDependency = nullptr;
 static ChildrenAvailableFn Real_ChildrenAvailable = nullptr;
 
-static LPVOID s_metricsHookTargets[32] = {};
+using InfoManagerReadFn = int (__thiscall*)(void*, void*);
+static InfoManagerReadFn Real_InfoManagerRead = nullptr;
+using InfoManagerReadCompiledFn = bool (__thiscall*)(void*, const void*);
+using InfoManagerLoadInfosFromInisFn = bool (__thiscall*)(void*);
+using InfoManagerWriteCompiledFn = bool (__thiscall*)(void*, const void*);
+using InfoManagerGetInfoFn = void* (__thiscall*)(void*, const void*);
+using InfoManagerBuildMapInfosByOwnersFn = void (__thiscall*)(void*);
+using InfoArchiveReadFn = void (__thiscall*)(void*, void*);
+using InfoArchiveFileOpenFn = bool (__thiscall*)(void*, std::int32_t, bool);
+using InfoArchiveFileReadFn = std::uint32_t (__thiscall*)(void*, void*, std::uint32_t);
+using InfoArchiveFileCloseFn = bool (__thiscall*)(void*);
+using CStringFindCharFn = std::int32_t (__thiscall*)(void*, char, std::int32_t, bool);
+using CStringGetWordFn = std::int32_t (__thiscall*)(void*, std::int32_t, const void*, void*, bool, bool);
+using CStringCountWordsFn = std::int32_t (__thiscall*)(void*, const void*);
+using CStringReleaseBufferFn = void (__thiscall*)(void*, std::int32_t);
+using GetTemplateEntityByNameFn = void* (__thiscall*)(void*, const void*);
+using ArchiveFindFilesFn = bool (__thiscall*)(void*, void*, void*);
+using InfoReadRuntimeDataFn = int (__thiscall*)(void*, void*);
+static InfoManagerReadCompiledFn Real_InfoManagerReadCompiled = nullptr;
+static InfoManagerLoadInfosFromInisFn Real_InfoManagerLoadInfosFromInis = nullptr;
+static InfoManagerWriteCompiledFn Real_InfoManagerWriteCompiled = nullptr;
+static InfoManagerGetInfoFn Real_InfoManagerGetInfo = nullptr;
+static InfoManagerBuildMapInfosByOwnersFn Real_InfoManagerBuildMapInfosByOwners = nullptr;
+static InfoArchiveReadFn Real_InfoArchiveRead = nullptr;
+static InfoArchiveFileOpenFn Real_InfoArchiveFileOpen = nullptr;
+static InfoArchiveFileReadFn Real_InfoArchiveFileRead = nullptr;
+static InfoArchiveFileCloseFn Real_InfoArchiveFileClose = nullptr;
+static CStringFindCharFn Real_CStringFindChar = nullptr;
+static CStringGetWordFn Real_CStringGetWord = nullptr;
+static CStringCountWordsFn Real_CStringCountWords = nullptr;
+static CStringReleaseBufferFn Real_CStringReleaseBuffer = nullptr;
+static GetTemplateEntityByNameFn Real_GetTemplateEntityByName = nullptr;
+static ArchiveFindFilesFn Real_ArchiveFindFiles = nullptr;
+static InfoReadRuntimeDataFn Real_InfoReadRuntimeData = nullptr;
+
+static LPVOID s_metricsHookTargets[40] = {};
 static int s_numMetricsHooks = 0;
 static bool s_metricsHooksInitialized = false;
 
@@ -184,6 +261,108 @@ static double LayerMetricMs(std::uint64_t ticks) {
     return s_freq.QuadPart > 0
         ? static_cast<double>(ticks) * 1000.0 / static_cast<double>(s_freq.QuadPart)
         : 0.0;
+}
+
+class InfoManagerReadDepthScope {
+public:
+    InfoManagerReadDepthScope() noexcept { ++s_infoManagerReadDepth; }
+    ~InfoManagerReadDepthScope() noexcept { --s_infoManagerReadDepth; }
+};
+
+class InfoArchiveReadDepthScope {
+public:
+    InfoArchiveReadDepthScope() noexcept { ++s_infoArchiveReadDepth; }
+    ~InfoArchiveReadDepthScope() noexcept { --s_infoArchiveReadDepth; }
+};
+
+class InfoManagerOperationScope {
+public:
+    explicit InfoManagerOperationScope(InfoManagerAuditOperation operation) noexcept
+        : operation_(operation) {
+        if (s_infoManagerReadDepth == 0) return;
+        active_ = true;
+        start_ = BeginLayerMetric();
+        frameIndex_ = s_infoManagerOperationDepth;
+        if (frameIndex_ >= kInfoManagerAuditFrameCapacity) {
+            ++s_infoManagerAuditMetrics.frameOverflowCalls;
+            if (frameIndex_ == kInfoManagerAuditFrameCapacity) {
+                s_infoManagerAuditFrames[kInfoManagerAuditFrameCapacity - 1].exclusiveAvailable = false;
+            }
+            ++s_infoManagerOperationDepth;
+            return;
+        }
+        s_infoManagerAuditFrames[frameIndex_] = { operation_, 0, true };
+        ++s_infoManagerOperationDepth;
+        frameTracked_ = true;
+    }
+
+    ~InfoManagerOperationScope() noexcept {
+        if (!active_) return;
+        const std::uint64_t end = BeginLayerMetric();
+        if (frameTracked_ && end >= start_) {
+            const std::uint64_t inclusiveTicks = end - start_;
+            InfoManagerAuditMetric& metric = s_infoManagerAuditMetrics.operations[
+                static_cast<std::size_t>(operation_)];
+            ++metric.calls;
+            metric.inclusiveTicks += inclusiveTicks;
+            const InfoManagerAuditFrame& frame = s_infoManagerAuditFrames[frameIndex_];
+            if (frame.exclusiveAvailable && frame.childTicks <= inclusiveTicks) {
+                metric.exclusiveTicks += inclusiveTicks - frame.childTicks;
+            } else {
+                ++metric.exclusiveUnavailableCalls;
+            }
+            if (frameIndex_ > 0) {
+                InfoManagerAuditFrame& parent = s_infoManagerAuditFrames[frameIndex_ - 1];
+                if (parent.exclusiveAvailable) parent.childTicks += inclusiveTicks;
+            }
+        }
+        if (s_infoManagerOperationDepth > 0) --s_infoManagerOperationDepth;
+    }
+
+private:
+    InfoManagerAuditOperation operation_;
+    std::uint64_t start_ = 0;
+    std::size_t frameIndex_ = 0;
+    bool active_ = false;
+    bool frameTracked_ = false;
+};
+
+static void LogInfoManagerAuditMetrics() {
+    static const char* const names[] = {
+        "gCInfoManager_PS::Read",
+        "gCInfoManager_PS::ReadCompiledInfoManager",
+        "gCInfoManager_PS::LoadInfosFromInis",
+        "gCInfoManager_PS::WriteCompiledInfoManager",
+        "gCInfo_PS::Read(eCArchiveFile&)",
+        "eCArchiveFile::Open(info file)",
+        "eCArchiveFile::Read(info payload)",
+        "eCArchiveFile::Close(info file)",
+        "bCString::Find(char) (Info read)",
+        "bCString::GetWord (Info read)",
+        "bCString::CountWords (Info read)",
+        "bCString::ReleaseBuffer (Info read)",
+        "eCSceneAdmin::GetTemplateEntityByName (Info read)",
+        "eCArchiveManager::FindFiles (Info load)",
+        "gCInfo_PS::ReadRuntimeData",
+        "gCInfoManager_PS::GetInfo",
+        "gCInfoManager_PS::BuildMapInfosByOwners",
+    };
+    Log("G3O", "[InfoManagerAudit] SysDyn stage totals: inclusive values overlap; exclusive subtracts instrumented nested calls only.");
+    for (std::size_t i = 0; i < static_cast<std::size_t>(InfoManagerAuditOperation::Count); ++i) {
+        const InfoManagerAuditMetric& metric = s_infoManagerAuditMetrics.operations[i];
+        Log("G3O", "[InfoManagerAudit] SysDyn stage=%s calls=%llu inclusive=%.3f ms exclusive=%.3f ms exclusiveUnavailable=%llu",
+            names[i],
+            static_cast<unsigned long long>(metric.calls),
+            LayerMetricMs(metric.inclusiveTicks),
+            LayerMetricMs(metric.exclusiveTicks),
+            static_cast<unsigned long long>(metric.exclusiveUnavailableCalls));
+    }
+    Log("G3O", "[InfoManagerAudit] SysDyn info-file bytes requested=%llu returned=%llu",
+        static_cast<unsigned long long>(s_infoManagerAuditMetrics.infoArchiveBytesRequested),
+        static_cast<unsigned long long>(s_infoManagerAuditMetrics.infoArchiveBytesReturned));
+    Log("G3O", "[InfoManagerAudit] SysDyn nested-frame overflow calls=%llu (capacity=%zu)",
+        static_cast<unsigned long long>(s_infoManagerAuditMetrics.frameOverflowCalls),
+        kInfoManagerAuditFrameCapacity);
 }
 
 template <std::size_t Capacity>
@@ -267,10 +446,6 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
 
     const bool previousSysDynDispatch = s_collectSysDynReadDispatch;
     const bool collectSysDynMetrics = s_isSysDynSectorActive && !previousSysDynDispatch;
-    const LONG stringHitsBefore = collectSysDynMetrics ? GetPropertyCacheStringHits() : 0;
-    const LONG stringMissesBefore = collectSysDynMetrics ? GetPropertyCacheStringMisses() : 0;
-    const LONG idHitsBefore = collectSysDynMetrics ? GetPropertyCacheIdHits() : 0;
-    const LONG idMissesBefore = collectSysDynMetrics ? GetPropertyCacheIdMisses() : 0;
     s_collectSysDynReadDispatch = previousSysDynDispatch || collectSysDynMetrics;
 
     const ContextAuditMetrics before = s_contextAuditMetrics;
@@ -280,12 +455,6 @@ static bool __fastcall Hooked_OnLoadDynamicContext(void* self, void* /*edx*/, vo
 
     const bool result = Real_OnLoadDynamicContext(self, pStream, pLayer, directRead);
     s_collectSysDynReadDispatch = previousSysDynDispatch;
-    if (collectSysDynMetrics) {
-        s_sysDynPropertyCacheTelemetry.stringHits += GetPropertyCacheStringHits() - stringHitsBefore;
-        s_sysDynPropertyCacheTelemetry.stringMisses += GetPropertyCacheStringMisses() - stringMissesBefore;
-        s_sysDynPropertyCacheTelemetry.idHits += GetPropertyCacheIdHits() - idHitsBefore;
-        s_sysDynPropertyCacheTelemetry.idMisses += GetPropertyCacheIdMisses() - idMissesBefore;
-    }
 
     const std::uint64_t elapsedTicks = BeginLayerMetric() - start;
     const double totalMs = LayerMetricMs(elapsedTicks);
@@ -576,12 +745,165 @@ static void __fastcall Hooked_ChildrenAvailable(void* self, void* /*edx*/, bool 
     EndLayerMetric(s_contextAuditMetrics.childrenAvailable, start);
 }
 
+static int __fastcall Hooked_InfoManagerRead(void* self, void* /*edx*/, void* pStream) {
+    if (!s_isLoadActive || !s_isSysDynSectorActive) {
+        return Real_InfoManagerRead(self, pStream);
+    }
+    InfoManagerReadDepthScope readScope;
+    InfoManagerOperationScope operationScope(InfoManagerAuditOperation::Read);
+    const std::uint64_t start = BeginLayerMetric();
+    const int result = Real_InfoManagerRead(self, pStream);
+    EndLayerMetric(s_sysDynInfoManagerReadMetric, start);
+    return result;
+}
+
+static bool __fastcall Hooked_InfoManagerReadCompiled(void* self, void* /*edx*/, const void* path) {
+    if (!s_isLoadActive || s_infoManagerReadDepth == 0) return Real_InfoManagerReadCompiled(self, path);
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ReadCompiledInfoManager);
+    return Real_InfoManagerReadCompiled(self, path);
+}
+
+static bool __fastcall Hooked_InfoManagerLoadInfosFromInis(void* self, void* /*edx*/) {
+    if (!s_isLoadActive || s_infoManagerReadDepth == 0) return Real_InfoManagerLoadInfosFromInis(self);
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::LoadInfosFromInis);
+    return Real_InfoManagerLoadInfosFromInis(self);
+}
+
+static bool __fastcall Hooked_InfoManagerWriteCompiled(void* self, void* /*edx*/, const void* path) {
+    if (!s_isLoadActive || s_infoManagerReadDepth == 0) return Real_InfoManagerWriteCompiled(self, path);
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::WriteCompiledInfoManager);
+    return Real_InfoManagerWriteCompiled(self, path);
+}
+
+static void* __fastcall Hooked_InfoManagerGetInfo(void* self, void* /*edx*/, const void* name) {
+    if (!s_isLoadActive || s_infoManagerReadDepth == 0) return Real_InfoManagerGetInfo(self, name);
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::GetInfo);
+    return Real_InfoManagerGetInfo(self, name);
+}
+
+static void __fastcall Hooked_InfoManagerBuildMapInfosByOwners(void* self, void* /*edx*/) {
+    if (!s_isLoadActive || s_infoManagerReadDepth == 0) {
+        Real_InfoManagerBuildMapInfosByOwners(self);
+        return;
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::BuildMapInfosByOwners);
+    Real_InfoManagerBuildMapInfosByOwners(self);
+}
+
+static void __fastcall Hooked_InfoArchiveRead(void* self, void* /*edx*/, void* archiveFile) {
+    if (!s_isLoadActive || s_infoManagerReadDepth == 0) {
+        Real_InfoArchiveRead(self, archiveFile);
+        return;
+    }
+    InfoArchiveReadDepthScope archiveReadScope;
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ReadInfoArchiveFile);
+    Real_InfoArchiveRead(self, archiveFile);
+}
+
+static bool __fastcall Hooked_InfoArchiveFileOpen(
+    void* self, void* /*edx*/, std::int32_t accessMode, bool handleGenomfleHeader) {
+    if (!s_isLoadActive || s_infoArchiveReadDepth == 0) {
+        return Real_InfoArchiveFileOpen(self, accessMode, handleGenomfleHeader);
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ReadInfoArchiveOpen);
+    return Real_InfoArchiveFileOpen(self, accessMode, handleGenomfleHeader);
+}
+
+static std::uint32_t __fastcall Hooked_InfoArchiveFileRead(
+    void* self, void* /*edx*/, void* buffer, std::uint32_t requestedBytes) {
+    if (!s_isLoadActive || s_infoArchiveReadDepth == 0) {
+        return Real_InfoArchiveFileRead(self, buffer, requestedBytes);
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ReadInfoArchiveBytes);
+    const std::uint32_t returnedBytes = Real_InfoArchiveFileRead(self, buffer, requestedBytes);
+    s_infoManagerAuditMetrics.infoArchiveBytesRequested += requestedBytes;
+    s_infoManagerAuditMetrics.infoArchiveBytesReturned += returnedBytes;
+    return returnedBytes;
+}
+
+static bool __fastcall Hooked_InfoArchiveFileClose(void* self, void* /*edx*/) {
+    if (!s_isLoadActive || s_infoArchiveReadDepth == 0) {
+        return Real_InfoArchiveFileClose(self);
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ReadInfoArchiveClose);
+    return Real_InfoArchiveFileClose(self);
+}
+
+static std::int32_t __fastcall Hooked_CStringFindChar(
+    void* self, void* /*edx*/, char value, std::int32_t start, bool caseSensitive) {
+    if (!s_isLoadActive || s_infoArchiveReadDepth == 0) {
+        return Real_CStringFindChar(self, value, start, caseSensitive);
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ParseInfoCStringFind);
+    return Real_CStringFindChar(self, value, start, caseSensitive);
+}
+
+static std::int32_t __fastcall Hooked_CStringGetWord(
+    void* self, void* /*edx*/, std::int32_t wordNumber, const void* delimiters,
+    void* destination, bool trimLeft, bool trimRight) {
+    const bool useFast = GetConfig().enableSharedBaseOptimizations;
+    if (!s_isLoadActive || s_infoArchiveReadDepth == 0) {
+        std::int32_t fastOffset = 0;
+        if (useFast && TryFastCStringGetWord(self, wordNumber, delimiters, destination, trimLeft, trimRight, fastOffset)) {
+            return fastOffset;
+        }
+        return Real_CStringGetWord(self, wordNumber, delimiters, destination, trimLeft, trimRight);
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ParseInfoCStringGetWord);
+    std::int32_t fastOffset = 0;
+    if (useFast && TryFastCStringGetWord(self, wordNumber, delimiters, destination, trimLeft, trimRight, fastOffset)) {
+        return fastOffset;
+    }
+    return Real_CStringGetWord(self, wordNumber, delimiters, destination, trimLeft, trimRight);
+}
+
+static std::int32_t __fastcall Hooked_CStringCountWords(void* self, void* /*edx*/, const void* delimiters) {
+    if (!s_isLoadActive || s_infoArchiveReadDepth == 0) {
+        return Real_CStringCountWords(self, delimiters);
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ParseInfoCStringCountWords);
+    return Real_CStringCountWords(self, delimiters);
+}
+
+static void* __fastcall Hooked_GetTemplateEntityByName(void* self, void* /*edx*/, const void* name) {
+    if (!s_isLoadActive || s_infoArchiveReadDepth == 0) {
+        return Real_GetTemplateEntityByName(self, name);
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ParseInfoGetTemplateEntityByName);
+    return Real_GetTemplateEntityByName(self, name);
+}
+
+static bool __fastcall Hooked_ArchiveFindFiles(void* self, void* /*edx*/, void* dirStrByVal, void* outFiles) {
+    if (!s_isLoadActive || s_infoManagerReadDepth == 0) {
+        return Real_ArchiveFindFiles(self, dirStrByVal, outFiles);
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::LoadInfosFindFiles);
+    return Real_ArchiveFindFiles(self, dirStrByVal, outFiles);
+}
+
+static void __fastcall Hooked_CStringReleaseBuffer(void* self, void* /*edx*/, std::int32_t length) {
+    if (!s_isLoadActive || s_infoArchiveReadDepth == 0) {
+        Real_CStringReleaseBuffer(self, length);
+        return;
+    }
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ParseInfoCStringReleaseBuffer);
+    Real_CStringReleaseBuffer(self, length);
+}
+
+static int __fastcall Hooked_InfoReadRuntimeData(void* self, void* /*edx*/, void* stream) {
+    if (!s_isLoadActive || s_infoManagerReadDepth == 0) return Real_InfoReadRuntimeData(self, stream);
+    InfoManagerOperationScope timing(InfoManagerAuditOperation::ReadRuntimeData);
+    return Real_InfoReadRuntimeData(self, stream);
+}
+
+
 static bool InstallHookTarget(LPVOID target, LPVOID detour, LPVOID* original, const char* name) {
     if (!target) {
         Log("G3O", "[LayerAudit] Target address is null for: %s", name);
         return false;
     }
-    if (s_numMetricsHooks >= 19) {
+    constexpr int kMaxMetricsHooks = static_cast<int>(sizeof(s_metricsHookTargets) / sizeof(s_metricsHookTargets[0]));
+    if (s_numMetricsHooks >= kMaxMetricsHooks) {
         Log("G3O", "[LayerAudit] Hook slots exhausted for: %s", name);
         return false;
     }
@@ -627,9 +949,24 @@ static void RemoveCreatedMetricsHooks() {
     Real_PropertyFactoryCloneObjectInstance = nullptr;
     Real_ReadDependency = nullptr;
     Real_ChildrenAvailable = nullptr;
+    Real_InfoManagerRead = nullptr;
+    Real_InfoManagerReadCompiled = nullptr;
+    Real_InfoManagerLoadInfosFromInis = nullptr;
+    Real_InfoManagerWriteCompiled = nullptr;
+    Real_InfoManagerGetInfo = nullptr;
+    Real_InfoManagerBuildMapInfosByOwners = nullptr;
+    Real_InfoArchiveRead = nullptr;
+    Real_InfoArchiveFileOpen = nullptr;
+    Real_InfoArchiveFileRead = nullptr;
+    Real_InfoArchiveFileClose = nullptr;
+    Real_CStringFindChar = nullptr;
+    Real_CStringGetWord = nullptr;
+    Real_CStringReleaseBuffer = nullptr;
+    Real_InfoReadRuntimeData = nullptr;
 
     s_metricsHooksInitialized = false;
 }
+
 
 static bool InitMetricsHooks() {
     if (s_metricsHooksInitialized) return true;
@@ -757,6 +1094,93 @@ static bool InitMetricsHooks() {
         reinterpret_cast<LPVOID>(Hooked_CreateSpecificEntity),
         reinterpret_cast<LPVOID*>(&Real_CreateSpecificEntity),
         "eCEntityDynamicContext::CreateSpecificEntity");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?Read@gCInfoManager_PS@@UAE?AW4bEResult@@AAVbCIStream@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_InfoManagerRead),
+        reinterpret_cast<LPVOID*>(&Real_InfoManagerRead),
+        "gCInfoManager_PS::Read");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?ReadCompiledInfoManager@gCInfoManager_PS@@QAE_NABVbCString@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_InfoManagerReadCompiled),
+        reinterpret_cast<LPVOID*>(&Real_InfoManagerReadCompiled),
+        "gCInfoManager_PS::ReadCompiledInfoManager");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?LoadInfosFromInis@gCInfoManager_PS@@QAE_NXZ")),
+        reinterpret_cast<LPVOID>(Hooked_InfoManagerLoadInfosFromInis),
+        reinterpret_cast<LPVOID*>(&Real_InfoManagerLoadInfosFromInis),
+        "gCInfoManager_PS::LoadInfosFromInis");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?WriteCompiledInfoManager@gCInfoManager_PS@@QAE_NABVbCString@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_InfoManagerWriteCompiled),
+        reinterpret_cast<LPVOID*>(&Real_InfoManagerWriteCompiled),
+        "gCInfoManager_PS::WriteCompiledInfoManager");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?GetInfo@gCInfoManager_PS@@QAEPAVgCInfo_PS@@ABVbCString@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_InfoManagerGetInfo),
+        reinterpret_cast<LPVOID*>(&Real_InfoManagerGetInfo),
+        "gCInfoManager_PS::GetInfo");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?BuildMapInfosByOwners@gCInfoManager_PS@@AAEXXZ")),
+        reinterpret_cast<LPVOID>(Hooked_InfoManagerBuildMapInfosByOwners),
+        reinterpret_cast<LPVOID*>(&Real_InfoManagerBuildMapInfosByOwners),
+        "gCInfoManager_PS::BuildMapInfosByOwners");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?Read@gCInfo_PS@@QAEXAAVeCArchiveFile@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_InfoArchiveRead),
+        reinterpret_cast<LPVOID*>(&Real_InfoArchiveRead),
+        "gCInfo_PS::Read(eCArchiveFile&)");
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?Open@eCArchiveFile@@QAE_NW4bEArchiveFileAccessMode@1@_N@Z")),
+        reinterpret_cast<LPVOID>(Hooked_InfoArchiveFileOpen),
+        reinterpret_cast<LPVOID*>(&Real_InfoArchiveFileOpen),
+        "eCArchiveFile::Open(info file)") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?Read@eCArchiveFile@@UAEKPAXK@Z")),
+        reinterpret_cast<LPVOID>(Hooked_InfoArchiveFileRead),
+        reinterpret_cast<LPVOID*>(&Real_InfoArchiveFileRead),
+        "eCArchiveFile::Read(info payload)") && created;
+    created = InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?Close@eCArchiveFile@@QAE_NXZ")),
+        reinterpret_cast<LPVOID>(Hooked_InfoArchiveFileClose),
+        reinterpret_cast<LPVOID*>(&Real_InfoArchiveFileClose),
+        "eCArchiveFile::Close(info file)") && created;
+    if (hSharedBase) {
+        created = InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?Find@bCString@@QBEHDH_N@Z")),
+            reinterpret_cast<LPVOID>(Hooked_CStringFindChar),
+            reinterpret_cast<LPVOID*>(&Real_CStringFindChar),
+            "bCString::Find(char) (Info read)") && created;
+        created = InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?GetWord@bCString@@QBEHHABV1@AAV1@_N2@Z")),
+            reinterpret_cast<LPVOID>(Hooked_CStringGetWord),
+            reinterpret_cast<LPVOID*>(&Real_CStringGetWord),
+            "bCString::GetWord (Info read)") && created;
+        (void)InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?CountWords@bCString@@QBEHABV1@@Z")),
+            reinterpret_cast<LPVOID>(Hooked_CStringCountWords),
+            reinterpret_cast<LPVOID*>(&Real_CStringCountWords),
+            "bCString::CountWords (Info read)");
+        created = InstallHookTarget(
+            reinterpret_cast<LPVOID>(GetProcAddress(hSharedBase, "?ReleaseBuffer@bCString@@QAEXH@Z")),
+            reinterpret_cast<LPVOID>(Hooked_CStringReleaseBuffer),
+            reinterpret_cast<LPVOID*>(&Real_CStringReleaseBuffer),
+            "bCString::ReleaseBuffer (Info read)") && created;
+    }
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?GetTemplateEntityByName@eCSceneAdmin@@QAEPAVeCTemplateEntity@@ABVbCString@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_GetTemplateEntityByName),
+        reinterpret_cast<LPVOID*>(&Real_GetTemplateEntityByName),
+        "eCSceneAdmin::GetTemplateEntityByName (Info read)");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hEngine, "?FindFiles@eCArchiveManager@@QAE_NVbCString@@AAV?$bTObjArray@VeCArchiveFile@@@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_ArchiveFindFiles),
+        reinterpret_cast<LPVOID*>(&Real_ArchiveFindFiles),
+        "eCArchiveManager::FindFiles (Info load)");
+    (void)InstallHookTarget(
+        reinterpret_cast<LPVOID>(GetProcAddress(hGame, "?ReadRuntimeData@gCInfo_PS@@UAE?AW4bEResult@@AAVbCIStream@@@Z")),
+        reinterpret_cast<LPVOID>(Hooked_InfoReadRuntimeData),
+        reinterpret_cast<LPVOID*>(&Real_InfoReadRuntimeData),
+        "gCInfo_PS::ReadRuntimeData");
 
     if (!created) {
         Log("G3O", "[LayerAudit] Layer timing hook installation failed; removing all registered hooks.");
@@ -824,6 +1248,20 @@ static void ShutdownMetricsHooks() {
         Real_PropertyFactoryCloneObjectInstance = nullptr;
         Real_ReadDependency = nullptr;
         Real_ChildrenAvailable = nullptr;
+        Real_InfoManagerRead = nullptr;
+        Real_InfoManagerReadCompiled = nullptr;
+        Real_InfoManagerLoadInfosFromInis = nullptr;
+        Real_InfoManagerWriteCompiled = nullptr;
+        Real_InfoManagerGetInfo = nullptr;
+        Real_InfoManagerBuildMapInfosByOwners = nullptr;
+        Real_InfoArchiveRead = nullptr;
+        Real_InfoArchiveFileOpen = nullptr;
+        Real_InfoArchiveFileRead = nullptr;
+        Real_InfoArchiveFileClose = nullptr;
+        Real_CStringFindChar = nullptr;
+        Real_CStringGetWord = nullptr;
+        Real_CStringReleaseBuffer = nullptr;
+        Real_InfoReadRuntimeData = nullptr;
         s_metricsHooksInitialized = false;
     }
     if (hadHooks) Log("G3O", "[LayerAudit] Metrics hooks shutdown completed.");
@@ -832,31 +1270,47 @@ static void ShutdownMetricsHooks() {
 
 
 static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead, LPOVERLAPPED ov) {
-    if (IsInternalPakRead()) {
-        return Real_ReadFile(h, buf, n, pRead, ov);
-    }
     const Config& cfg = GetConfig();
     if (!s_isLoadActive) {
         return Real_ReadFile(h, buf, n, pRead, ov);
     }
+
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
-    BOOL r = Real_ReadFile(h, buf, n, pRead, ov);
+    const BOOL result = Real_ReadFile(h, buf, n, pRead, ov);
+    const DWORD lastError = GetLastError();
     QueryPerformanceCounter(&t1);
+
+    const DWORD loadTid = static_cast<DWORD>(InterlockedCompareExchange(&s_loadThreadId, 0, 0));
+    if (result && ov && pRead && *pRead > 0 && s_isLoadActive && (loadTid == 0 || GetCurrentThreadId() == loadTid)) {
+        const uint64_t fileOffset = (static_cast<uint64_t>(ov->OffsetHigh) << 32) | static_cast<uint64_t>(ov->Offset);
+        PakStreamingRing_OnBlockRead(h, fileOffset, *pRead);
+    }
+
     if (cfg.enableSavegameAudit) {
-        if (pRead && r) {
-            InterlockedExchangeAdd64(&s_readBytes, (LONG64)*pRead);
+        if (pRead && result) {
+            InterlockedExchangeAdd64(&s_readBytes, static_cast<LONG64>(*pRead));
         }
         InterlockedIncrement(&s_readCalls);
-        const LONG64 us = (s_freq.QuadPart > 0) ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart) : 0;
+        const LONG64 us = (s_freq.QuadPart > 0)
+            ? ((t1.QuadPart - t0.QuadPart) * 1000000LL / s_freq.QuadPart)
+            : 0;
         InterlockedExchangeAdd64(&s_readTimeUs, us);
+        const DWORD loadTid = static_cast<DWORD>(InterlockedCompareExchange(&s_loadThreadId, 0, 0));
+        if (loadTid != 0) {
+            if (GetCurrentThreadId() == loadTid) {
+                InterlockedIncrement(&s_readMainCalls);
+                InterlockedExchangeAdd64(&s_readMainTimeUs, us);
+            } else {
+                InterlockedIncrement(&s_readWorkerCalls);
+                InterlockedExchangeAdd64(&s_readWorkerTimeUs, us);
+            }
+        }
     }
-    if (ShouldTracePakPrefetch(cfg)) {
-        PakTracer_RecordRead(h, buf, n, (pRead && r) ? *pRead : 0, ov);
-    }
-    return r;
-}
 
+    SetLastError(lastError);
+    return result;
+}
 // -----------------------------------------------------------------------------
 // Sub-Phase Measurements
 // -----------------------------------------------------------------------------
@@ -876,7 +1330,6 @@ static LARGE_INTEGER s_tWorldStart = {};
 static PhaseStats s_statHeader = {};
 static PhaseStats s_statSessionStop = {};
 static PhaseStats s_statClearEntities = {};
-static PhaseStats s_statUnloadCaches = {};
 static PhaseStats s_statLoadGameWorld = {};
 static PhaseStats s_statGotoPos = {};
 static PhaseStats s_statSessionStart = {};
@@ -939,7 +1392,6 @@ static void LogLoadReport(double totalSec) {
     LONG rc = s_readCalls;
     double rbMb = (double)s_readBytes / (1024.0 * 1024.0);
     double rSec = (double)s_readTimeUs / 1000000.0;
-    const auto& config = GetConfig();
 
     LONG pakCount = GetPakDecompCount();
     double pakInMb = (double)GetPakDecompInBytes() / (1024.0 * 1024.0);
@@ -951,12 +1403,6 @@ static void LogLoadReport(double totalSec) {
     double saveOutMb = (double)GetSavegameDecompOutBytes() / (1024.0 * 1024.0);
     double saveSec = GetSavegameDecompTimeMs() / 1000.0;
 
-    LONG strHits = GetPropertyCacheStringHits();
-    LONG strMiss = GetPropertyCacheStringMisses();
-    LONG idHits = GetPropertyCacheIdHits();
-    LONG idMiss = GetPropertyCacheIdMisses();
-    LONG totalProps = strHits + strMiss + idHits + idMiss;
-    double propHitRate = totalProps ? (100.0 * (strHits + idHits) / totalProps) : 0.0;
 
     double deactSec = (double)s_deactivateTimeUs / 1000000.0;
     double secTotalSec = (double)s_sectorActivateTotalUs / 1000000.0;
@@ -964,7 +1410,7 @@ static void LogLoadReport(double totalSec) {
     double roiSec = (double)s_forceROIUpdateTimeUs / 1000000.0;
 
     double preKnown = s_statHeader.durationSec + s_statSessionStop.durationSec + 
-                      s_statClearEntities.durationSec + s_statUnloadCaches.durationSec +
+                      s_statClearEntities.durationSec +
                       deactSec + worldActElemSec + roiSec;
     double preOther = s_preWorldTotalSec - preKnown;
     if (preOther < 0.0) preOther = 0.0;
@@ -998,8 +1444,6 @@ static void LogLoadReport(double totalSec) {
         worldActElemSec, s_sectorActivateCount, secTotalSec,
         s_sectorActivateCount > 0 ? (secTotalSec * 1000.0 / (double)s_sectorActivateCount) : 0.0);
     Log("G3O", "       * ForceFullROIUpdate:        %6.3f s", roiSec);
-    Log("G3O", "       * gCWorld::UnloadCaches:     %6.3f s [%ld pak blocks, %.2f MB read]",
-        s_statUnloadCaches.durationSec, s_statUnloadCaches.pakBlocks, s_statUnloadCaches.readMb);
     Log("G3O", "       * Other Pre-Load Overhead:   %6.3f s", preOther);
     if (s_sectorTimingCsInit) {
         EnterCriticalSection(&s_sectorTimingCs);
@@ -1055,21 +1499,26 @@ static void LogLoadReport(double totalSec) {
     Log("G3O", "Subsystem Activity:");
     Log("G3O", "  - Disk ReadFile I/O:              %6.3f s (%5.1f%%) [%ld calls, %.2f MB read, avg speed %.1f MB/s]",
         rSec, totalSec > 0 ? (rSec * 100.0 / totalSec) : 0.0, rc, rbMb, rSec > 0 ? (rbMb / rSec) : 0.0);
+    Log("G3O", "      * Thread split (ReadFile):    main=%.3f s (%ld calls) | workers=%.3f s (%ld calls, summed across threads)",
+        (double)s_readMainTimeUs / 1000000.0, s_readMainCalls,
+        (double)s_readWorkerTimeUs / 1000000.0, s_readWorkerCalls);
 
     Log("G3O", "  - Pak Decompress (libdeflate):    %6.3f s (%5.1f%%) [%ld blocks, %.2f MB -> %.2f MB]",
         pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0.0, pakCount, pakInMb, pakOutMb);
+    Log("G3O", "      * Thread split (PakDecomp):   main=%.3f s (%ld blocks) | workers=%.3f s (%ld blocks, summed across threads)",
+        GetPakDecompMainThreadTimeMs() / 1000.0, GetPakDecompMainThreadCount(),
+        GetPakDecompWorkerTimeMs() / 1000.0, GetPakDecompWorkerCount());
     Log("G3O", "  - Save Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]",
         saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
-    Log("G3O", "  - Property Resolution Cache (load-thread counters): %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)",
-        totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
+    Log("G3O", "  - Pak Streaming Ring:             %lld hits, %lld misses, %lld produced (%.2f MB consumed)",
+        PakStreamingRing_GetHits(), PakStreamingRing_GetMisses(), PakStreamingRing_GetProducedBlocks(),
+        (double)PakStreamingRing_GetConsumedBytes() / (1024.0 * 1024.0));
     Log("G3O", "  - Frustum Spatial Updates:        %u calls batched -> %u flushed (%u deletions guarded)",
         FrustumOptimizer_GetDeferredCalls(), FrustumOptimizer_GetFlushedUpdates(), FrustumOptimizer_GetDeletionsHandled());
     Log("G3O", "  - Scene Node Preallocations:      %u sector root nodes expanded to 1024-32768",
         SceneNodeOptimizer_GetPreallocations());
     Log("G3O", "  - Directional Shadow Casters:     %u fast adds (%u duplicates avoided), %u fast removes (memmove bypassed)",
         ShadowOptimizer_GetFastAdds(), ShadowOptimizer_GetDuplicatesAvoided(), ShadowOptimizer_GetFastRemoves());
-    Log("G3O", "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)",
-        ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
 
     Log("G3O", "================================================================================");
 
@@ -1087,8 +1536,10 @@ static void LogLoadReport(double totalSec) {
             fp = fopen(path, "w");
         }
         if (fp) {
+            std::snprintf(s_lastLoadProfilerPath, sizeof(s_lastLoadProfilerPath), "%s", path);
             Log("G3O", "Load profile output: %s", path);
         } else {
+            s_lastLoadProfilerPath[0] = '\0';
             Log("G3O", "Could not create load profile in G3O.");
         }
     }
@@ -1108,8 +1559,6 @@ static void LogLoadReport(double totalSec) {
             worldActElemSec, s_sectorActivateCount, secTotalSec,
             s_sectorActivateCount > 0 ? (secTotalSec * 1000.0 / (double)s_sectorActivateCount) : 0.0);
         fprintf(fp, "       * ForceFullROIUpdate:        %6.3f s\n", roiSec);
-        fprintf(fp, "       * gCWorld::UnloadCaches:     %6.3f s [%ld pak blocks, %.2f MB read]\n",
-            s_statUnloadCaches.durationSec, s_statUnloadCaches.pakBlocks, s_statUnloadCaches.readMb);
         fprintf(fp, "       * Other Pre-Load Overhead:   %6.3f s\n", preOther);
         if (s_sectorTimingCsInit) {
             EnterCriticalSection(&s_sectorTimingCs);
@@ -1170,18 +1619,15 @@ static void LogLoadReport(double totalSec) {
             pakSec, totalSec > 0 ? (pakSec * 100.0 / totalSec) : 0.0, pakCount, pakInMb, pakOutMb);
         fprintf(fp, "  - Save Decompress (libdeflate):   %6.3f s (%5.1f%%) [%ld chunks, %.2f MB -> %.2f MB]\n",
             saveSec, totalSec > 0 ? (saveSec * 100.0 / totalSec) : 0.0, saveCount, saveInMb, saveOutMb);
-        fprintf(fp, "  - Decomp Duplicate Cache:         %ld hits (%.2f MB saved from redundant decompression)\n",
-            GetDecompCacheHits(), (double)GetDecompCacheBytesSaved() / (1024.0 * 1024.0));
-        fprintf(fp, "  - Property Resolution Cache (load-thread counters): %ld resolves (%ld hits, %ld misses, %.1f%% hit rate)\n",
-            totalProps, strHits + idHits, strMiss + idMiss, propHitRate);
+        fprintf(fp, "  - Pak Streaming Ring:             %lld hits, %lld misses, %lld produced (%.2f MB consumed)\n",
+            PakStreamingRing_GetHits(), PakStreamingRing_GetMisses(), PakStreamingRing_GetProducedBlocks(),
+            (double)PakStreamingRing_GetConsumedBytes() / (1024.0 * 1024.0));
         fprintf(fp, "  - Frustum Spatial Updates:        %u calls batched -> %u flushed (%u deletions guarded)\n",
             FrustumOptimizer_GetDeferredCalls(), FrustumOptimizer_GetFlushedUpdates(), FrustumOptimizer_GetDeletionsHandled());
         fprintf(fp, "  - Scene Node Preallocations:      %u sector root nodes expanded to 1024-32768\n",
             SceneNodeOptimizer_GetPreallocations());
         fprintf(fp, "  - Directional Shadow Casters:     %u fast adds (%u duplicates avoided), %u fast removes (memmove bypassed)\n",
             ShadowOptimizer_GetFastAdds(), ShadowOptimizer_GetDuplicatesAvoided(), ShadowOptimizer_GetFastRemoves());
-        fprintf(fp, "  - Class Factory Reflection:       %u hits (0 alloc), %u misses (cached %u classes)\n",
-            ClassFactory_GetHits(), ClassFactory_GetMisses(), ClassFactory_GetCachedClassesCount());
 
         fprintf(fp, "================================================================================\n");
         fclose(fp);
@@ -1337,23 +1783,29 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     s_capturePvsPrefetchMetrics = false;
     s_inPreLoad = true;
     s_skippedPreLoadActivate = false;
+    if (s_isLoadActive) {
+        // already set below
+    }
+    AutoTestNotifyLoadStarted();
     QueryPerformanceCounter(&s_tHUDStart);
     if (ShouldCollectSavegameAudit(cfg) || cfg.enableProfiler) {
         Log("G3O", "================================================================================");
         Log("G3O", "[LoadProfile] >>> SAVEGAME LOAD INITIATED (gCHUDFileManager::LoadGame) >>>");
     }
 
-    DynamicLayerOptimizer_OnLoadStart();
-
     ResetDecompTelemetry();
-    ResetPropertyCacheTelemetry();
     ResetShadowCasterOptimizerSession();
-    ResetClassFactoryOptimizerSession();
 
-    ResetVFSCacheTelemetry();
+    const DWORD currentTid = GetCurrentThreadId();
+    InterlockedExchange(&s_loadThreadId, static_cast<LONG>(currentTid));
+    SetDecompLoadThreadId(currentTid);
     InterlockedExchange(&s_readCalls, 0);
     InterlockedExchange64(&s_readBytes, 0);
     InterlockedExchange64(&s_readTimeUs, 0);
+    InterlockedExchange(&s_readMainCalls, 0);
+    InterlockedExchange64(&s_readMainTimeUs, 0);
+    InterlockedExchange(&s_readWorkerCalls, 0);
+    InterlockedExchange64(&s_readWorkerTimeUs, 0);
     InterlockedExchange(&s_cellsProcessed, 0);
     InterlockedExchange64(&s_hierarchyTimeUs, 0);
 
@@ -1367,7 +1819,6 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     s_statHeader = {};
     s_statSessionStop = {};
     s_statClearEntities = {};
-    s_statUnloadCaches = {};
     s_statLoadGameWorld = {};
     s_statGotoPos = {};
     s_statSessionStart = {};
@@ -1379,18 +1830,13 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
         LeaveCriticalSection(&s_sectorTimingCs);
     }
 
-    if (ShouldTracePakPrefetch(cfg)) {
-        PakTracer_OnLoadStart(s_lastSaveName.c_str());
-    }
     bool r = Real_HUDLoadGame(pThis, a, b);
-    if (ShouldTracePakPrefetch(cfg)) {
-        PakTracer_OnLoadEnd();
-    }
 
     LARGE_INTEGER t1;
     QueryPerformanceCounter(&t1);
     FrustumOptimizer_EndDeferAndFlush(); // Backstop flush in case Session::Start was bypassed
     s_isLoadActive = false;
+    PakStreamingRing_ResetLoadState();
     SetEnginePhase(r ? Phase_Gameplay : Phase_Init);
     ProfilerSetGameplayReady(r);
     if (Real_EnableSectorActivation) {
@@ -1398,9 +1844,11 @@ static bool __fastcall Hooked_HUDLoadGame(void* pThis, void* /*edx*/, void* a, v
     }
     double totalSec = (double)(t1.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
 
+    s_lastLoadProfilerPath[0] = '\0';
     if (ShouldCollectSavegameAudit(cfg)) {
         LogLoadReport(totalSec);
     }
+    AutoTestNotifyLoadFinished(r, totalSec, s_lastLoadProfilerPath);
     return r;
 }
 
@@ -1409,10 +1857,6 @@ typedef int (__thiscall* GetSaveGameHeader_t)(void* pThis, const void* pStr, voi
 static GetSaveGameHeader_t Real_GetSaveGameHeader = nullptr;
 
 static int __fastcall Hooked_GetSaveGameHeader(void* pThis, void* /*edx*/, const void* pStr, void* pHeader) {
-    if (pStr) {
-        const char* s = *(const char**)pStr;
-        if (s && *s) s_lastSaveName = s;
-    }
     if (!s_isLoadActive) return Real_GetSaveGameHeader(pThis, pStr, pHeader);
     LARGE_INTEGER t0, t1;
     LONG pak0 = GetPakDecompCount(); LONG64 pakOut0 = GetPakDecompOutBytes();
@@ -1633,23 +2077,12 @@ static int __fastcall Hooked_SectorDoLoadData(void* pSector, void* /*edx*/, void
 }
 
 static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
-    const Config& config = GetConfig();
-    const bool layerArenaEnabled = config.enableLayerRingArena && config.enableFastPakDecompressor;
-    const char* sectorNameForCapture = nullptr;
-    if (layerArenaEnabled) {
-        sectorNameForCapture = SafeGetSectorName(pSector);
-        if (sectorNameForCapture && std::strstr(sectorNameForCapture, "RB_Mod")) {
-            LayerRingArena_OnSectorStart(sectorNameForCapture);
-        } else {
-            LayerRingArena_OnSectorEnd();
-        }
-    }
     if (!s_isLoadActive) {
         Real_SectorOnActivate(pSector);
         return;
     }
 
-    if (!sectorNameForCapture) sectorNameForCapture = SafeGetSectorName(pSector);
+    const char* sectorNameForCapture = SafeGetSectorName(pSector);
     const bool isSysDynSector = IsTelemetryActive()
         && sectorNameForCapture
         && std::strncmp(sectorNameForCapture, "SysDyn_", sizeof("SysDyn_") - 1) == 0;
@@ -1658,7 +2091,11 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     const bool ownsSysDynCapture = isSysDynSector && !previousSysDynSectorActive;
     if (ownsSysDynCapture) {
         s_sysDynReadDispatchMetrics = {};
-        s_sysDynPropertyCacheTelemetry = {};
+        s_sysDynInfoManagerReadMetric = {};
+        s_infoManagerAuditMetrics = {};
+        s_infoManagerOperationDepth = 0;
+        s_infoManagerReadDepth = 0;
+        s_infoArchiveReadDepth = 0;
     }
     s_isSysDynSectorActive = isSysDynSector;
     s_collectSysDynReadDispatch = false;
@@ -1714,13 +2151,12 @@ static void __fastcall Hooked_SectorOnActivate(void* pSector, void* /*edx*/) {
     }
 
     if (ownsSysDynCapture) {
-        Log("G3O", "[PropertyCache] SysDyn OnLoadDynamicContext load-thread stringHits=%ld stringMisses=%ld idHits=%ld idMisses=%ld",
-            s_sysDynPropertyCacheTelemetry.stringHits,
-            s_sysDynPropertyCacheTelemetry.stringMisses,
-            s_sysDynPropertyCacheTelemetry.idHits,
-            s_sysDynPropertyCacheTelemetry.idMisses);
         LogPropertyReadDispatchPath("ReadObject", s_sysDynReadDispatchMetrics.readObject);
         LogPropertyReadDispatchPath("ReadNewObject", s_sysDynReadDispatchMetrics.readNewObject);
+        Log("G3O", "[InfoManagerAudit] SysDyn gCInfoManager_PS::Read: calls=%llu inclusive=%.3f ms",
+            static_cast<unsigned long long>(s_sysDynInfoManagerReadMetric.calls),
+            LayerMetricMs(s_sysDynInfoManagerReadMetric.qpcTicks));
+        LogInfoManagerAuditMetrics();
     }
 }
 
@@ -1742,19 +2178,10 @@ static int __fastcall Hooked_WorldDoLoadData(void* pWorld, void* /*edx*/, void* 
 }
 
 static void __fastcall Hooked_WorldOnActivate(void* pWorld, void* /*edx*/) {
-    if (s_isLoadActive) {
-        PakTracer_OnWorldActivateStart();
-    }
-    const Config& cfg = GetConfig();
-    if (cfg.enableParallelDynamicLayers) {
-        DynamicLayerOptimizer_ProcessWorldActivate(pWorld, Real_WorldOnActivate);
-        DynamicLayerOptimizer_OnLoadEnd();
-    } else {
-        int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
-        Log("G3O", "[WorldAudit] WorldOnActivate entered: pWorld=0x%p, isLoadActive=%d, totalSectors=%d",
-            pWorld, (int)s_isLoadActive, numSectors);
-        Real_WorldOnActivate(pWorld);
-    }
+    int numSectors = Real_GetSectorCount ? Real_GetSectorCount(pWorld) : 0;
+    Log("G3O", "[WorldAudit] WorldOnActivate entered: pWorld=0x%p, isLoadActive=%d, totalSectors=%d",
+        pWorld, (int)s_isLoadActive, numSectors);
+    Real_WorldOnActivate(pWorld);
 }
 
 // 5.5. DoAfterWorldActivate hook (Game.dll: ?DoAfterWorldActivate@gCWorld@@IAEXXZ)
@@ -1785,24 +2212,6 @@ static void __fastcall Hooked_ForceROIUpdate(void* pThis, void* /*edx*/) {
     Log("G3O", "[LoadProfile] eCEntityAdmin::ForceFullROIUpdate took %.3f s", (double)us / 1000000.0);
 }
 
-// 7. UnloadCaches hook
-typedef void (__thiscall* UnloadCaches_t)(void* pThis);
-static UnloadCaches_t Real_UnloadCaches = nullptr;
-
-static void __fastcall Hooked_UnloadCaches(void* pThis, void* /*edx*/) {
-    if (!s_isLoadActive) { Real_UnloadCaches(pThis); return; }
-    LARGE_INTEGER t0, t1;
-    LONG pak0 = GetPakDecompCount(); LONG64 pakOut0 = GetPakDecompOutBytes();
-    LONG read0 = s_readCalls; LONG64 readBytes0 = s_readBytes;
-    QueryPerformanceCounter(&t0);
-
-    Real_UnloadCaches(pThis);
-
-    QueryPerformanceCounter(&t1);
-    SnapshotPhase(s_statUnloadCaches, t0, t1, pak0, pakOut0, read0, readBytes0);
-    Log("G3O", "[LoadProfile] gCWorld::UnloadCaches took %.3f s", s_statUnloadCaches.durationSec);
-}
-
 // 8. LoadGameWorld hook
 typedef bool (__thiscall* LoadGameWorld_t)(void* pThis, const void* pSaveName, bool isNewGame);
 static LoadGameWorld_t Real_LoadGameWorld = nullptr;
@@ -1810,12 +2219,10 @@ static LoadGameWorld_t Real_LoadGameWorld = nullptr;
 static bool __fastcall Hooked_LoadGameWorld(void* pThis, void* /*edx*/, const void* pSaveName, bool isNewGame) {
     SetEnginePhase(Phase_LoadGameWorld);
     s_inPreLoad = false;
-    DynamicLayerOptimizer_OnLoadStart();
     if (Real_EnableSectorActivation) {
         Real_EnableSectorActivation(true);
     }
     s_samplePhase = 1;
-    PakTracer_OnLoadGameWorldStart(s_sectorActivateCount == 0);
     QueryPerformanceCounter(&s_tWorldStart);
     if (s_tHUDStart.QuadPart > 0) {
         s_preWorldTotalSec = (double)(s_tWorldStart.QuadPart - s_tHUDStart.QuadPart) / (double)s_freq.QuadPart;
@@ -1852,7 +2259,6 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
     Log("G3O", "[LoadProfile] -> gCSession::GotoLoadedPosition START (Resource Streaming / Scene Init)");
 
     s_samplePhase = 2;
-    PakTracer_OnGotoLoadedPositionStart();
     const bool wasCapturingPvsMetrics = s_capturePvsPrefetchMetrics;
     s_capturePvsPrefetchMetrics = true;
 
@@ -1865,6 +2271,7 @@ static void __fastcall Hooked_GotoLoadedPosition(void* pThis, void* /*edx*/, voi
 
     QueryPerformanceCounter(&t1);
     SnapshotPhase(s_statGotoPos, t0, t1, pak0, pakOut0, read0, readBytes0, pakTimeMs0, readTimeUs0);
+    PakStreamingRing_ResetLoadState();
     Log("G3O", "[LoadProfile] <- gCSession::GotoLoadedPosition FINISHED in %.3f s (pak blocks=%ld, decomp=%.2f MB, read=%.2f MB)",
         s_statGotoPos.durationSec, s_statGotoPos.pakBlocks, s_statGotoPos.pakOutMb, s_statGotoPos.readMb);
 }
@@ -1997,10 +2404,13 @@ static void* FindHUDLoadGameTarget(HMODULE hGame) {
 
 static void* s_targetReadFile = nullptr;
 static void* s_targetHUDLoadGame = nullptr;
+
+void* GetHUDLoadGameTarget() noexcept {
+    return s_targetHUDLoadGame;
+}
 static void* s_targetHeader = nullptr;
 static void* s_targetSessionStop = nullptr;
 static void* s_targetClearEntities = nullptr;
-static void* s_targetUnloadCaches = nullptr;
 static void* s_targetLoadGameWorld = nullptr;
 static void* s_targetGotoPos = nullptr;
 static void* s_targetSessionStart = nullptr;
@@ -2065,9 +2475,6 @@ static bool InstallPvsMetricHook(
 
 bool InitializeSavegameProfiler() {
     const Config& cfg = GetConfig();
-    if (cfg.enablePakPrefetch && !cfg.enableFastPakDecompressor) {
-        Log("G3O", "[PakCache] Trace-based pre-decompression requires EnableFastPakDecompressor=true; it is disabled.");
-    }
     if (!ShouldInstallSavegameProfilerHooks(cfg)) {
         Log("G3O", "Savegame profiler hooks disabled by configuration.");
         return true;
@@ -2081,45 +2488,18 @@ bool InitializeSavegameProfiler() {
         return false;
     }
 
-    if (cfg.enableSavegameAudit || ShouldTracePakPrefetch(cfg) || cfg.enableParallelDynamicLayers) {
-        if (cfg.enableSavegameAudit || ShouldTracePakPrefetch(cfg)) {
-            HMODULE hK32 = GetModuleHandleA("kernel32.dll");
-            if (hK32) {
-                void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
-                if (pRead) {
-                    InstallSavegameHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile,
-                        &s_targetReadFile, "kernel32!ReadFile");
-                }
-            }
-        }
-        HMODULE hGame = GetModuleHandleA("Game.dll");
-        if (hGame) {
-            void* pHeader = (void*)GetProcAddress(hGame, "?GetSaveGameHeader@gCWorld@@QAE?AW4bEResult@@ABVbCString@@AAVgCSaveGameHeader@1@@Z");
-            if (pHeader && !s_targetHeader) {
-                InstallSavegameHook(pHeader, (LPVOID)Hooked_GetSaveGameHeader, (LPVOID*)&Real_GetSaveGameHeader,
-                    &s_targetHeader, "gCWorld::GetSaveGameHeader");
-            }
-            void* pWorld = (void*)GetProcAddress(hGame, "?LoadGameWorld@gCWorld@@QAE_NABVbCString@@_N@Z");
-            if (pWorld && !s_targetLoadGameWorld) {
-                InstallSavegameHook(pWorld, (LPVOID)Hooked_LoadGameWorld, (LPVOID*)&Real_LoadGameWorld,
-                    &s_targetLoadGameWorld, "gCWorld::LoadGameWorld");
-            }
-            void* pGoto = (void*)GetProcAddress(hGame, "?GotoLoadedPosition@gCSession@@QAEXPAVeCEntity@@_N@Z");
-            if (pGoto && !s_targetGotoPos) {
-                InstallSavegameHook(pGoto, (LPVOID)Hooked_GotoLoadedPosition, (LPVOID*)&Real_GotoLoadedPosition,
-                    &s_targetGotoPos, "gCSession::GotoLoadedPosition");
-            }
-            void* pOnAct = (void*)GetProcAddress(hGame, "?OnActivate@gCWorld@@MAEXXZ");
-            if (pOnAct && !s_targetWorldOnActivate) {
-                InstallSavegameHook(pOnAct, (LPVOID)Hooked_WorldOnActivate, (LPVOID*)&Real_WorldOnActivate,
-                    &s_targetWorldOnActivate, "gCWorld::OnActivate");
-            }
+    if (cfg.enableSavegameAudit) {
+        HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+        if (hK32) {
+            void* pRead = (void*)GetProcAddress(hK32, "ReadFile");
+            if (pRead) InstallSavegameHook(pRead, (LPVOID)Hooked_ReadFile, (LPVOID*)&Real_ReadFile,
+                &s_targetReadFile, "kernel32!ReadFile");
         }
     }
 
     HMODULE hGame = GetModuleHandleA("Game.dll");
     if (hGame) {
-        if (cfg.enableSavegameAudit || cfg.enableProfiler || ShouldTracePakPrefetch(cfg)) {
+        if (cfg.enableSavegameAudit || cfg.enableProfiler || cfg.autoTestEnabled) {
             void* pHUD = FindHUDLoadGameTarget(hGame);
             if (pHUD) {
                 InstallSavegameHook(pHUD, (LPVOID)Hooked_HUDLoadGame, (LPVOID*)&Real_HUDLoadGame,
@@ -2146,11 +2526,6 @@ bool InitializeSavegameProfiler() {
                 &s_targetClearEntities, "gCGUIManager::ClearAllEntities");
         }
 
-        void* pUnload = (void*)GetProcAddress(hGame, "?UnloadCaches@gCWorld@@QAEXXZ");
-        if (pUnload) {
-            InstallSavegameHook(pUnload, (LPVOID)Hooked_UnloadCaches, (LPVOID*)&Real_UnloadCaches,
-                &s_targetUnloadCaches, "gCWorld::UnloadCaches");
-        }
 
         void* pWorld = (void*)GetProcAddress(hGame, "?LoadGameWorld@gCWorld@@QAE_NABVbCString@@_N@Z");
         if (pWorld && !s_targetLoadGameWorld) {
@@ -2232,14 +2607,6 @@ bool InitializeSavegameProfiler() {
         }
     }
 
-    if (cfg.enableLayerRingArena && cfg.enableFastPakDecompressor && !cfg.enableSavegameAudit) {
-        HMODULE hGameForLayerArena = GetModuleHandleA("Game.dll");
-        void* pSecOnAct = hGameForLayerArena
-            ? reinterpret_cast<void*>(GetProcAddress(hGameForLayerArena, "?OnActivate@gCSector@@MAEXXZ"))
-            : nullptr;
-        InstallSavegameHook(pSecOnAct, (LPVOID)Hooked_SectorOnActivate,
-            (LPVOID*)&Real_SectorOnActivate, &s_targetSectorOnActivate, "gCSector::OnActivate (LayerRingArena)");
-    }
 
     if (cfg.enableSavegameAudit) {
     HMODULE hEngine = GetModuleHandleA("Engine.dll");
@@ -2313,10 +2680,9 @@ bool InitializeSavegameProfiler() {
 
     const LayerAuditHookState auditHookState = ResolveLayerAuditHookState(
         cfg.enableSavegameAudit && cfg.enableLayerAudit, metricsHooksReady && s_metricsHooksInitialized);
-    Log("G3O", "Savegame hooks initialized (audit=%s, profiler=%s, PAK prefetch=%s, LayerAudit hooks=%s).",
+    Log("G3O", "Savegame hooks initialized (audit=%s, profiler=%s, LayerAudit hooks=%s).",
         cfg.enableSavegameAudit ? "enabled" : "disabled",
         cfg.enableProfiler ? "enabled" : "disabled",
-        cfg.enablePakPrefetch ? "enabled" : "disabled",
         LayerAuditHookStateName(auditHookState));
     return true;
 }
@@ -2333,7 +2699,7 @@ void ShutdownSavegameProfiler() {
     if (s_targetWorldOnActivate) MH_DisableHook(s_targetWorldOnActivate);
     if (s_targetDoAfterWorldActivate) MH_DisableHook(s_targetDoAfterWorldActivate);
     if (s_targetForceROIUpdate) MH_DisableHook(s_targetForceROIUpdate);
-    if (s_targetUnloadCaches) MH_DisableHook(s_targetUnloadCaches);
+
     if (s_targetLoadGameWorld) MH_DisableHook(s_targetLoadGameWorld);
     if (s_targetGotoPos) MH_DisableHook(s_targetGotoPos);
     if (s_targetSessionStart) MH_DisableHook(s_targetSessionStart);

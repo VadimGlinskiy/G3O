@@ -70,7 +70,7 @@ bool InitializeEntitySearchOptimizer() {
         [&] { Real_SearchForEntity = nullptr; });
     if (result == HookInstallResult::Installed) {
         s_targetSearchForEntity = fnSearch;
-        Log("G3O", "Entity Search Optimizer initialized (eCEntity::SearchForEntity hooked with L1 vptr cache + Early Exit).");
+        Log("G3O", "Entity Search Optimizer initialized (sorted search with early exit).");
         return true;
     } else {
         s_targetSearchForEntity = nullptr;

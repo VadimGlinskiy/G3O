@@ -12,19 +12,9 @@ int main() {
     G3O::Config config{};
     config.enableSavegameAudit = false;
     config.enableProfiler = false;
-    config.enablePakPrefetch = false;
-    config.enableParallelDynamicLayers = false;
     bool ok = true;
     ok &= Expect(!G3O::ShouldInstallSavegameProfilerHooks(config), "all savegame hooks should be off when all related features are off");
 
-    config.enableLayerRingArena = true;
-    ok &= Expect(G3O::ShouldInstallSavegameProfilerHooks(config),
-                 "LayerRingArena should request sector lifecycle hooks without the profiler");
-    config.enableFastPakDecompressor = false;
-    ok &= Expect(!G3O::ShouldInstallSavegameProfilerHooks(config),
-                 "LayerRingArena should not request hooks without the PAK decompressor");
-    config.enableFastPakDecompressor = true;
-    config.enableLayerRingArena = false;
     ok &= Expect(G3O::ResolveSamplePhaseForSector(0, "SysDyn_{fixture}") == G3O::kSysDynSamplePhase,
                  "SysDyn activation should use its isolated sample phase");
     ok &= Expect(G3O::ResolveSamplePhaseForSector(2, "WorldSector") == 2,
@@ -42,14 +32,10 @@ int main() {
                  "general profiling should not imply the savegame audit report");
 
     config.enableProfiler = false;
-    config.enablePakPrefetch = true;
-    config.enableFastPakDecompressor = false;
-    ok &= Expect(!G3O::ShouldInstallSavegameProfilerHooks(config) && !G3O::ShouldTracePakPrefetch(config),
-                 "trace-based pre-decompression must stay off without the matching decompressor hook");
-
-    config.enableFastPakDecompressor = true;
-    ok &= Expect(G3O::ShouldInstallSavegameProfilerHooks(config) && G3O::ShouldTracePakPrefetch(config),
-                 "trace-based prefetch should remain available without profiler or audit");
+    config.autoTestEnabled = true;
+    ok &= Expect(G3O::ShouldInstallSavegameProfilerHooks(config) && G3O::ShouldCollectSavegameAudit(config),
+                 "AutoTest should always install savegame profiler hooks and collect audit reports");
+    config.autoTestEnabled = false;
 
     int createCalls = 0;
     int enableCalls = 0;
@@ -85,6 +71,6 @@ int main() {
                  "successful hook installation should keep the hook and trampoline");
 
     if (!ok) return 1;
-    std::puts("PASS: savegame audit, profiler, and PAK prefetch remain independently gated");
+    std::puts("PASS: savegame audit and profiler hooks remain independently gated");
     return 0;
 }

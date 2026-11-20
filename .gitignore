@@ -12,6 +12,12 @@ downloads/
 *.zip
 .vs/
 .idea/
+.vscode/
+build-telemetry/
+scratch/
+tools/ghidra/proj/G3.rep/
 # Engineering plan (local only)
 PLAN*
+context.txt
+G3O_LOAD_OPTIMIZATION_CONTEXT.md
 UpdatePack

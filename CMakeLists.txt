@@ -60,13 +60,10 @@ add_library(dinput8 SHARED
     src/math_simd_optimizer.cpp
     src/math_simd_optimizer.h
     src/sharedbase_string_compare.h
+    src/string_getword_policy.h
     src/window_input_policy.h
-    src/d3d_state_cache.h
-    src/pak_cache_budget.h
-    src/pak_read_at.h
     src/savegame_profiler_policy.h
     src/layer_audit_metrics.h
-    src/pak_prefetch_policy.h
     src/d3d9_hook.cpp
     src/d3d9_hook.h
     src/profiler.cpp
@@ -81,10 +78,9 @@ add_library(dinput8 SHARED
     src/decompressor_avx2.h
     src/fast_pak_decompressor.cpp
     src/fast_pak_decompressor.h
-    src/static_slab_arena.cpp
-    src/static_slab_arena.h
-    src/layer_ring_arena.cpp
-    src/layer_ring_arena.h
+    src/pak_content_key.h
+    src/pak_streaming_ring.h
+    src/pak_streaming_ring.cpp
     src/frustum_database_policy.h
     src/frustum_database_optimizer.cpp
     src/frustum_database_optimizer.h
@@ -93,33 +89,20 @@ add_library(dinput8 SHARED
     src/shadow_caster_policy.h
     src/shadow_caster_optimizer.cpp
     src/shadow_caster_optimizer.h
-    src/class_factory_policy.h
-    src/class_factory_optimizer.cpp
-    src/class_factory_optimizer.h
-
-    src/dynamic_layer_optimizer.cpp
-    src/dynamic_layer_optimizer.h
     src/session_start_policy.h
     src/session_start_optimizer.cpp
     src/session_start_optimizer.h
-    src/property_cache_optimizer.cpp
-    src/property_cache_optimizer.h
     src/entity_search_optimizer.cpp
     src/entity_search_optimizer.h
     src/entity_search_policy.h
     src/savegame_profiler.cpp
     src/savegame_profiler.h
-    src/pak_prefetch.cpp
-    src/pak_prefetch.h
+    src/autotest_policy.h
+    src/autotest_runner.cpp
+    src/autotest_runner.h
     src/load_sampler.cpp
     src/load_sampler.h
-    src/vfs_cache_optimizer.cpp
-    src/vfs_cache_optimizer.h
-    src/vfs_cache_core.h
     src/config_value_parser.h
-    src/pak_tracer.cpp
-    src/pak_tracer.h
-    src/pak_content_key.h
     src/selective_culling_policy.h
     src/selective_culling_optimizer.cpp
     src/selective_culling_optimizer.h

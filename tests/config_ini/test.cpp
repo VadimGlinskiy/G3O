@@ -32,11 +32,7 @@ int main() {
     if (path.empty()) return 2;
     bool ok = true;
     const G3O::Config defaults{};
-    ok &= Expect(!defaults.enableLayerRingArena,
-                 "LayerRingArena should match the shipped default profile");
-    ok &= Expect(defaults.enablePropertyCache &&
-                 defaults.enableVFSCache && defaults.pakCacheBudgetMB == 384 &&
-                 defaults.allocatorMode == 1 &&
+    ok &= Expect(defaults.allocatorMode == 1 &&
                  !defaults.enableDiagnosticLog && !defaults.interceptOutputDebugString &&
                  !defaults.enableProfiler && !defaults.enableSavegameAudit && !defaults.enableLayerAudit,
                  "Config defaults should match the active release profile");
@@ -44,11 +40,10 @@ int main() {
     {
         std::ofstream ini(path);
         ini << "[General]\nEnableG3O=false\n"
-            << "[Performance]\nEnableLayerRingArena=true\nEnableSharedBaseOptimizations=true\nEnableSIMDFrustumCulling=false\nTreeShadowDistance=-1\n"
+            << "[Performance]\nEnableSharedBaseOptimizations=true\nEnableSIMDFrustumCulling=false\nTreeShadowDistance=-1\n"
             << "VegetationGridRangeClamp=1234.0junk\n"
             << "CPUCores=999\nCPUThreads=-1\n"
             << "CPUAffinityMask=0x100000000\n"
-            << "PakCacheBudgetMB=-1\nPakPrefetchWorkers=999\n"
             << "FogDistanceMultiplier=-5.0\nFogEndMinDistance=-100.0\n";
     }
     G3O::LoadConfig();
@@ -57,19 +52,15 @@ int main() {
     ok &= Expect(G3O::g_logCallCount == 0, "loading configuration must not log before the master switch is checked");
     ok &= Expect(invalid.enableSharedBaseOptimizations,
                  "new SharedBase option should take precedence over the legacy key");
-    ok &= Expect(invalid.enableLayerRingArena,
-                 "LayerRingArena should load its enabled setting from the INI");
 
     ok &= Expect(invalid.treeShadowDistance == 6500.0f, "negative shadow distance should use default");
     ok &= Expect(invalid.vegetationGridRangeClamp == 7500.0f, "partial float should use default");
     ok &= Expect(invalid.cpuCores == 0 && invalid.cpuThreads == 0, "invalid CPU counts should use defaults");
     ok &= Expect(invalid.cpuAffinityMask == 0, "mask wider than the x86 pointer should use default");
-    ok &= Expect(invalid.pakCacheBudgetMB == 384, "negative cache budget should use default");
-    ok &= Expect(invalid.pakPrefetchWorkers == 0, "worker count above maximum should use default");
+
     ok &= Expect(invalid.fogDistanceMultiplier == 2.5f, "negative fog distance multiplier should use default");
     ok &= Expect(invalid.fogEndMinDistance == 250000.0f, "negative fog end min distance should use default");
-    ok &= Expect(invalid.enablePropertyCache && invalid.enableVFSCache,
-                 "missing performance keys should use the active release profile");
+
     ok &= Expect(invalid.allocatorMode == 1,
                  "missing memory keys should use the active release profile");
     ok &= Expect(!invalid.enableDiagnosticLog && !invalid.interceptOutputDebugString && !invalid.enableProfiler &&
@@ -95,20 +86,28 @@ int main() {
     }
     const char* required[] = {
         "EnableSharedBaseOptimizations=",
-        "VegetationGridRangeClamp=", "EnableVFSCache=", "CPUCores=", "CPUThreads=",
-        "CPUAffinityMask=", "PakCacheBudgetMB=384", "PakPrefetchWorkers=",
-        "EnableFastPakDecompressor=true", "EnableLayerRingArena=false", "EnablePropertyCache=true", "EnableVFSCache=true",
+        "VegetationGridRangeClamp=", "CPUCores=", "CPUThreads=", "CPUAffinityMask=0x",
+        "EnableFastPakDecompressor=true",
         "EnableSessionStartOptimizer=true", "SessionStartSleepMs=1",
         "EnableSelectiveCulling=true", "ClutterCullThreshold=0.008", "ImportantCullThreshold=0.002",
         "EnableAtmosphericFogControl=true", "FogDistanceMultiplier=2.5", "FogEndMinDistance=250000", "PreserveUnderwaterFog=true",
         "EnableVegetationOptimizer=true", "EnableAdaptiveTreeShadows=true",
         "WindowCursorLock=true", "InputSystemKeyPassthrough=true", "EnableCrashGuards=true", "LoadReShade=true",
         "AllocatorMode=1",
-        "EnableD3D9StateFilter=true", "EnableDiagnosticLog=false", "InterceptOutputDebugString=false",
+        "EnableDiagnosticLog=false", "InterceptOutputDebugString=false",
         "EnableProfiler=false", "EnableSavegameAudit=false", "EnableLayerAudit=false"
     };
     for (const char* item : required) {
         ok &= Expect(text.find(item) != std::string::npos, item);
+    }
+    const char* removedCacheSettings[] = {
+        "EnableLayerRingArena=", "EnableParallelDynamicLayers=", "EnablePropertyCache=",
+        "EnablePakPrefetch=", "PakCacheBudgetMB=", "PakPrefetchWorkers=",
+        "EnableClassFactoryOptimizer=", "EnableVFSCache=", "EnableD3D9StateFilter="
+    };
+    for (const char* item : removedCacheSettings) {
+        ok &= Expect(text.find(item) == std::string::npos,
+                     "generated INI should not expose removed cache settings");
     }
     const char* removedHotkeys[] = {
         "ToggleBorderlessKey=", "EnableFOVHotkeys=", "DecreaseFOVKey=", "IncreaseFOVKey=", "FOVStep=",
@@ -136,9 +135,9 @@ int main() {
                  "generated INI should not expose the removed compiled-info cache");
     ok &= Expect(text.find("без проверки контрольной суммы zlib") != std::string::npos,
                  "generated INI should explain the raw-DEFLATE fallback and its checksum behavior");
-    ok &= Expect(text.find("прогревает файловый кэш Windows") != std::string::npos &&
-                 text.find("заранее распаковывает отмеченные PAK-блоки") != std::string::npos,
-                 "generated INI should explain both archive warming and trace-based PAK pre-decompression");
+    ok &= Expect(text.find("прогревает файловый кэш Windows") == std::string::npos &&
+                 text.find("заранее распаковывает отмеченные PAK-блоки") == std::string::npos,
+                 "generated INI should not describe removed archive caches");
     ok &= Expect(text.find("наивысшим классом производительности Windows") != std::string::npos &&
                  text.find("по одному логическому процессору с каждого ядра") != std::string::npos,
                  "generated INI should explain hybrid-core selection and CPUCores affinity mapping");
@@ -147,9 +146,9 @@ int main() {
                  "generated INI should explain when the scene-node array grows and its capacity steps");
     ok &= Expect(text.find("EnableFlatEntityIndex=") == std::string::npos,
                  "generated INI should not expose the removed flat entity index");
-    ok &= Expect(text.find("EnableLayerRingArena=false") != std::string::npos &&
-                 text.find("полном совпадении сжатого блока") != std::string::npos,
-                 "generated INI should match the shipped arena profile and document exact-match fallback behavior");
+    ok &= Expect(text.find("кольцевой буфер предзагрузки слоев") == std::string::npos &&
+                 text.find("полном совпадении сжатого блока") == std::string::npos,
+                 "generated INI should not describe the removed layer cache");
     ok &= Expect(text.find("EnableGuidMapOptimizer=") == std::string::npos,
                  "generated INI should not expose the removed GUID map optimizer");
     const char* removedNpcOptions[] = {
@@ -172,6 +171,30 @@ int main() {
                  "generated INI should explain the engine FatalError dump limitation");
     ok &= Expect(text.find("SkipRedundantPreLoadActivate=") == std::string::npos,
                  "removed no-op option should not be advertised in the generated INI");
+    ok &= Expect(text.find("[AutoTest]") == std::string::npos,
+                 "generated default INI should not expose developer AutoTest section");
+
+    // Verify AutoTest env overrides beat INI and enforce safe runtime overrides
+    SetEnvironmentVariableA("G3O_AUTOTEST", "1");
+    SetEnvironmentVariableA("G3O_AUTOTEST_SLOT", "QuickSave");
+    SetEnvironmentVariableA("G3O_AUTOTEST_LOADS", "3");
+    SetEnvironmentVariableA("G3O_AUTOTEST_SETTLE_FRAMES", "45");
+    SetEnvironmentVariableA("G3O_AUTOTEST_RUN_ID", "test_run_01");
+    G3O::LoadConfig();
+    const G3O::Config autoCfg = G3O::GetConfig();
+    SetEnvironmentVariableA("G3O_AUTOTEST", nullptr);
+    SetEnvironmentVariableA("G3O_AUTOTEST_SLOT", nullptr);
+    SetEnvironmentVariableA("G3O_AUTOTEST_LOADS", nullptr);
+    SetEnvironmentVariableA("G3O_AUTOTEST_SETTLE_FRAMES", nullptr);
+    SetEnvironmentVariableA("G3O_AUTOTEST_RUN_ID", nullptr);
+    ok &= Expect(autoCfg.autoTestEnabled && autoCfg.autoTestSlot == "QuickSave" &&
+                 autoCfg.autoTestLoads == 3 && autoCfg.autoTestSettleFrames == 45 &&
+                 autoCfg.autoTestRunId == "test_run_01",
+                 "AutoTest env vars should override defaults and INI");
+    ok &= Expect(autoCfg.enableDiagnosticLog && autoCfg.enableSavegameAudit &&
+                 autoCfg.enableCrashInvestigator && autoCfg.writeCrashLog &&
+                 !autoCfg.showCrashDialog && !autoCfg.windowCursorLock && !autoCfg.loadReShade,
+                 "AutoTest should enforce non-blocking runtime overrides");
     DeleteFileA(path.c_str());
 
     if (!ok) return 1;
