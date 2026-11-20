@@ -59,7 +59,7 @@ bool TryFastCStringGetWord(
     void* destination, bool trimLeft, bool trimRight,
     std::int32_t& outOffset) noexcept {
     if (!self || !delimiters || !destination ||
-        !s_bstrSetTextLen || !s_bstrClear || !s_bstrTrimLeft || !s_bstrTrimRight) {
+        !s_bstrSetTextLen || !s_bstrClear) {
         return false;
     }
 

@@ -487,6 +487,7 @@ LONG64 GetSavegameDecompOutBytes() { return s_savegameDecompOutBytes; }
 double GetSavegameDecompTimeMs() { return (double)s_savegameDecompTimeUs / 1000.0; }
 
 void ResetDecompTelemetry() {
+    PakStreamingRing_ResetTelemetry();
     InterlockedExchange(&s_decompCount, 0);
     InterlockedExchange64(&s_decompInBytes, 0);
     InterlockedExchange64(&s_decompOutBytes, 0);

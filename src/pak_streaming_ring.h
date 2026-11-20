@@ -34,5 +34,6 @@ LONG64 PakStreamingRing_GetHits();
 LONG64 PakStreamingRing_GetMisses();
 LONG64 PakStreamingRing_GetProducedBlocks();
 LONG64 PakStreamingRing_GetConsumedBytes();
+void PakStreamingRing_ResetTelemetry();
 
 } // namespace G3O

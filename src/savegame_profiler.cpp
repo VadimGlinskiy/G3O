@@ -1282,9 +1282,19 @@ static BOOL WINAPI Hooked_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD pRead,
     QueryPerformanceCounter(&t1);
 
     const DWORD loadTid = static_cast<DWORD>(InterlockedCompareExchange(&s_loadThreadId, 0, 0));
-    if (result && ov && pRead && *pRead > 0 && s_isLoadActive && (loadTid == 0 || GetCurrentThreadId() == loadTid)) {
-        const uint64_t fileOffset = (static_cast<uint64_t>(ov->OffsetHigh) << 32) | static_cast<uint64_t>(ov->Offset);
-        PakStreamingRing_OnBlockRead(h, fileOffset, *pRead);
+    if (result && pRead && *pRead > 0 && s_isLoadActive && loadTid != 0 && GetCurrentThreadId() == loadTid) {
+        uint64_t fileOffset = 0;
+        if (ov) {
+            fileOffset = (static_cast<uint64_t>(ov->OffsetHigh) << 32) | static_cast<uint64_t>(ov->Offset);
+        } else {
+            LARGE_INTEGER zero = {}, currPos = {};
+            if (SetFilePointerEx(h, zero, &currPos, FILE_CURRENT) && currPos.QuadPart >= *pRead) {
+                fileOffset = static_cast<uint64_t>(currPos.QuadPart - *pRead);
+            }
+        }
+        if (fileOffset > 0) {
+            PakStreamingRing_OnBlockRead(h, fileOffset, *pRead);
+        }
     }
 
     if (cfg.enableSavegameAudit) {

@@ -22,8 +22,8 @@ constexpr uint32_t kSlotCount = 32;
 constexpr uint32_t kSlotCapacity = 2 * 1024 * 1024; // 2 MB per slot (covers >99.5% of blocks)
 constexpr uint32_t kArenaTotalBytes = kSlotCount * kSlotCapacity; // Strictly 64 MB (<= 88 MB safe VAS)
 constexpr uint32_t kDefaultWorkerCount = 4;
-constexpr uint32_t kMaxQueueTasks = 48;
-constexpr size_t   kLookaheadSteps = 12;
+constexpr uint32_t kMaxQueueTasks = 64;
+constexpr size_t   kLookaheadSteps = 16;
 
 enum SlotState : uint32_t {
     SLOT_EMPTY = 0,
@@ -65,8 +65,42 @@ struct LookaheadTask {
 // Global arena & slot state
 static uint8_t* s_arenaBase = nullptr;
 static PakRingSlot s_slots[kSlotCount];
-static std::atomic<uint64_t> s_lastReadOffset{0};
 static std::atomic<uint32_t> s_ringWriteHead{0};
+
+// Per-archive read cursor tracker (lock-free array of 64 entries)
+struct ArchiveReadCursor {
+    std::atomic<uint32_t> hash{0};
+    std::atomic<uint64_t> offset{0};
+};
+static ArchiveReadCursor s_archiveCursors[64];
+
+static uint64_t GetArchiveLastRead(uint32_t archiveHash) {
+    if (archiveHash == 0) return 0;
+    for (size_t i = 0; i < 64; ++i) {
+        if (s_archiveCursors[i].hash.load(std::memory_order_relaxed) == archiveHash) {
+            return s_archiveCursors[i].offset.load(std::memory_order_relaxed);
+        }
+    }
+    return 0;
+}
+
+static void UpdateArchiveLastRead(uint32_t archiveHash, uint64_t offset) {
+    if (archiveHash == 0) return;
+    for (size_t i = 0; i < 64; ++i) {
+        uint32_t h = s_archiveCursors[i].hash.load(std::memory_order_relaxed);
+        if (h == archiveHash) {
+            s_archiveCursors[i].offset.store(offset, std::memory_order_relaxed);
+            return;
+        }
+        if (h == 0) {
+            uint32_t expected = 0;
+            if (s_archiveCursors[i].hash.compare_exchange_strong(expected, archiveHash, std::memory_order_acq_rel)) {
+                s_archiveCursors[i].offset.store(offset, std::memory_order_relaxed);
+                return;
+            }
+        }
+    }
+}
 
 // Performance counter frequency
 static LARGE_INTEGER s_timerFreq = []() {
@@ -84,6 +118,7 @@ static std::unordered_map<std::string, std::shared_ptr<const std::vector<PakBloc
 // Task queue & worker threads
 static std::mutex s_queueMutex;
 static std::condition_variable s_queueCv;
+static std::mutex s_slotMutex;
 static std::condition_variable s_slotCv;
 static std::vector<LookaheadTask> s_taskQueue;
 static std::vector<std::thread> s_workers;
@@ -104,9 +139,9 @@ static uint32_t HashPath(const std::string& str) noexcept {
     return h;
 }
 
-// Claim a slot: prefer empty slots, then stale slots behind read cursor, then rotating head eviction
-static uint32_t ClaimSlotForWorker(uint32_t archiveHash, uint64_t targetOffset) {
-    (void)archiveHash;
+// Claim a slot: prefer empty slots, then stale slots whose archive has progressed past their offset.
+// Never evict useful upcoming blocks from other archives unless allowEviction is explicitly requested.
+static uint32_t ClaimSlotForWorker(uint32_t archiveHash, uint64_t targetOffset, bool allowEviction) {
     (void)targetOffset;
     // 1. Try to find a truly EMPTY slot first
     for (uint32_t i = 0; i < kSlotCount; ++i) {
@@ -117,11 +152,13 @@ static uint32_t ClaimSlotForWorker(uint32_t archiveHash, uint64_t targetOffset) 
         }
     }
 
-    // 2. Try to find an unconsumed slot that is BEHIND the read cursor (already passed by game)
-    const uint64_t lastRead = s_lastReadOffset.load(std::memory_order_relaxed);
+    // 2. Try to find an unconsumed slot whose archive has already progressed past that offset (stale block)
     for (uint32_t i = 0; i < kSlotCount; ++i) {
         if (s_slots[i].state.load(std::memory_order_relaxed) == SLOT_READY) {
-            if (s_slots[i].fileOffset < lastRead) {
+            uint32_t slotArchive = s_slots[i].archiveHash;
+            uint64_t slotOffset = s_slots[i].fileOffset;
+            uint64_t lastRead = GetArchiveLastRead(slotArchive);
+            if (lastRead > 0 && slotOffset < lastRead) {
                 uint32_t expected = SLOT_READY;
                 if (s_slots[i].state.compare_exchange_strong(expected, SLOT_CLAIMED,
                                                             std::memory_order_acq_rel)) {
@@ -132,14 +169,17 @@ static uint32_t ClaimSlotForWorker(uint32_t archiveHash, uint64_t targetOffset) 
         }
     }
 
-    // 3. Fallback: Rotating head eviction of oldest SLOT_READY (ensures ring NEVER starves or deadlocks)
-    for (uint32_t attempt = 0; attempt < kSlotCount; ++attempt) {
-        uint32_t slot = s_ringWriteHead.fetch_add(1, std::memory_order_relaxed) % kSlotCount;
-        uint32_t expected = SLOT_READY;
-        if (s_slots[slot].state.compare_exchange_strong(expected, SLOT_CLAIMED,
-                                                        std::memory_order_acq_rel)) {
-            s_slots[slot].contentKey.store(0, std::memory_order_relaxed);
-            return slot;
+    // 3. Fallback: only if allowEviction is true (after worker has waited with backpressure on s_slotCv),
+    // evict the oldest ready slot via rotating head so workers never deadlock.
+    if (allowEviction) {
+        for (uint32_t attempt = 0; attempt < kSlotCount; ++attempt) {
+            uint32_t slot = s_ringWriteHead.fetch_add(1, std::memory_order_relaxed) % kSlotCount;
+            uint32_t expected = SLOT_READY;
+            if (s_slots[slot].state.compare_exchange_strong(expected, SLOT_CLAIMED,
+                                                            std::memory_order_acq_rel)) {
+                s_slots[slot].contentKey.store(0, std::memory_order_relaxed);
+                return slot;
+            }
         }
     }
 
@@ -261,10 +301,16 @@ void WorkerThreadFunc() {
             s_taskQueue.erase(s_taskQueue.begin());
         }
 
-        // 2. Claim a slot using rotating head and stale eviction
-        uint32_t targetSlot = ClaimSlotForWorker(task.archiveHash, task.fileOffset);
+        // 2. Claim a slot with backpressure flow control (wait up to 20 ms before evicting useful blocks)
+        uint32_t targetSlot = ClaimSlotForWorker(task.archiveHash, task.fileOffset, false);
         if (targetSlot == kSlotCount) {
-            continue;
+            std::unique_lock<std::mutex> slotLock(s_slotMutex);
+            s_slotCv.wait_for(slotLock, std::chrono::milliseconds(20));
+            if (!s_workersRunning.load(std::memory_order_relaxed)) break;
+            targetSlot = ClaimSlotForWorker(task.archiveHash, task.fileOffset, true);
+            if (targetSlot == kSlotCount) {
+                continue;
+            }
         }
 
         // 3. Open or get local handle for this archive
@@ -283,24 +329,20 @@ void WorkerThreadFunc() {
 
         if (hArchive == INVALID_HANDLE_VALUE) {
             s_slots[targetSlot].state.store(SLOT_EMPTY, std::memory_order_release);
-            s_slotCv.notify_one();
+            s_slotCv.notify_all();
             continue;
         }
 
-        // 4. Seek to fileOffset and read compressed block
-        LARGE_INTEGER liOffset;
-        liOffset.QuadPart = task.fileOffset;
-        if (!SetFilePointerEx(hArchive, liOffset, NULL, FILE_BEGIN)) {
-            s_slots[targetSlot].state.store(SLOT_EMPTY, std::memory_order_release);
-            s_slotCv.notify_one();
-            continue;
-        }
+        // 4. Overlapped positional read at task.fileOffset without SetFilePointerEx (single syscall, lock-free file offset)
+        OVERLAPPED ov = {};
+        ov.Offset = static_cast<DWORD>(task.fileOffset & 0xFFFFFFFF);
+        ov.OffsetHigh = static_cast<DWORD>((task.fileOffset >> 32) & 0xFFFFFFFF);
 
         DWORD bytesRead = 0;
-        if (!ReadFile(hArchive, readBuffer, task.compressedSize, &bytesRead, NULL) ||
+        if (!ReadFile(hArchive, readBuffer, task.compressedSize, &bytesRead, &ov) ||
             bytesRead != task.compressedSize) {
             s_slots[targetSlot].state.store(SLOT_EMPTY, std::memory_order_release);
-            s_slotCv.notify_one();
+            s_slotCv.notify_all();
             continue;
         }
 
@@ -392,7 +434,10 @@ bool InitializePakStreamingRing(uint32_t workerCount) {
         s_slots[i].buffer = s_arenaBase + (i * kSlotCapacity);
     }
 
-    s_lastReadOffset.store(0, std::memory_order_relaxed);
+    for (size_t i = 0; i < 64; ++i) {
+        s_archiveCursors[i].hash.store(0, std::memory_order_relaxed);
+        s_archiveCursors[i].offset.store(0, std::memory_order_relaxed);
+    }
     s_ringWriteHead.store(0, std::memory_order_relaxed);
 
     // Start worker threads
@@ -448,11 +493,21 @@ void PakStreamingRing_OnBlockRead(HANDLE hFile, uint64_t fileOffset, uint32_t co
         return;
     }
 
-    s_lastReadOffset.store(fileOffset, std::memory_order_relaxed);
+    // Recursion guard: prevent any nested ReadFile inside PakStreamingRing (e.g. ParseArchiveFat)
+    // from re-entering PakStreamingRing_OnBlockRead and causing lock recursion.
+    static thread_local bool s_inBlockRead = false;
+    if (s_inBlockRead) return;
+    struct BlockReadGuard {
+        bool* flag;
+        BlockReadGuard(bool* f) : flag(f) { *flag = true; }
+        ~BlockReadGuard() { *flag = false; }
+    } recursionGuard(&s_inBlockRead);
 
     std::shared_ptr<const std::vector<PakBlockMeta>> pBlocks;
     std::string archivePath;
     uint32_t archiveHash = 0;
+    bool foundHandle = false;
+
     {
         std::lock_guard<std::mutex> lock(s_archiveMutex);
         auto it = s_archiveHandles.find(hFile);
@@ -460,55 +515,73 @@ void PakStreamingRing_OnBlockRead(HANDLE hFile, uint64_t fileOffset, uint32_t co
             pBlocks = it->second.blocks;
             archivePath = it->second.path;
             archiveHash = it->second.archiveHash;
-        } else {
-            char rawPath[MAX_PATH] = { 0 };
-            DWORD len = GetFinalPathNameByHandleA(hFile, rawPath, sizeof(rawPath), FILE_NAME_NORMALIZED);
-            if (len > 0 && len < sizeof(rawPath)) {
-                const char* actualPath = rawPath;
-                if (std::strncmp(actualPath, "\\\\?\\", 4) == 0) {
-                    actualPath += 4;
-                }
+            foundHandle = true;
+        }
+    }
 
-                const char* dot = std::strrchr(actualPath, '.');
-                if (dot) {
-                    uint32_t hash = HashPath(actualPath);
+    if (!foundHandle) {
+        char rawPath[MAX_PATH] = { 0 };
+        DWORD len = GetFinalPathNameByHandleA(hFile, rawPath, sizeof(rawPath), FILE_NAME_NORMALIZED);
+        if (len > 0 && len < sizeof(rawPath)) {
+            const char* actualPath = rawPath;
+            if (std::strncmp(actualPath, "\\\\?\\", 4) == 0) {
+                actualPath += 4;
+            }
+
+            const char* dot = std::strrchr(actualPath, '.');
+            if (dot) {
+                uint32_t hash = HashPath(actualPath);
+                bool foundPath = false;
+                {
+                    std::lock_guard<std::mutex> lock(s_archiveMutex);
                     auto pathHit = s_archiveBlocksByPath.find(actualPath);
                     if (pathHit != s_archiveBlocksByPath.end()) {
+                        pBlocks = pathHit->second;
+                        archivePath = actualPath;
+                        archiveHash = hash;
                         ArchiveRecord rec;
                         rec.path = actualPath;
                         rec.archiveHash = hash;
                         rec.blocks = pathHit->second;
-                        pBlocks = rec.blocks;
-                        archivePath = rec.path;
-                        archiveHash = hash;
                         s_archiveHandles.emplace(hFile, std::move(rec));
-                    } else {
-                        auto newBlocks = std::make_shared<std::vector<PakBlockMeta>>();
-                        if (ParseArchiveFat(actualPath, *newBlocks)) {
-                            s_archiveBlocksByPath[actualPath] = newBlocks;
-                            ArchiveRecord rec;
-                            rec.path = actualPath;
-                            rec.archiveHash = hash;
-                            rec.blocks = newBlocks;
-                            pBlocks = rec.blocks;
-                            archivePath = rec.path;
-                            archiveHash = hash;
-                            s_archiveHandles.emplace(hFile, std::move(rec));
-                        } else {
-                            // Non-archive file: cache null blocks to skip future GetFinalPathNameByHandleA calls
-                            ArchiveRecord rec;
-                            rec.path = actualPath;
-                            rec.archiveHash = hash;
-                            rec.blocks = nullptr;
-                            s_archiveHandles.emplace(hFile, std::move(rec));
-                        }
+                        foundPath = true;
                     }
                 }
+
+                if (!foundPath) {
+                    // Parse archive FAT outside of s_archiveMutex!
+                    auto newBlocks = std::make_shared<std::vector<PakBlockMeta>>();
+                    bool parsed = ParseArchiveFat(actualPath, *newBlocks);
+
+                    std::lock_guard<std::mutex> lock(s_archiveMutex);
+                    if (parsed) {
+                        s_archiveBlocksByPath[actualPath] = newBlocks;
+                        pBlocks = newBlocks;
+                    } else {
+                        pBlocks = nullptr;
+                    }
+                    ArchiveRecord rec;
+                    rec.path = actualPath;
+                    rec.archiveHash = hash;
+                    rec.blocks = pBlocks;
+                    archivePath = actualPath;
+                    archiveHash = hash;
+                    s_archiveHandles.emplace(hFile, std::move(rec));
+                }
+            } else {
+                std::lock_guard<std::mutex> lock(s_archiveMutex);
+                ArchiveRecord rec;
+                rec.path = actualPath;
+                rec.archiveHash = 0;
+                rec.blocks = nullptr;
+                s_archiveHandles.emplace(hFile, std::move(rec));
             }
         }
     }
 
     if (!pBlocks || pBlocks->empty()) return;
+
+    UpdateArchiveLastRead(archiveHash, fileOffset);
 
     // Locate current block in sorted metadata
     auto it = std::lower_bound(pBlocks->begin(), pBlocks->end(), fileOffset,
@@ -634,9 +707,19 @@ void PakStreamingRing_ResetLoadState() {
         s_slots[i].actualOut = 0;
         s_slots[i].state.store(SLOT_EMPTY, std::memory_order_release);
     }
-    s_lastReadOffset.store(0, std::memory_order_relaxed);
+    for (size_t i = 0; i < 64; ++i) {
+        s_archiveCursors[i].hash.store(0, std::memory_order_relaxed);
+        s_archiveCursors[i].offset.store(0, std::memory_order_relaxed);
+    }
     s_ringWriteHead.store(0, std::memory_order_relaxed);
     s_slotCv.notify_all();
+}
+
+void PakStreamingRing_ResetTelemetry() {
+    InterlockedExchange64(&s_hits, 0);
+    InterlockedExchange64(&s_misses, 0);
+    InterlockedExchange64(&s_producedBlocks, 0);
+    InterlockedExchange64(&s_consumedBytes, 0);
 }
 
 LONG64 PakStreamingRing_GetHits() { return s_hits; }
